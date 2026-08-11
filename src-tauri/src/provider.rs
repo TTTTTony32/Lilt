@@ -1,0 +1,442 @@
+use crate::{
+    contracts::{ModelInfo, TranslationDelta},
+    diagnostics,
+};
+use futures_util::StreamExt;
+use reqwest::{Client, StatusCode};
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
+use thiserror::Error;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSLATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Error)]
+pub enum ProviderError {
+    #[error("Provider 地址无效：{0}")]
+    InvalidConfig(String),
+    #[error("Provider 认证失败，请检查 API Key")]
+    Authentication,
+    #[error("Provider 请求受到限流，请稍后重试")]
+    RateLimited,
+    #[error("Provider 暂时不可用：{0}")]
+    Server(String),
+    #[error("Provider 网络请求失败：{0}")]
+    Network(String),
+    #[error("Provider 请求超时：{0}")]
+    Timeout(String),
+    #[error("Provider 返回格式无法识别：{0}")]
+    Protocol(String),
+    #[error("翻译已取消")]
+    Cancelled,
+    #[error("桌面事件发送失败：{0}")]
+    Event(String),
+}
+
+impl ProviderError {
+    fn retryable(&self) -> bool {
+        matches!(self, Self::Network(_) | Self::Server(_) | Self::Protocol(_))
+    }
+}
+
+pub struct StreamRequest<'a> {
+    pub app: &'a AppHandle,
+    pub request_id: &'a str,
+    pub base_url: &'a str,
+    pub api_key: &'a str,
+    pub model_id: &'a str,
+    pub system_prompt: &'a str,
+    pub user_text: &'a str,
+    pub cancel: &'a CancellationToken,
+}
+
+pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>, ProviderError> {
+    let endpoint = endpoint(base_url, "models")?;
+    let started_at = Instant::now();
+    diagnostics::info(format!(
+        "provider.fetch_models.start method=GET origin={} route=/models",
+        safe_endpoint_origin(&endpoint)
+    ));
+    let response = client()
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .timeout(MODEL_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| request_error("模型列表", error))?;
+    diagnostics::info(format!(
+        "provider.fetch_models.response status={} elapsed_ms={}",
+        response.status(),
+        started_at.elapsed().as_millis()
+    ));
+    ensure_success(&response)?;
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| ProviderError::Protocol(error.to_string()))?;
+    let models = parse_model_payload(&payload)?;
+    diagnostics::info(format!(
+        "provider.fetch_models.parsed model_count={} elapsed_ms={}",
+        models.len(),
+        started_at.elapsed().as_millis()
+    ));
+    Ok(models)
+}
+
+fn parse_model_payload(payload: &Value) -> Result<Vec<ModelInfo>, ProviderError> {
+    let data = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ProviderError::Protocol("/models 响应缺少 data 数组".to_string()))?;
+    let models = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| ModelInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            source: "remote".to_string(),
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err(ProviderError::Protocol(
+            "/models 响应没有可用模型".to_string(),
+        ));
+    }
+    Ok(models)
+}
+
+pub async fn translate_stream(request: StreamRequest<'_>) -> Result<String, ProviderError> {
+    let endpoint = endpoint(request.base_url, "chat/completions")?;
+    let mut attempt = 0;
+    loop {
+        let mut started = false;
+        diagnostics::info(format!(
+            "provider.translate.start request_id={} attempt={} origin={} route=/chat/completions model={}",
+            request.request_id,
+            attempt,
+            safe_endpoint_origin(&endpoint),
+            request.model_id
+        ));
+        match stream_once(&request, &endpoint, &mut started).await {
+            Ok(content) => {
+                diagnostics::info(format!(
+                    "provider.translate.completed request_id={} attempt={} output_chars={}",
+                    request.request_id,
+                    attempt,
+                    content.chars().count()
+                ));
+                return Ok(content);
+            }
+            Err(error) if !started && attempt == 0 && error.retryable() => {
+                diagnostics::warn(format!(
+                    "provider.translate.retry request_id={} reason={error}",
+                    request.request_id
+                ));
+                attempt += 1;
+            }
+            Err(error) => {
+                diagnostics::error(format!(
+                    "provider.translate.failed request_id={} started={} reason={error}",
+                    request.request_id, started
+                ));
+                return Err(error);
+            }
+        }
+    }
+}
+
+async fn stream_once(
+    request: &StreamRequest<'_>,
+    endpoint: &str,
+    started: &mut bool,
+) -> Result<String, ProviderError> {
+    if request.cancel.is_cancelled() {
+        return Err(ProviderError::Cancelled);
+    }
+    let response = tokio::select! {
+        _ = request.cancel.cancelled() => return Err(ProviderError::Cancelled),
+        result = client()
+            .post(endpoint)
+            .bearer_auth(request.api_key)
+            .header("Accept", "text/event-stream")
+            .timeout(TRANSLATION_REQUEST_TIMEOUT)
+            .json(&json!({
+                "model": request.model_id,
+                "stream": true,
+                "messages": [
+                    { "role": "system", "content": request.system_prompt },
+                    { "role": "user", "content": request.user_text }
+                ]
+            }))
+            .send() => result.map_err(|error| request_error("翻译", error))?,
+    };
+    diagnostics::info(format!(
+        "provider.translate.response request_id={} status={}",
+        request.request_id,
+        response.status()
+    ));
+    ensure_success(&response)?;
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut translated = String::new();
+    loop {
+        let chunk = tokio::select! {
+            _ = request.cancel.cancelled() => return Err(ProviderError::Cancelled),
+            chunk = timeout(STREAM_IDLE_TIMEOUT, stream.next()) => {
+                chunk.map_err(|_| ProviderError::Timeout("流式响应空闲".to_string()))?
+            },
+        };
+        let Some(chunk) = chunk else { break };
+        let bytes = chunk.map_err(|error| ProviderError::Network(error.to_string()))?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(position) = buffer.find('\n') {
+            let line = buffer[..position].trim_end_matches('\r').to_string();
+            buffer.drain(..=position);
+            if let Some(content) = parse_sse_line(&line)? {
+                if content.is_empty() {
+                    continue;
+                }
+                *started = true;
+                translated.push_str(&content);
+                request
+                    .app
+                    .emit(
+                        "translation_delta",
+                        TranslationDelta {
+                            request_id: request.request_id.to_string(),
+                            content,
+                        },
+                    )
+                    .map_err(|error| ProviderError::Event(error.to_string()))?;
+            }
+        }
+    }
+    if !buffer.trim().is_empty() {
+        if let Some(content) = parse_sse_line(buffer.trim())? {
+            if !content.is_empty() {
+                *started = true;
+                translated.push_str(&content);
+                request
+                    .app
+                    .emit(
+                        "translation_delta",
+                        TranslationDelta {
+                            request_id: request.request_id.to_string(),
+                            content,
+                        },
+                    )
+                    .map_err(|error| ProviderError::Event(error.to_string()))?;
+            }
+        }
+    }
+    if translated.is_empty() {
+        return Err(ProviderError::Protocol("流式响应没有返回译文".to_string()));
+    }
+    Ok(translated)
+}
+
+fn parse_sse_line(line: &str) -> Result<Option<String>, ProviderError> {
+    let Some(payload) = line.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|error| ProviderError::Protocol(format!("JSON 解析失败：{error}")))?;
+    let content = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")))
+        .and_then(|delta| delta.get("content"));
+    match content {
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::Array(parts)) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>();
+            Ok(Some(text))
+        }
+        Some(_) => Ok(None),
+        None => Ok(None),
+    }
+}
+
+fn client() -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(180))
+        .build()
+        .expect("reqwest client configuration is static")
+}
+
+fn request_error(operation: &str, error: reqwest::Error) -> ProviderError {
+    if error.is_timeout() {
+        ProviderError::Timeout(format!("{operation}请求"))
+    } else {
+        ProviderError::Network(format!("{operation}请求：{error}"))
+    }
+}
+
+fn endpoint(base_url: &str, path: &str) -> Result<String, ProviderError> {
+    let normalized = normalize_base_url(base_url)?;
+    Ok(format!("{normalized}/{path}"))
+}
+
+pub fn safe_endpoint_origin(endpoint: &str) -> String {
+    let Ok(parsed) = Url::parse(endpoint) else {
+        return "<invalid>".to_string();
+    };
+    let host = parsed.host_str().unwrap_or("<unknown>");
+    let port = parsed
+        .port()
+        .map(|value| format!(":{value}"))
+        .unwrap_or_default();
+    format!("{}://{host}{port}", parsed.scheme())
+}
+
+pub fn normalize_base_url(base_url: &str) -> Result<String, ProviderError> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(ProviderError::InvalidConfig(
+            "Base URL 不能为空".to_string(),
+        ));
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(ProviderError::InvalidConfig(
+            "Base URL 必须使用 http 或 https".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ProviderError::InvalidConfig(
+            "Base URL 不应包含账号、密码、查询参数或片段".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn ensure_success(response: &reqwest::Response) -> Result<(), ProviderError> {
+    match response.status() {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(ProviderError::Authentication),
+        StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited),
+        status if status.is_server_error() => Err(ProviderError::Server(status.to_string())),
+        status if !status.is_success() => Err(ProviderError::Protocol(format!("HTTP {status}"))),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_base_url, parse_model_payload, parse_sse_line, ProviderError};
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn normalizes_provider_base_url() {
+        assert_eq!(
+            normalize_base_url(" https://example.com/v1/// ").unwrap(),
+            "https://example.com/v1"
+        );
+    }
+
+    #[test]
+    fn rejects_non_http_provider_url() {
+        assert!(matches!(
+            normalize_base_url("file:///tmp/provider"),
+            Err(ProviderError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_provider_url_with_query_parameters() {
+        assert!(matches!(
+            normalize_base_url("https://example.com/v1?api_key=secret"),
+            Err(ProviderError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn endpoint_logs_only_origin_without_path_or_query() {
+        assert_eq!(
+            super::safe_endpoint_origin("https://example.com/private-token/v1/models"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn parses_non_empty_model_ids_only() {
+        let models = parse_model_payload(&json!({
+            "data": [{"id": " model-a "}, {"id": ""}, {"name": "missing-id"}]
+        }))
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "model-a");
+    }
+
+    #[test]
+    fn rejects_model_payload_without_data_array() {
+        assert!(matches!(
+            parse_model_payload(&json!({"models": []})),
+            Err(ProviderError::Protocol(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetches_models_from_a_mock_provider() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]).to_lowercase();
+            assert!(request.starts_with("get /v1/models"));
+            assert!(request.contains("authorization: bearer test-key"));
+            let body = r#"{"data":[{"id":"mock-model"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let models = super::fetch_models(&format!("http://{address}/v1"), "test-key")
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(models[0].id, "mock-model");
+    }
+
+    #[test]
+    fn parses_openai_stream_delta() {
+        assert_eq!(
+            parse_sse_line(r#"data: {"choices":[{"delta":{"content":"你好"}}]}"#).unwrap(),
+            Some("你好".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_done_marker_as_no_content() {
+        assert_eq!(parse_sse_line("data: [DONE]").unwrap(), None);
+    }
+}
