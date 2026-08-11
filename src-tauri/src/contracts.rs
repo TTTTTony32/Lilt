@@ -132,6 +132,52 @@ pub struct TranslationFailed {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TranslationOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationCommandResult {
+    pub outcome: TranslationOutcome,
+    pub content: Option<String>,
+    pub cache_hit: bool,
+    pub message: Option<String>,
+}
+
+impl TranslationCommandResult {
+    pub fn completed(content: impl Into<String>, cache_hit: bool) -> Self {
+        Self {
+            outcome: TranslationOutcome::Completed,
+            content: Some(content.into()),
+            cache_hit,
+            message: None,
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self {
+            outcome: TranslationOutcome::Cancelled,
+            content: None,
+            cache_hit: false,
+            message: None,
+        }
+    }
+
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            outcome: TranslationOutcome::Failed,
+            content: None,
+            cache_hit: false,
+            message: Some(message.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderRecord {
     pub id: String,
@@ -144,4 +190,50 @@ pub struct ProviderRecord {
 #[derive(Debug, Clone)]
 pub struct CachedTranslation {
     pub translated_text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TranslationCommandResult, TranslationOutcome};
+
+    #[test]
+    fn command_result_constructors_keep_terminal_fields_consistent() {
+        assert_eq!(
+            TranslationCommandResult::completed("译文", true),
+            TranslationCommandResult {
+                outcome: TranslationOutcome::Completed,
+                content: Some("译文".to_string()),
+                cache_hit: true,
+                message: None,
+            }
+        );
+        assert_eq!(
+            TranslationCommandResult::cancelled(),
+            TranslationCommandResult {
+                outcome: TranslationOutcome::Cancelled,
+                content: None,
+                cache_hit: false,
+                message: None,
+            }
+        );
+        assert_eq!(
+            TranslationCommandResult::failed("请求失败"),
+            TranslationCommandResult {
+                outcome: TranslationOutcome::Failed,
+                content: None,
+                cache_hit: false,
+                message: Some("请求失败".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn command_result_serializes_to_frontend_contract() {
+        let value =
+            serde_json::to_value(TranslationCommandResult::completed("译文", true)).unwrap();
+        assert_eq!(value["outcome"], "completed");
+        assert_eq!(value["content"], "译文");
+        assert_eq!(value["cacheHit"], true);
+        assert_eq!(value["message"], serde_json::Value::Null);
+    }
 }

@@ -6,8 +6,8 @@ mod secrets;
 
 use contracts::{
     AppSnapshot, GlossaryTerm, ModelInfo, Prompt, ProviderConfig, TranslationCancelled,
-    TranslationCompleted, TranslationFailed, TranslationRequest, TranslationStarted,
-    DEFAULT_PROVIDER_ID,
+    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
+    TranslationStarted, DEFAULT_PROVIDER_ID,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -235,7 +235,7 @@ async fn translate(
     app: AppHandle,
     state: State<'_, AppState>,
     request: TranslationRequest,
-) -> Result<(), String> {
+) -> Result<TranslationCommandResult, String> {
     translate_impl(app, state.inner().clone(), request).await
 }
 
@@ -243,7 +243,7 @@ async fn translate_impl(
     app: AppHandle,
     state: AppState,
     request: TranslationRequest,
-) -> Result<(), String> {
+) -> Result<TranslationCommandResult, String> {
     let request_id = if request.request_id.trim().is_empty() {
         Uuid::new_v4().to_string()
     } else {
@@ -264,14 +264,6 @@ async fn translate_impl(
         request.target_language,
         request.model_id
     ));
-    app.emit(
-        "translation_started",
-        TranslationStarted {
-            request_id: request_id.clone(),
-        },
-    )
-    .map_err(|error| format!("发送翻译状态失败：{error}"))?;
-
     let cancellation = CancellationToken::new();
     {
         let mut cancellations = state
@@ -279,6 +271,15 @@ async fn translate_impl(
             .lock()
             .map_err(|_| "取消状态锁已损坏".to_string())?;
         cancellations.insert(request_id.clone(), cancellation.clone());
+    }
+    if let Err(error) = app.emit(
+        "translation_started",
+        TranslationStarted {
+            request_id: request_id.clone(),
+        },
+    ) {
+        unregister_request(&state, &request_id);
+        return Err(format!("发送翻译状态失败：{error}"));
     }
 
     let preparation = prepare_translation(&state, &request, &source_text);
@@ -300,7 +301,17 @@ async fn translate_impl(
                 .database
                 .lock()
                 .map_err(|_| "应用数据库锁已损坏".to_string())?;
-            db::find_cache(&connection, &prepared.cache_key)?
+            match db::find_cache(&connection, &prepared.cache_key) {
+                Ok(value) => value,
+                Err(error) => {
+                    diagnostics::error(format!(
+                        "command.translate.cache_lookup_failed request_id={} reason={error}",
+                        request_id
+                    ));
+                    unregister_request(&state, &request_id);
+                    return emit_failed(&app, &request_id, &error);
+                }
+            }
         };
         if let Some(cached) = cached {
             diagnostics::info(format!(
@@ -326,12 +337,19 @@ async fn translate_impl(
                     .and_then(|_| db::prune_history(&connection, prepared.history_retention))
             };
             unregister_request(&state, &request_id);
-            persist?;
+            if let Err(error) = persist {
+                diagnostics::error(format!(
+                    "command.translate.persistence_failed request_id={} reason={error}",
+                    request_id
+                ));
+                return emit_failed(&app, &request_id, &error);
+            }
+            let content = cached.translated_text;
             app.emit(
                 "translation_completed",
                 TranslationCompleted {
                     request_id: request_id.clone(),
-                    content: cached.translated_text,
+                    content: content.clone(),
                     cache_hit: true,
                 },
             )
@@ -340,7 +358,7 @@ async fn translate_impl(
                 "command.translate.completed request_id={} cache_hit=true",
                 request_id
             ));
-            return Ok(());
+            return Ok(TranslationCommandResult::completed(content, true));
         }
         diagnostics::info(format!(
             "command.translate.cache_miss request_id={}",
@@ -398,7 +416,7 @@ async fn translate_impl(
             ));
             app.emit("translation_cancelled", TranslationCancelled { request_id })
                 .map_err(|error| format!("发送取消状态失败：{error}"))?;
-            return Ok(());
+            return Ok(TranslationCommandResult::cancelled());
         }
         Err(error) => {
             diagnostics::error(format!(
@@ -414,7 +432,7 @@ async fn translate_impl(
             .database
             .lock()
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
-        if prepared.cache_enabled {
+        let cache_result = if prepared.cache_enabled {
             let cache = db::CacheRecord {
                 cache_key: &prepared.cache_key,
                 source_text: &source_text,
@@ -425,21 +443,25 @@ async fn translate_impl(
                 prompt_id: &prepared.prompt.id,
                 glossary_version: prepared.glossary_version,
             };
-            db::save_cache(&connection, &cache)?;
-            db::prune_cache(&connection, prepared.cache_max_bytes)?;
-        }
-        let history = db::HistoryRecord {
-            source_text: &source_text,
-            translated_text: &translated,
-            source_language: &request.source_language,
-            target_language: &request.target_language,
-            provider: &prepared.provider,
-            prompt_id: &prepared.prompt.id,
-            glossary_version: prepared.glossary_version,
-            cache_hit: false,
+            db::save_cache(&connection, &cache)
+                .and_then(|_| db::prune_cache(&connection, prepared.cache_max_bytes))
+        } else {
+            Ok(())
         };
-        db::insert_history(&connection, &history)?;
-        db::prune_history(&connection, prepared.history_retention)
+        cache_result.and_then(|_| {
+            let history = db::HistoryRecord {
+                source_text: &source_text,
+                translated_text: &translated,
+                source_language: &request.source_language,
+                target_language: &request.target_language,
+                provider: &prepared.provider,
+                prompt_id: &prepared.prompt.id,
+                glossary_version: prepared.glossary_version,
+                cache_hit: false,
+            };
+            db::insert_history(&connection, &history)
+                .and_then(|_| db::prune_history(&connection, prepared.history_retention))
+        })
     };
     if let Err(error) = persistence {
         diagnostics::error(format!(
@@ -448,12 +470,13 @@ async fn translate_impl(
         ));
         return emit_failed(&app, &request_id, &error);
     }
-    let output_chars = translated.chars().count();
+    let content = translated;
+    let output_chars = content.chars().count();
     app.emit(
         "translation_completed",
         TranslationCompleted {
             request_id: request_id.clone(),
-            content: translated,
+            content: content.clone(),
             cache_hit: false,
         },
     )
@@ -462,7 +485,7 @@ async fn translate_impl(
         "command.translate.completed request_id={} cache_hit=false output_chars={}",
         request_id, output_chars
     ));
-    Ok(())
+    Ok(TranslationCommandResult::completed(content, false))
 }
 
 struct PreparedTranslation {
@@ -575,15 +598,9 @@ fn make_cache_key(input: &CacheKeyInput<'_>) -> String {
 }
 
 #[tauri::command]
-fn cancel_translation(state: State<'_, AppState>, request_id: String) -> Result<(), String> {
-    let cancellation = state
-        .cancellations
-        .lock()
-        .map_err(|_| "取消状态锁已损坏".to_string())?
-        .get(&request_id)
-        .cloned();
-    if let Some(token) = cancellation {
-        token.cancel();
+fn cancel_translation(state: State<'_, AppState>, request_id: String) -> Result<bool, String> {
+    let still_active = cancel_request(state.inner(), &request_id)?;
+    if still_active {
         diagnostics::info(format!(
             "command.translate.cancel_requested request_id={request_id}"
         ));
@@ -592,7 +609,22 @@ fn cancel_translation(state: State<'_, AppState>, request_id: String) -> Result<
             "command.translate.cancel_missing request_id={request_id}"
         ));
     }
-    Ok(())
+    Ok(still_active)
+}
+
+fn cancel_request(state: &AppState, request_id: &str) -> Result<bool, String> {
+    let cancellation = state
+        .cancellations
+        .lock()
+        .map_err(|_| "取消状态锁已损坏".to_string())?
+        .get(request_id)
+        .cloned();
+    if let Some(token) = cancellation {
+        token.cancel();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -629,7 +661,11 @@ fn unregister_request(state: &AppState, request_id: &str) {
     }
 }
 
-fn emit_failed(app: &AppHandle, request_id: &str, message: &str) -> Result<(), String> {
+fn emit_failed(
+    app: &AppHandle,
+    request_id: &str,
+    message: &str,
+) -> Result<TranslationCommandResult, String> {
     diagnostics::error(format!(
         "command.translate.failed request_id={} reason={message}",
         request_id
@@ -642,13 +678,18 @@ fn emit_failed(app: &AppHandle, request_id: &str, message: &str) -> Result<(), S
         },
     )
     .map_err(|error| format!("发送翻译错误失败：{error}"))?;
-    Ok(())
+    Ok(TranslationCommandResult::failed(message))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_prompt, make_cache_key, CacheKeyInput};
+    use super::{
+        build_system_prompt, cancel_request, make_cache_key, unregister_request, AppState,
+        CacheKeyInput,
+    };
     use crate::contracts::GlossaryTerm;
+    use rusqlite::Connection;
+    use tokio_util::sync::CancellationToken;
 
     fn test_cache_key(source_text: &str) -> String {
         make_cache_key(&CacheKeyInput {
@@ -696,5 +737,22 @@ mod tests {
         let prompt = build_system_prompt("base", &terms, "An embedding model");
         assert!(prompt.contains("embedding：嵌入"));
         assert!(!prompt.contains("不应出现"));
+    }
+
+    #[test]
+    fn cancel_request_reports_active_token_and_cancels_it() {
+        let state = AppState::new(Connection::open_in_memory().unwrap());
+        let token = CancellationToken::new();
+        state
+            .cancellations
+            .lock()
+            .unwrap()
+            .insert("active".to_string(), token.clone());
+
+        assert!(cancel_request(&state, "active").unwrap());
+        assert!(token.is_cancelled());
+
+        unregister_request(&state, "active");
+        assert!(!cancel_request(&state, "active").unwrap());
     }
 }

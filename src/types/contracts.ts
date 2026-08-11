@@ -103,6 +103,15 @@ export type TranslationEvent =
   | TranslationEventCancelled
   | TranslationEventFailed;
 
+export type TranslationOutcome = "completed" | "cancelled" | "failed";
+
+export interface TranslationCommandResult {
+  outcome: TranslationOutcome;
+  content: string | null;
+  cacheHit: boolean;
+  message: string | null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -123,9 +132,10 @@ export function decodeTranslationEvent(name: string, value: unknown): Translatio
   }
   if (name === "translation_completed") {
     const content = stringValue(value.content);
+    if (typeof value.cacheHit !== "boolean") return null;
     return content === null
       ? null
-      : { type: "completed", requestId, content, cacheHit: value.cacheHit === true };
+      : { type: "completed", requestId, content, cacheHit: value.cacheHit };
   }
   if (name === "translation_cancelled") return { type: "cancelled", requestId };
   if (name === "translation_failed") {
@@ -133,6 +143,30 @@ export function decodeTranslationEvent(name: string, value: unknown): Translatio
     return message === null ? null : { type: "failed", requestId, message };
   }
   return null;
+}
+
+export function decodeTranslationCommandResult(value: unknown): TranslationCommandResult | null {
+  if (!isRecord(value)) return null;
+
+  const outcome = value.outcome;
+  if (outcome !== "completed" && outcome !== "cancelled" && outcome !== "failed") return null;
+
+  if (typeof value.cacheHit !== "boolean") return null;
+
+  const content = value.content === null || value.content === undefined
+    ? null
+    : stringValue(value.content);
+  if (content === null && value.content !== null && value.content !== undefined) return null;
+
+  const message = value.message === null || value.message === undefined
+    ? null
+    : stringValue(value.message);
+  if (message === null && value.message !== null && value.message !== undefined) return null;
+
+  if (outcome === "completed" && content === null) return null;
+  if (outcome === "failed" && message === null) return null;
+
+  return { outcome, content, cacheHit: value.cacheHit, message };
 }
 
 export const DEFAULT_SNAPSHOT: AppSnapshot = {

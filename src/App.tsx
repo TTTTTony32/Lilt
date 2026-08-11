@@ -10,8 +10,10 @@ import {
   type GlossaryTerm,
   type HistoryEntry,
   type ModelInfo,
+  type TranslationCommandResult,
   type TranslationEvent,
   type TranslationStatus,
+  decodeTranslationCommandResult,
   decodeTranslationEvent,
 } from "./types/contracts";
 
@@ -57,6 +59,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [lastCacheHit, setLastCacheHit] = useState(false);
+  const [translationEventsReady, setTranslationEventsReady] = useState(false);
+  const [translationEventsError, setTranslationEventsError] = useState<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
 
   const refreshSnapshot = useCallback(async () => {
@@ -72,6 +76,28 @@ function App() {
     void refreshSnapshot();
   }, [refreshSnapshot]);
 
+  const applyTranslationResult = useCallback((requestId: string, result: TranslationCommandResult) => {
+    if (requestId !== activeRequestId.current) return;
+    activeRequestId.current = null;
+    switch (result.outcome) {
+      case "completed":
+        setTranslatedText(result.content ?? "");
+        setLastCacheHit(result.cacheHit);
+        setError(null);
+        setStatus("completed");
+        void refreshSnapshot();
+        break;
+      case "cancelled":
+        setError(null);
+        setStatus("idle");
+        break;
+      case "failed":
+        setError(result.message ?? "翻译请求失败");
+        setStatus("failed");
+        break;
+    }
+  }, [refreshSnapshot]);
+
   const handleEvent = useCallback((event: TranslationEvent) => {
     if (event.requestId !== activeRequestId.current) return;
     switch (event.type) {
@@ -82,36 +108,67 @@ function App() {
         setTranslatedText((current) => current + event.content);
         break;
       case "completed":
-        setTranslatedText(event.content);
-        setLastCacheHit(event.cacheHit);
-        setStatus("completed");
-        void refreshSnapshot();
+        applyTranslationResult(event.requestId, {
+          outcome: "completed",
+          content: event.content,
+          cacheHit: event.cacheHit,
+          message: null,
+        });
         break;
       case "cancelled":
-        setStatus("idle");
+        applyTranslationResult(event.requestId, {
+          outcome: "cancelled",
+          content: null,
+          cacheHit: false,
+          message: null,
+        });
         break;
       case "failed":
-        setError(event.message);
-        setStatus("failed");
+        applyTranslationResult(event.requestId, {
+          outcome: "failed",
+          content: null,
+          cacheHit: false,
+          message: event.message,
+        });
         break;
     }
-  }, [refreshSnapshot]);
+  }, [applyTranslationResult]);
 
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    void Promise.all(EVENT_NAMES.map(async (name) => {
-      const unlisten = await listenTo<unknown>(name, (payload) => {
-        if (disposed) return;
-        const event = decodeTranslationEvent(name, payload);
-        if (event) handleEvent(event);
-      });
-      if (disposed) unlisten();
-      else unlisteners.push(unlisten);
-    }));
+    setTranslationEventsReady(false);
+    setTranslationEventsError(null);
+
+    const initialiseListeners = async () => {
+      const results = await Promise.allSettled(EVENT_NAMES.map(async (name) => {
+        return listenTo<unknown>(name, (payload) => {
+          if (disposed) return;
+          const event = decodeTranslationEvent(name, payload);
+          if (event) handleEvent(event);
+        });
+      }));
+
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        if (disposed) result.value();
+        else unlisteners.push(result.value);
+      }
+      if (disposed) return;
+
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") {
+        unlisteners.splice(0).forEach((unlisten) => unlisten());
+        setTranslationEventsError(describeError(failure.reason, "翻译事件监听初始化失败，请重试。"));
+        return;
+      }
+      setTranslationEventsReady(true);
+    };
+
+    void initialiseListeners();
     return () => {
       disposed = true;
-      unlisteners.forEach((unlisten) => unlisten());
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
     };
   }, [handleEvent]);
 
@@ -121,6 +178,10 @@ function App() {
   }, [snapshot.models, snapshot.provider.modelId]);
 
   const handleTranslate = async () => {
+    if (!translationEventsReady) {
+      setError(translationEventsError ?? "翻译事件监听尚未就绪，请稍后再试。");
+      return;
+    }
     const text = sourceText.trim();
     if (!text) {
       setError("请先输入需要翻译的段落。");
@@ -134,7 +195,7 @@ function App() {
     setLastCacheHit(false);
     setStatus("streaming");
     try {
-      await invokeCommand("translate", {
+      const rawResult = await invokeCommand<unknown>("translate", {
         request: {
           requestId,
           sourceText: text,
@@ -144,7 +205,18 @@ function App() {
           promptId: snapshot.provider.promptId,
         },
       });
+      if (activeRequestId.current !== requestId) return;
+      const result = decodeTranslationCommandResult(rawResult);
+      if (!result) {
+        activeRequestId.current = null;
+        setError("翻译命令返回了无法识别的终态。");
+        setStatus("failed");
+        return;
+      }
+      applyTranslationResult(requestId, result);
     } catch (reason) {
+      if (activeRequestId.current !== requestId) return;
+      activeRequestId.current = null;
       setError(describeError(reason, "翻译请求失败"));
       setStatus("failed");
     }
@@ -155,9 +227,21 @@ function App() {
     if (!requestId) return;
     setStatus("cancelling");
     try {
-      await invokeCommand("cancel_translation", { requestId });
+      const result = await invokeCommand<unknown>("cancel_translation", { requestId });
+      if (activeRequestId.current !== requestId) return;
+      if (typeof result !== "boolean") {
+        setError("取消命令返回了无法识别的状态。");
+        setStatus("streaming");
+        return;
+      }
+      if (!result) {
+        setError(null);
+        setStatus("idle");
+      }
     } catch (reason) {
+      if (activeRequestId.current !== requestId) return;
       setError(describeError(reason, "取消请求失败"));
+      setStatus("streaming");
     }
   };
 
@@ -213,9 +297,10 @@ function App() {
               targetLanguage={targetLanguage}
               selectedModel={selectedModel}
               status={status}
-              error={error}
+              error={error ?? translationEventsError}
               notice={notice}
               cacheHit={lastCacheHit}
+              eventsReady={translationEventsReady}
               onSourceTextChange={setSourceText}
               onSourceLanguageChange={setSourceLanguage}
               onTargetLanguageChange={setTargetLanguage}
@@ -254,6 +339,7 @@ interface TranslateViewProps {
   error: string | null;
   notice: string | null;
   cacheHit: boolean;
+  eventsReady: boolean;
   onSourceTextChange: (value: string) => void;
   onSourceLanguageChange: (value: string) => void;
   onTargetLanguageChange: (value: string) => void;
@@ -321,7 +407,7 @@ function TranslateView(props: TranslateViewProps) {
             {props.status === "cancelling" ? "正在取消" : "取消翻译"}
           </button>
         ) : (
-          <button className="primary-button" type="button" onClick={props.onTranslate}>
+          <button className="primary-button" type="button" onClick={props.onTranslate} disabled={!props.eventsReady}>
             <WandSparkles size={16} />
             开始翻译
           </button>
