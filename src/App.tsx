@@ -20,6 +20,7 @@ import {
 import {
   decodeDictionaryCommandResult,
   decodeDictionaryUpdateEvent,
+  type DictionaryHistoryEntry,
   DICTIONARY_EVENT_NAMES,
   type DictionaryUpdateEvent,
 } from "./types/dictionary";
@@ -80,6 +81,10 @@ function App() {
     } catch (reason) {
       setError(describeError(reason, "无法读取应用配置"));
     }
+  }, []);
+
+  const handleDictionaryHistoryChanged = useCallback((history: DictionaryHistoryEntry[]) => {
+    setSnapshot((current) => ({ ...current, dictionaryHistory: history }));
   }, []);
 
   useEffect(() => {
@@ -444,6 +449,7 @@ function App() {
               history={snapshot.dictionaryHistory}
               progress={dictionaryProgress}
               onUpdate={handleDictionaryUpdate}
+              onHistoryChanged={handleDictionaryHistoryChanged}
               onSnapshotChanged={refreshSnapshot}
             />
           )}

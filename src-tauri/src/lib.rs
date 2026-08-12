@@ -6,10 +6,10 @@ mod provider;
 mod secrets;
 
 use contracts::{
-    AppSnapshot, DictionaryCommandResult, DictionaryState, GlossaryTerm, ModelInfo, Prompt,
-    ProviderConfig, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
-    TranslationFailed, TranslationRequest, TranslationStarted, DEFAULT_PROVIDER_ID,
-    DICTIONARY_HISTORY_LIMIT,
+    AppSnapshot, DictionaryCommandResult, DictionaryLookupCommandResult, DictionaryState,
+    GlossaryTerm, ModelInfo, Prompt, ProviderConfig, TranslationCancelled,
+    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
+    TranslationStarted, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -18,6 +18,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
@@ -29,15 +30,31 @@ pub struct AppState {
     pub(crate) cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
     pub(crate) data_dir: Arc<PathBuf>,
     pub(crate) dictionary_update: Arc<Mutex<Option<String>>>,
+    pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
 }
 
 impl AppState {
     fn new(connection: Connection, data_dir: PathBuf) -> Self {
+        let mut dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
+        match dictionary_store.open_and_validate() {
+            Ok(metadata) => diagnostics::info(format!(
+                "dictionary.store.ready entry_count={} source=startup",
+                metadata.entry_count
+            )),
+            Err(dictionary::DictionaryError::NotInstalled) => {
+                diagnostics::info("dictionary.store.not_installed source=startup");
+            }
+            Err(error) => diagnostics::error(format!(
+                "dictionary.store.failed source=startup error_kind={} reason={error}",
+                error.kind()
+            )),
+        }
         Self {
             database: Arc::new(Mutex::new(connection)),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             data_dir: Arc::new(data_dir),
             dictionary_update: Arc::new(Mutex::new(None)),
+            dictionary_store: Arc::new(Mutex::new(dictionary_store)),
         }
     }
 
@@ -84,17 +101,53 @@ fn initialise_database(data_dir: &PathBuf) -> Result<(), String> {
 
 #[tauri::command]
 fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
-    let connection = state
-        .database
+    let snapshot_data = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        read_snapshot_data(&connection)?
+    };
+    let updating = state
+        .dictionary_update
         .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    snapshot_from_connection(&connection, &state.dictionary_dir())
+        .map_err(|_| "词典更新状态锁已损坏".to_string())?
+        .is_some();
+    let mut dictionary = state
+        .dictionary_store
+        .lock()
+        .map_err(|_| "词典存储锁已损坏".to_string())?
+        .state(snapshot_data.dictionary_installation.as_ref());
+    if updating {
+        dictionary.status = contracts::DictionaryStatus::Updating;
+        dictionary.error = None;
+    }
+    Ok(AppSnapshot {
+        settings: snapshot_data.settings,
+        provider: snapshot_data.provider,
+        models: snapshot_data.models,
+        prompts: snapshot_data.prompts,
+        glossary_terms: snapshot_data.glossary_terms,
+        history: snapshot_data.history,
+        cache_stats: snapshot_data.cache_stats,
+        dictionary,
+        dictionary_history: snapshot_data.dictionary_history,
+    })
 }
 
-fn snapshot_from_connection(
-    connection: &Connection,
-    dictionary_dir: &std::path::Path,
-) -> Result<AppSnapshot, String> {
+struct SnapshotData {
+    settings: contracts::AppSettings,
+    provider: contracts::ProviderConfig,
+    models: Vec<ModelInfo>,
+    prompts: Vec<Prompt>,
+    glossary_terms: Vec<GlossaryTerm>,
+    history: Vec<contracts::HistoryEntry>,
+    cache_stats: contracts::CacheStats,
+    dictionary_installation: Option<db::DictionaryInstallation>,
+    dictionary_history: Vec<contracts::DictionaryHistoryEntry>,
+}
+
+fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
     let settings = db::get_settings(connection)?;
     let provider = db::get_provider(connection)?;
     let has_api_key = secrets::load_api_key(&provider.id).ok().flatten().is_some();
@@ -104,9 +157,8 @@ fn snapshot_from_connection(
     let history = db::get_history(connection, settings.history_retention)?;
     let cache_stats = db::get_cache_stats(connection, settings.cache_max_bytes)?;
     let dictionary_installation = db::get_dictionary_installation(connection)?;
-    let dictionary = dictionary::read_state(dictionary_dir, dictionary_installation);
     let dictionary_history = db::list_dictionary_history(connection, DICTIONARY_HISTORY_LIMIT)?;
-    Ok(AppSnapshot {
+    Ok(SnapshotData {
         settings,
         provider: ProviderConfig {
             id: provider.id,
@@ -121,7 +173,7 @@ fn snapshot_from_connection(
         glossary_terms,
         history,
         cache_stats,
-        dictionary,
+        dictionary_installation,
         dictionary_history,
     })
 }
@@ -681,29 +733,117 @@ fn delete_glossary_term(state: State<'_, AppState>, id: String) -> Result<(), St
 fn query_dictionary(
     state: State<'_, AppState>,
     word: String,
-) -> Result<contracts::DictionaryLookupResult, String> {
+) -> Result<DictionaryLookupCommandResult, String> {
+    let request_id = Uuid::new_v4().to_string();
+    let started = Instant::now();
     let display_word = word.trim().to_string();
-    let result = dictionary::query(&state.dictionary_dir(), &display_word)
-        .map_err(|error| error.to_string())?;
-    let connection = state
-        .database
+    diagnostics::info(format!(
+        "command.dictionary.query.start request_id={request_id}"
+    ));
+
+    if display_word.is_empty() {
+        let error = dictionary::DictionaryError::EmptyInput;
+        diagnostics::error(format!(
+            "command.dictionary.query.failed request_id={request_id} stage=input elapsed_ms={} error_kind={}",
+            started.elapsed().as_millis(),
+            error.kind()
+        ));
+        return Err(error.to_string());
+    }
+
+    let update_guard = state
+        .dictionary_update
         .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::record_dictionary_query(&connection, &result.normalized_word, &result.word)?;
-    Ok(result)
+        .map_err(|_| "词典更新状态锁已损坏".to_string())?;
+    if update_guard.is_some() {
+        let error = dictionary::DictionaryError::Updating;
+        diagnostics::error(format!(
+            "command.dictionary.query.failed request_id={request_id} stage=update_guard elapsed_ms={} error_kind={}",
+            started.elapsed().as_millis(),
+            error.kind()
+        ));
+        return Err(error.to_string());
+    }
+
+    let lookup = {
+        let store = state
+            .dictionary_store
+            .lock()
+            .map_err(|_| "词典存储锁已损坏".to_string())?;
+        match store.lookup(&display_word) {
+            Ok(measurement) => measurement,
+            Err(error) => {
+                diagnostics::error(format!(
+                    "command.dictionary.query.failed request_id={request_id} stage=lookup elapsed_ms={} error_kind={}",
+                    started.elapsed().as_millis(),
+                    error.kind()
+                ));
+                return Err(error.to_string());
+            }
+        }
+    };
+
+    let history_started = Instant::now();
+    let history_result = (|| -> Result<Vec<contracts::DictionaryHistoryEntry>, String> {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::record_dictionary_query(
+            &connection,
+            &lookup.result.normalized_word,
+            &lookup.result.word,
+        )?;
+        db::list_dictionary_history(&connection, DICTIONARY_HISTORY_LIMIT)
+    })();
+    let history = match history_result {
+        Ok(history) => history,
+        Err(error) => {
+            diagnostics::error(format!(
+                "command.dictionary.query.failed request_id={request_id} stage=history elapsed_ms={} error_kind=database_persistence",
+                started.elapsed().as_millis()
+            ));
+            return Err(error);
+        }
+    };
+    let history_elapsed = history_started.elapsed();
+    diagnostics::info(format!(
+        "command.dictionary.query.completed request_id={request_id} connection_source=reused sql_ms={} json_decode_ms={} history_ms={} snapshot_refresh=skipped total_ms={}",
+        lookup.sql_elapsed.as_millis(),
+        lookup.json_decode_elapsed.as_millis(),
+        history_elapsed.as_millis(),
+        started.elapsed().as_millis()
+    ));
+    Ok(DictionaryLookupCommandResult {
+        lookup: lookup.result,
+        history,
+    })
 }
 
 #[tauri::command]
 fn get_dictionary_state(state: State<'_, AppState>) -> Result<DictionaryState, String> {
-    let connection = state
-        .database
+    let installation = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::get_dictionary_installation(&connection)?
+    };
+    let mut dictionary = state
+        .dictionary_store
         .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    let installation = db::get_dictionary_installation(&connection)?;
-    Ok(dictionary::read_state(
-        &state.dictionary_dir(),
-        installation,
-    ))
+        .map_err(|_| "词典存储锁已损坏".to_string())?
+        .state(installation.as_ref());
+    if state
+        .dictionary_update
+        .lock()
+        .map_err(|_| "词典更新状态锁已损坏".to_string())?
+        .is_some()
+    {
+        dictionary.status = contracts::DictionaryStatus::Updating;
+        dictionary.error = None;
+    }
+    Ok(dictionary)
 }
 
 #[tauri::command]

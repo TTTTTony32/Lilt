@@ -88,6 +88,11 @@ export interface DictionaryHistoryEntry {
   queryCount: number;
 }
 
+export interface DictionaryLookupCommandResult {
+  lookup: DictionaryLookupResult;
+  history: DictionaryHistoryEntry[];
+}
+
 export interface DictionaryState {
   status: DictionaryStatus;
   installedRelease: string | null;
@@ -445,6 +450,14 @@ export function decodeDictionaryLookupResult(value: unknown): DictionaryLookupRe
   return word === null || normalizedWord === null || entry === null
     ? null
     : { word, normalizedWord, entry };
+}
+
+export function decodeDictionaryLookupCommandResult(value: unknown): DictionaryLookupCommandResult | null {
+  if (!isRecord(value) || !Array.isArray(value.history)) return null;
+  const lookup = decodeDictionaryLookupResult(value.lookup);
+  const history = value.history.map(decodeDictionaryHistoryEntry);
+  if (lookup === null || history.some((item) => item === null)) return null;
+  return { lookup, history: history as DictionaryHistoryEntry[] };
 }
 
 export function decodeDictionaryUpdateEvent(name: string, value: unknown): DictionaryUpdateEvent | null {

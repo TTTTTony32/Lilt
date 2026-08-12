@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeDictionaryEntry,
+  decodeDictionaryLookupCommandResult,
   decodeDictionaryLookupResult,
   decodeDictionaryState,
   decodeDictionaryUpdateEvent,
@@ -57,13 +58,33 @@ const entry = {
   }],
 };
 
+const lookup = { word: "RESOLVE", normalizedWord: "resolve", entry };
+const historyEntry = {
+  normalizedWord: "resolve",
+  displayWord: "RESOLVE",
+  lastQueriedAt: "2026-08-12T00:00:00Z",
+  queryCount: 2,
+};
+const history = [historyEntry];
+
 describe("dictionary contracts", () => {
   it("decodes a validated local lookup result", () => {
-    expect(decodeDictionaryLookupResult({ word: "RESOLVE", normalizedWord: "resolve", entry })).toEqual({
-      word: "RESOLVE",
-      normalizedWord: "resolve",
-      entry,
-    });
+    expect(decodeDictionaryLookupResult(lookup)).toEqual(lookup);
+  });
+
+  it("decodes a combined lookup result and latest history", () => {
+    expect(decodeDictionaryLookupCommandResult({ lookup, history })).toEqual({ lookup, history });
+  });
+
+  it("rejects missing or malformed lookup and history fields", () => {
+    expect(decodeDictionaryLookupCommandResult({ history })).toBeNull();
+    expect(decodeDictionaryLookupCommandResult({ lookup: { ...lookup, entry: null }, history })).toBeNull();
+    expect(decodeDictionaryLookupCommandResult({ lookup })).toBeNull();
+    expect(decodeDictionaryLookupCommandResult({ lookup, history: {} })).toBeNull();
+    expect(decodeDictionaryLookupCommandResult({
+      lookup,
+      history: [{ ...historyEntry, queryCount: "2" }],
+    })).toBeNull();
   });
 
   it("rejects malformed state and update payloads", () => {

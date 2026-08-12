@@ -3,7 +3,7 @@ import { Download, LoaderCircle, Search } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand } from "./lib/tauri";
 import {
-  decodeDictionaryLookupResult,
+  decodeDictionaryLookupCommandResult,
   collectPronunciations,
   groupRelationsByType,
   posLabelZh,
@@ -27,6 +27,7 @@ interface DictionaryViewProps {
   history: DictionaryHistoryEntry[];
   progress: DictionaryProgress | null;
   onUpdate: () => Promise<void>;
+  onHistoryChanged: (history: DictionaryHistoryEntry[]) => void;
   onSnapshotChanged: () => Promise<void>;
 }
 
@@ -54,6 +55,7 @@ export default function DictionaryView({
   history,
   progress,
   onUpdate,
+  onHistoryChanged,
   onSnapshotChanged,
 }: DictionaryViewProps) {
   const [word, setWord] = useState("");
@@ -77,15 +79,15 @@ export default function DictionaryView({
     setQueryError(null);
     try {
       const rawResult = await invokeCommand<unknown>("query_dictionary", { word: trimmed });
-      const decoded = decodeDictionaryLookupResult(rawResult);
+      const decoded = decodeDictionaryLookupCommandResult(rawResult);
       if (!decoded) {
         setQueryError("词典命令返回了无法识别的结果。");
         return;
       }
-      setWord(decoded.word);
-      setResult(decoded.entry);
+      setWord(decoded.lookup.word);
+      setResult(decoded.lookup.entry);
+      onHistoryChanged(decoded.history);
       setHistoryOpen(false);
-      await onSnapshotChanged();
     } catch (reason) {
       setResult(null);
       setQueryError(describeError(reason, "词典查询失败"));

@@ -5,6 +5,7 @@ use crate::contracts::{
     DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use crate::db::{self, DictionaryInstallationRecord};
+use crate::diagnostics;
 use crate::AppState;
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -21,7 +22,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use tokio::time::sleep;
@@ -40,7 +41,7 @@ const MAX_DOWNLOAD_RETRIES: u32 = 2;
 const PROGRESS_CHUNK: u64 = 4 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DictionaryError {
     #[error("词典未安装，请在设置中下载词典")]
     NotInstalled,
@@ -50,8 +51,23 @@ pub enum DictionaryError {
     DatabaseUnreadable(String),
     #[error("词典分发契约不匹配：{0}")]
     ContractMismatch(String),
+    #[error("词典正在更新，请稍候")]
+    Updating,
     #[error("未找到词条：{0}")]
     NotFound(String),
+}
+
+impl DictionaryError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not_installed",
+            Self::EmptyInput => "empty_input",
+            Self::DatabaseUnreadable(_) => "database_unreadable",
+            Self::ContractMismatch(_) => "contract_mismatch",
+            Self::Updating => "updating",
+            Self::NotFound(_) => "not_found",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +75,217 @@ pub struct DistributionMetadata {
     pub distribution_schema_version: String,
     pub sqlite_schema_version: String,
     pub entry_count: i64,
+}
+
+pub struct DictionaryLookupMeasurement {
+    pub result: DictionaryLookupResult,
+    pub sql_elapsed: Duration,
+    pub json_decode_elapsed: Duration,
+}
+
+pub struct DictionaryStore {
+    current_path: PathBuf,
+    connection: Option<Connection>,
+    metadata: Option<DistributionMetadata>,
+    validation_error: Option<DictionaryError>,
+    #[cfg(test)]
+    validation_count: usize,
+}
+
+impl DictionaryStore {
+    pub fn new(directory: PathBuf) -> Self {
+        let current_path = database_path(&directory);
+        Self {
+            current_path,
+            connection: None,
+            metadata: None,
+            validation_error: None,
+            #[cfg(test)]
+            validation_count: 0,
+        }
+    }
+
+    pub fn open_and_validate(&mut self) -> Result<DistributionMetadata, DictionaryError> {
+        self.open_and_validate_with_origin("startup")
+    }
+
+    fn open_and_validate_with_origin(
+        &mut self,
+        origin: &str,
+    ) -> Result<DistributionMetadata, DictionaryError> {
+        self.close();
+        if !self.current_path.is_file() {
+            return Err(DictionaryError::NotInstalled);
+        }
+
+        #[cfg(test)]
+        {
+            self.validation_count += 1;
+        }
+        match open_and_validate_path(&self.current_path, origin) {
+            Ok((connection, metadata)) => {
+                self.connection = Some(connection);
+                self.metadata = Some(metadata.clone());
+                self.validation_error = None;
+                Ok(metadata)
+            }
+            Err(error) => {
+                self.metadata = None;
+                self.validation_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    fn reopen_current_with_origin(&mut self, origin: &str) -> Result<(), DictionaryError> {
+        if !self.current_path.is_file() {
+            self.close();
+            return Ok(());
+        }
+        self.open_and_validate_with_origin(origin).map(|_| ())
+    }
+
+    pub fn open_validated_install(
+        &mut self,
+        metadata: DistributionMetadata,
+    ) -> Result<(), DictionaryError> {
+        self.close();
+        let connection = match open_read_only(&self.current_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                self.validation_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        self.connection = Some(connection);
+        self.metadata = Some(metadata);
+        self.validation_error = None;
+        Ok(())
+    }
+
+    pub fn close(&mut self) {
+        self.connection.take();
+        self.metadata = None;
+        self.validation_error = None;
+    }
+
+    pub fn lookup(&self, word: &str) -> Result<DictionaryLookupMeasurement, DictionaryError> {
+        let display_word = word.trim();
+        if display_word.is_empty() {
+            return Err(DictionaryError::EmptyInput);
+        }
+        let normalized_word = normalize_headword(display_word);
+        let connection = match self.connection.as_ref() {
+            Some(connection) => connection,
+            None => {
+                return Err(self
+                    .validation_error
+                    .clone()
+                    .unwrap_or(DictionaryError::NotInstalled));
+            }
+        };
+
+        let sql_started = Instant::now();
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT document_json FROM entries
+                 WHERE headword_language_code = 'en' AND normalized_headword = ?1
+                 LIMIT 1",
+            )
+            .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+        let raw: Option<String> = statement
+            .query_row([&normalized_word], |row| row.get(0))
+            .optional()
+            .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+        let sql_elapsed = sql_started.elapsed();
+        let raw = raw.ok_or_else(|| DictionaryError::NotFound(display_word.to_string()))?;
+
+        let json_decode_started = Instant::now();
+        let entry: Value = serde_json::from_str(&raw).map_err(|error| {
+            DictionaryError::DatabaseUnreadable(format!("词条 JSON 无法解析：{error}"))
+        })?;
+        if !entry.is_object() {
+            return Err(DictionaryError::DatabaseUnreadable(
+                "词条 JSON 不是对象".to_string(),
+            ));
+        }
+        let json_decode_elapsed = json_decode_started.elapsed();
+
+        Ok(DictionaryLookupMeasurement {
+            result: DictionaryLookupResult {
+                word: display_word.to_string(),
+                normalized_word,
+                entry,
+            },
+            sql_elapsed,
+            json_decode_elapsed,
+        })
+    }
+
+    pub fn state(&self, installation: Option<&db::DictionaryInstallation>) -> DictionaryState {
+        let database_bytes = fs::metadata(&self.current_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut state = DictionaryState::not_installed();
+        state.cache_size_bytes = database_bytes;
+
+        if let Some(installation) = installation {
+            state.installed_release = Some(installation.release_tag.clone());
+            state.artifact_sha256 = Some(installation.artifact_sha256.clone());
+            state.entry_count = Some(installation.entry_count);
+            state.distribution_schema_version =
+                Some(installation.distribution_schema_version.clone());
+            state.sqlite_schema_version = Some(installation.sqlite_schema_version.clone());
+            state.installed_at = Some(installation.installed_at.clone());
+            state.downloaded_bytes = installation.compressed_bytes.max(0) as u64;
+            state.total_bytes = state.downloaded_bytes;
+            state.database_bytes = installation.database_bytes.max(0) as u64;
+        } else {
+            state.database_bytes = database_bytes;
+            if let Some(metadata) = self.metadata.as_ref() {
+                state.entry_count = Some(metadata.entry_count);
+                state.distribution_schema_version =
+                    Some(metadata.distribution_schema_version.clone());
+                state.sqlite_schema_version = Some(metadata.sqlite_schema_version.clone());
+            }
+        }
+
+        if !self.current_path.is_file() {
+            if installation.is_some() {
+                state.error = Some("词典安装记录存在，但 distribution.sqlite 不存在".to_string());
+            }
+            return state;
+        }
+
+        if let Some(error) = &self.validation_error {
+            state.status = DictionaryStatus::Failed;
+            state.error = Some(error.to_string());
+            return state;
+        }
+
+        let Some(metadata) = self.metadata.as_ref() else {
+            state.status = DictionaryStatus::Failed;
+            state.error = Some("词典尚未完成生命周期校验".to_string());
+            return state;
+        };
+        if let Some(installation) = installation {
+            if metadata.entry_count != installation.entry_count
+                || metadata.distribution_schema_version != installation.distribution_schema_version
+                || metadata.sqlite_schema_version != installation.sqlite_schema_version
+            {
+                state.status = DictionaryStatus::Failed;
+                state.error = Some("词典安装记录与分发数据库不一致".to_string());
+                return state;
+            }
+        }
+        state.status = DictionaryStatus::Ready;
+        state
+    }
+
+    #[cfg(test)]
+    fn validation_count(&self) -> usize {
+        self.validation_count
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,134 +443,65 @@ fn validate_connection(connection: &Connection) -> Result<DistributionMetadata, 
     validate_contract(connection)
 }
 
+fn open_and_validate_path(
+    path: &Path,
+    origin: &str,
+) -> Result<(Connection, DistributionMetadata), DictionaryError> {
+    let started = Instant::now();
+    let open_started = Instant::now();
+    let connection = match open_read_only(path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            diagnostics::error(format!(
+                "dictionary.validation.completed origin={origin} outcome=failed stage=open database_open_ms={} validation_ms=0 total_ms={} error_kind={}",
+                open_started.elapsed().as_millis(),
+                started.elapsed().as_millis(),
+                error.kind()
+            ));
+            return Err(error);
+        }
+    };
+    let database_open_ms = open_started.elapsed().as_millis();
+    let validation_started = Instant::now();
+    let result = validate_connection(&connection);
+    let validation_ms = validation_started.elapsed().as_millis();
+    match result {
+        Ok(metadata) => {
+            diagnostics::info(format!(
+                "dictionary.validation.completed origin={origin} outcome=success database_open_ms={database_open_ms} validation_ms={validation_ms} total_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Ok((connection, metadata))
+        }
+        Err(error) => {
+            diagnostics::error(format!(
+                "dictionary.validation.completed origin={origin} outcome=failed stage=validate database_open_ms={database_open_ms} validation_ms={validation_ms} total_ms={} error_kind={}",
+                started.elapsed().as_millis(),
+                error.kind()
+            ));
+            Err(error)
+        }
+    }
+}
+
 pub fn validate_distribution_database(
     path: &Path,
 ) -> Result<DistributionMetadata, DictionaryError> {
     if !path.is_file() {
         return Err(DictionaryError::NotInstalled);
     }
-    let connection = open_read_only(path)?;
-    validate_connection(&connection)
+    let (_, metadata) = open_and_validate_path(path, "standalone")?;
+    Ok(metadata)
 }
 
-pub fn read_state(
-    dictionary_dir: &Path,
-    installation: Option<db::DictionaryInstallation>,
-) -> DictionaryState {
-    let path = database_path(dictionary_dir);
-    let database_bytes = fs::metadata(&path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    let mut state = DictionaryState::not_installed();
-    state.cache_size_bytes = database_bytes;
-
-    let Some(installation) = installation else {
-        if !path.is_file() {
-            return state;
-        }
-        let state_result =
-            open_read_only(&path).and_then(|connection| validate_contract(&connection));
-        return match state_result {
-            Ok(metadata) => DictionaryState {
-                status: DictionaryStatus::Ready,
-                installed_release: None,
-                artifact_sha256: None,
-                entry_count: Some(metadata.entry_count),
-                distribution_schema_version: Some(metadata.distribution_schema_version),
-                sqlite_schema_version: Some(metadata.sqlite_schema_version),
-                installed_at: None,
-                downloaded_bytes: 0,
-                total_bytes: 0,
-                database_bytes,
-                cache_size_bytes: database_bytes,
-                error: None,
-            },
-            Err(error) => DictionaryState {
-                status: DictionaryStatus::Failed,
-                error: Some(error.to_string()),
-                ..state
-            },
-        };
-    };
-
-    state.installed_release = Some(installation.release_tag.clone());
-    state.artifact_sha256 = Some(installation.artifact_sha256.clone());
-    state.entry_count = Some(installation.entry_count);
-    state.distribution_schema_version = Some(installation.distribution_schema_version.clone());
-    state.sqlite_schema_version = Some(installation.sqlite_schema_version.clone());
-    state.installed_at = Some(installation.installed_at.clone());
-    state.downloaded_bytes = installation.compressed_bytes.max(0) as u64;
-    state.total_bytes = state.downloaded_bytes;
-    state.database_bytes = installation.database_bytes.max(0) as u64;
-    state.cache_size_bytes = database_bytes;
-
-    if !path.is_file() {
-        state.error = Some("词典安装记录存在，但 distribution.sqlite 不存在".to_string());
-        return state;
-    }
-
-    let state_result = open_read_only(&path).and_then(|connection| validate_contract(&connection));
-    match state_result {
-        Ok(metadata)
-            if metadata.entry_count == installation.entry_count
-                && metadata.distribution_schema_version
-                    == installation.distribution_schema_version
-                && metadata.sqlite_schema_version == installation.sqlite_schema_version =>
-        {
-            state.status = DictionaryStatus::Ready;
-            state
-        }
-        Ok(_) => {
-            state.status = DictionaryStatus::Failed;
-            state.error = Some("词典安装记录与分发数据库不一致".to_string());
-            state
-        }
-        Err(error) => {
-            state.status = DictionaryStatus::Failed;
-            state.error = Some(error.to_string());
-            state
-        }
-    }
-}
-
+#[cfg(test)]
 pub fn query(dictionary_dir: &Path, word: &str) -> Result<DictionaryLookupResult, DictionaryError> {
-    let display_word = word.trim();
-    if display_word.is_empty() {
+    if word.trim().is_empty() {
         return Err(DictionaryError::EmptyInput);
     }
-    let normalized_word = normalize_headword(display_word);
-    let path = database_path(dictionary_dir);
-    if !path.is_file() {
-        return Err(DictionaryError::NotInstalled);
-    }
-
-    let connection = open_read_only(&path)?;
-    validate_connection(&connection)?;
-    let raw: Option<String> = connection
-        .query_row(
-            "SELECT document_json FROM entries
-             WHERE headword_language_code = 'en' AND normalized_headword = ?1
-             LIMIT 1",
-            [&normalized_word],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
-    let raw = raw.ok_or_else(|| DictionaryError::NotFound(display_word.to_string()))?;
-    let entry: Value = serde_json::from_str(&raw).map_err(|error| {
-        DictionaryError::DatabaseUnreadable(format!("词条 JSON 无法解析：{error}"))
-    })?;
-    if !entry.is_object() {
-        return Err(DictionaryError::DatabaseUnreadable(
-            "词条 JSON 不是对象".to_string(),
-        ));
-    }
-
-    Ok(DictionaryLookupResult {
-        word: display_word.to_string(),
-        normalized_word,
-        entry,
-    })
+    let mut store = DictionaryStore::new(dictionary_dir.to_path_buf());
+    store.open_and_validate()?;
+    Ok(store.lookup(word)?.result)
 }
 
 pub fn parse_sha256_sums(manifest: &str, file_name: &str) -> Option<String> {
@@ -629,18 +787,26 @@ fn rollback_promoted_database(
     if current_path.exists() {
         fs::remove_file(current_path).map_err(|error| format!("回滚词典新文件失败：{error}"))?;
     }
-    if had_old_database && backup_path.exists() {
+    if had_old_database {
+        if !backup_path.exists() {
+            return Err("恢复旧词典失败：备份文件不存在".to_string());
+        }
         fs::rename(backup_path, current_path)
             .map_err(|error| format!("恢复旧词典失败：{error}"))?;
     }
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PromotionResult {
+    had_old_database: bool,
+}
+
 fn promote_database(
     part_path: &Path,
     current_path: &Path,
     backup_path: &Path,
-) -> Result<bool, String> {
+) -> Result<PromotionResult, String> {
     if backup_path.exists() {
         fs::remove_file(backup_path).map_err(|error| format!("清理旧词典备份失败：{error}"))?;
     }
@@ -655,7 +821,69 @@ fn promote_database(
         }
         return Err(format!("提升新词典失败：{error}"));
     }
-    Ok(had_old_database)
+    Ok(PromotionResult { had_old_database })
+}
+
+fn recover_promoted_database(
+    store: &mut DictionaryStore,
+    current_path: &Path,
+    backup_path: &Path,
+    had_old_database: bool,
+) -> Result<(), String> {
+    store.close();
+    rollback_promoted_database(current_path, backup_path, had_old_database)?;
+    store
+        .reopen_current_with_origin("recovery")
+        .map_err(|error| format!("恢复旧词典连接失败：{error}"))
+}
+
+fn activate_promoted_database(
+    store: &mut DictionaryStore,
+    part_path: &Path,
+    current_path: &Path,
+    backup_path: &Path,
+    metadata: DistributionMetadata,
+) -> Result<PromotionResult, String> {
+    store.close();
+    let promotion = match promote_database(part_path, current_path, backup_path) {
+        Ok(promotion) => promotion,
+        Err(error) => {
+            let recovery = store
+                .reopen_current_with_origin("recovery")
+                .map_err(|recovery_error| format!("恢复旧词典连接失败：{recovery_error}"));
+            return match recovery {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(format!("{error}；{recovery_error}")),
+            };
+        }
+    };
+
+    if let Err(error) = store.open_validated_install(metadata) {
+        let recovery =
+            recover_promoted_database(store, current_path, backup_path, promotion.had_old_database);
+        return match recovery {
+            Ok(()) => Err(format!("打开新词典连接失败：{error}")),
+            Err(recovery_error) => Err(format!("打开新词典连接失败：{error}；{recovery_error}")),
+        };
+    }
+    Ok(promotion)
+}
+
+fn persist_dictionary_installation(
+    state: &AppState,
+    installation: &DictionaryInstallationRecord<'_>,
+) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("开启词典安装事务失败：{error}"))?;
+    db::save_dictionary_installation(&transaction, installation)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交词典安装事务失败：{error}"))
 }
 
 async fn update_impl(
@@ -736,7 +964,19 @@ async fn update_impl(
     let database_bytes = fs::metadata(&part_path)
         .map_err(|error| format!("读取解压词典大小失败：{error}"))?
         .len();
-    let had_old_database = promote_database(&part_path, &current_path, &backup_path)?;
+    let promotion = {
+        let mut store = state
+            .dictionary_store
+            .lock()
+            .map_err(|_| "词典存储锁已损坏".to_string())?;
+        activate_promoted_database(
+            &mut store,
+            &part_path,
+            &current_path,
+            &backup_path,
+            metadata.clone(),
+        )?
+    };
 
     let installed_at = Utc::now().to_rfc3339();
     let installation = DictionaryInstallationRecord {
@@ -749,17 +989,23 @@ async fn update_impl(
         compressed_bytes: compressed_bytes as i64,
         database_bytes: database_bytes as i64,
     };
-    let persist_result = state
-        .database
-        .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())
-        .and_then(|connection| db::save_dictionary_installation(&connection, &installation));
-    if let Err(error) = persist_result {
-        let rollback = rollback_promoted_database(&current_path, &backup_path, had_old_database);
-        return Err(match rollback {
-            Ok(()) => error,
-            Err(rollback_error) => format!("{error}；{rollback_error}"),
-        });
+    if let Err(error) = persist_dictionary_installation(state, &installation) {
+        let recovery = state
+            .dictionary_store
+            .lock()
+            .map_err(|_| "词典存储锁已损坏".to_string())
+            .and_then(|mut store| {
+                recover_promoted_database(
+                    &mut store,
+                    &current_path,
+                    &backup_path,
+                    promotion.had_old_database,
+                )
+            });
+        return match recovery {
+            Ok(()) => Err(error),
+            Err(recovery_error) => Err(format!("{error}；{recovery_error}")),
+        };
     }
 
     let _ = fs::remove_file(&backup_path);
@@ -774,7 +1020,11 @@ async fn update_impl(
         compressed_bytes: compressed_bytes as i64,
         database_bytes: database_bytes as i64,
     };
-    Ok(read_state(dictionary_dir, Some(installation)))
+    let store = state
+        .dictionary_store
+        .lock()
+        .map_err(|_| "词典存储锁已损坏".to_string())?;
+    Ok(store.state(Some(&installation)))
 }
 
 pub async fn update_dictionary(
@@ -783,13 +1033,16 @@ pub async fn update_dictionary(
     dictionary_dir: &Path,
     operation_id: String,
 ) -> Result<DictionaryCommandResult, String> {
-    let mut starting_state = state
+    let installation = state
         .database
         .lock()
-        .ok()
-        .and_then(|connection| db::get_dictionary_installation(&connection).ok())
-        .map(|installation| read_state(dictionary_dir, installation))
-        .unwrap_or_else(DictionaryState::not_installed);
+        .map_err(|_| "应用数据库锁已损坏".to_string())
+        .and_then(|connection| db::get_dictionary_installation(&connection))?;
+    let mut starting_state = state
+        .dictionary_store
+        .lock()
+        .map_err(|_| "词典存储锁已损坏".to_string())?
+        .state(installation.as_ref());
     starting_state.status = DictionaryStatus::Updating;
     starting_state.error = None;
     let _ = app.emit(
@@ -1038,6 +1291,69 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
             query(&directory, "resolve"),
             Err(DictionaryError::DatabaseUnreadable(_))
         ));
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn validated_store_reuses_connection_without_repeating_full_validation() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_and_validate().unwrap();
+        assert_eq!(store.validation_count(), 1);
+
+        store.lookup("resolve").unwrap();
+        store.lookup("RESOLVE").unwrap();
+        assert_eq!(store.validation_count(), 1);
+
+        let state = store.state(None);
+        assert_eq!(state.status, DictionaryStatus::Ready);
+        assert_eq!(state.entry_count, Some(1));
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn promoted_database_can_be_reopened_and_recovered() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let part_path = directory.join(DISTRIBUTION_DB_PART_FILE);
+        fs::rename(directory.join(DISTRIBUTION_DB_FILE), &part_path).unwrap();
+        create_fixture(&directory);
+
+        let current_path = database_path(&directory);
+        let backup_path = directory.join(DISTRIBUTION_DB_BACKUP_FILE);
+        let metadata = validate_distribution_database(&part_path).unwrap();
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_and_validate().unwrap();
+        let promotion = activate_promoted_database(
+            &mut store,
+            &part_path,
+            &current_path,
+            &backup_path,
+            metadata,
+        )
+        .unwrap();
+        assert!(promotion.had_old_database);
+        assert!(current_path.is_file());
+        assert!(backup_path.is_file());
+        assert_eq!(
+            store.lookup("resolve").unwrap().result.normalized_word,
+            "resolve"
+        );
+
+        recover_promoted_database(
+            &mut store,
+            &current_path,
+            &backup_path,
+            promotion.had_old_database,
+        )
+        .unwrap();
+        assert!(current_path.is_file());
+        assert!(!backup_path.exists());
+        assert_eq!(
+            store.lookup("RESOLVE").unwrap().result.normalized_word,
+            "resolve"
+        );
         remove_directory(&directory);
     }
 

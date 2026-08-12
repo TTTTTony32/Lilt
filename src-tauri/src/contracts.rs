@@ -138,6 +138,13 @@ pub struct DictionaryLookupResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictionaryLookupCommandResult {
+    pub lookup: DictionaryLookupResult,
+    pub history: Vec<DictionaryHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DictionaryCommandResult {
     pub operation_id: String,
     pub state: DictionaryState,
