@@ -118,6 +118,61 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-stack .simple-card:last-child { margin-bottom: 0; }
 .settings-message { margin: 12px 0 0; font-size: 12px; }
 
+.dictionary-search-card { margin-bottom: 18px; padding: 12px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; }
+.dictionary-search-form { display: flex; align-items: center; gap: 10px; }
+.dictionary-input-wrap { position: relative; flex: 1; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: #8b958b; }
+.dictionary-input-wrap input { height: 42px; padding: 0; border: 0; background: transparent; font-size: 14px; }
+.dictionary-input-wrap input:focus { border: 0; box-shadow: none; }
+.dictionary-history-menu { position: absolute; z-index: 2; top: 45px; right: 0; left: 0; overflow: hidden; border: 1px solid #d8d9d0; border-radius: 8px; background: #fffefb; box-shadow: 0 9px 24px rgba(53, 62, 53, .09); }
+.dictionary-history-menu button { width: 100%; min-height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; border: 0; border-bottom: 1px solid #efede6; color: #59685c; background: transparent; text-align: left; font-size: 12px; }
+.dictionary-history-menu button:hover { background: #f0f3ed; }
+.dictionary-history-menu small { color: #a1a49a; font-size: 10px; }
+.dictionary-history-menu .dictionary-history-clear { justify-content: flex-start; color: #a4776f; border-bottom: 0; }
+.dictionary-message { margin: 12px 2px; font-size: 12px; }
+.dictionary-install-card { margin-bottom: 18px; padding: 20px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #deddd5; border-radius: 10px; background: #f9f8f3; }
+.dictionary-install-card strong { color: #526456; font-size: 14px; }
+.dictionary-install-card p { max-width: 680px; margin: 7px 0 0; color: #8c9187; font-size: 12px; line-height: 1.6; }
+.dictionary-progress { margin-top: 16px; min-width: 250px; }
+.dictionary-progress-label { margin-bottom: 7px; display: flex; justify-content: space-between; color: #8d978d; font-size: 10px; }
+.dictionary-progress-track { height: 5px; overflow: hidden; border-radius: 5px; background: #e2e5de; }
+.dictionary-progress-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width .2s ease; }
+.dictionary-empty-state { padding: 55px 20px; border: 1px dashed #d9d9d0; border-radius: 10px; color: #a4a69d; background: rgba(251, 250, 247, .55); text-align: center; font-size: 12px; }
+.dictionary-entry { overflow: hidden; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; }
+.dictionary-entry-header { padding: 25px 25px 21px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e7e5de; }
+.dictionary-entry-header h2 { margin: 0; color: #394b3e; font-family: Georgia, "Songti SC", serif; font-size: 28px; font-weight: 500; }
+.dictionary-entry-header p { max-width: 680px; margin: 9px 0 0; color: #70796f; font-size: 13px; line-height: 1.7; }
+.dictionary-pronunciations { padding-top: 5px; color: #7a887c; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; white-space: nowrap; }
+.dictionary-pos-group { padding: 21px 25px 20px; border-bottom: 1px solid #e7e5de; }
+.dictionary-pos-group:last-child { border-bottom: 0; }
+.dictionary-pos-heading { display: flex; align-items: baseline; gap: 10px; }
+.dictionary-pos-en { color: #536856; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.dictionary-pos-zh { color: #5c6f5f; font-size: 14px; font-weight: 600; }
+.dictionary-tag { padding: 3px 6px; border-radius: 4px; color: #8b806a; background: #f1ebde; font-size: 10px; }
+.dictionary-pos-summary { margin: 9px 0 0 48px; color: #7d857c; font-size: 12px; line-height: 1.7; }
+.dictionary-meanings { margin: 13px 0 0 37px; }
+.dictionary-meaning { padding: 12px 0; border-top: 1px solid #eeece6; }
+.dictionary-meaning:first-child { border-top: 0; }
+.dictionary-meaning-title { min-height: 21px; display: flex; align-items: center; gap: 8px; color: #566558; font-size: 13px; }
+.dictionary-meaning-index { width: 20px; color: #9da49a; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.dictionary-core-dot { width: 6px; height: 6px; border-radius: 50%; background: #6f8d74; }
+.dictionary-labels { color: #9b9e95; font-size: 10px; }
+.dictionary-meaning > p { margin: 6px 0 0 28px; color: #616c62; font-size: 13px; line-height: 1.75; }
+.dictionary-meaning > .dictionary-usage-note { color: #92978f; font-size: 11px; }
+.dictionary-examples { margin: 9px 0 0 28px; display: grid; gap: 7px; }
+.dictionary-example { padding: 8px 11px; border-left: 2px solid #d4dfd3; background: #f3f5ef; }
+.dictionary-example p { margin: 0; color: #69756b; font-size: 12px; line-height: 1.6; }
+.dictionary-example p + p { margin-top: 2px; color: #9a9f96; }
+.dictionary-rare-toggle { margin: 9px 0 0 37px; color: #859385; }
+.dictionary-relations { margin: 13px 0 0 37px; padding-top: 12px; display: flex; align-items: flex-start; gap: 12px; border-top: 1px solid #eeece6; }
+.dictionary-relations > span { min-width: 35px; color: #9da49a; font-size: 10px; }
+.dictionary-relations > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.dictionary-relation-chip { padding: 4px 8px; border: 1px solid #d9dfd7; border-radius: 5px; color: #667968; background: #f8faf6; font-size: 11px; }
+.dictionary-settings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 4px 0 15px; }
+.dictionary-settings-grid > div { padding-right: 14px; border-right: 1px solid #e8e6df; }
+.dictionary-settings-grid > div:last-child { border-right: 0; }
+.dictionary-settings-grid strong { color: #5f6d60; font-size: 12px; font-weight: 600; }
+.settings-progress { margin: 0 0 12px; }
+
 @media (max-width: 1080px) {
   .main-content { padding-right: 32px; padding-left: 32px; }
   .sidebar { width: 190px; }

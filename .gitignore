@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.trellis/tasks/**/research/dictionary-artifact/
+.env
+.env.*
+!.env.example

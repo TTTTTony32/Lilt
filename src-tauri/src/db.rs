@@ -1,7 +1,8 @@
 use crate::contracts::{
-    AppSettings, CacheStats, CachedTranslation, GlossaryTerm, HistoryEntry, ModelInfo, Prompt,
-    ProviderRecord, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION,
-    DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
+    AppSettings, CacheStats, CachedTranslation, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
+    ModelInfo, Prompt, ProviderRecord, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
+    DEFAULT_HISTORY_RETENTION, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
+    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -28,6 +29,29 @@ pub struct CacheRecord<'a> {
     pub provider: &'a ProviderRecord,
     pub prompt_id: &'a str,
     pub glossary_version: i64,
+}
+
+pub struct DictionaryInstallationRecord<'a> {
+    pub release_tag: &'a str,
+    pub artifact_sha256: &'a str,
+    pub installed_at: &'a str,
+    pub entry_count: i64,
+    pub distribution_schema_version: &'a str,
+    pub sqlite_schema_version: &'a str,
+    pub compressed_bytes: i64,
+    pub database_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DictionaryInstallation {
+    pub release_tag: String,
+    pub artifact_sha256: String,
+    pub installed_at: String,
+    pub entry_count: i64,
+    pub distribution_schema_version: String,
+    pub sqlite_schema_version: String,
+    pub compressed_bytes: i64,
+    pub database_bytes: i64,
 }
 
 pub fn migrate(connection: &Connection) -> Result<(), String> {
@@ -114,6 +138,28 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
 
             CREATE INDEX IF NOT EXISTS idx_history_created_at ON translation_history(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_cache_last_used_at ON translation_cache(last_used_at ASC);
+
+            CREATE TABLE IF NOT EXISTS dictionary_history (
+                normalized_word TEXT PRIMARY KEY NOT NULL,
+                display_word TEXT NOT NULL,
+                last_queried_at TEXT NOT NULL,
+                query_count INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_dictionary_history_last_queried_at
+                ON dictionary_history(last_queried_at DESC);
+
+            CREATE TABLE IF NOT EXISTS dictionary_installation (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                release_tag TEXT NOT NULL,
+                artifact_sha256 TEXT NOT NULL,
+                installed_at TEXT NOT NULL,
+                entry_count INTEGER NOT NULL,
+                distribution_schema_version TEXT NOT NULL,
+                sqlite_schema_version TEXT NOT NULL,
+                compressed_bytes INTEGER NOT NULL,
+                database_bytes INTEGER NOT NULL
+            );
             ",
         )
         .map_err(|error| format!("数据库迁移失败：{error}"))?;
@@ -529,6 +575,140 @@ pub fn prune_history(connection: &Connection, retention: i64) -> Result<(), Stri
     Ok(())
 }
 
+pub fn list_dictionary_history(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<DictionaryHistoryEntry>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT normalized_word, display_word, last_queried_at, query_count
+             FROM dictionary_history
+             ORDER BY last_queried_at DESC
+             LIMIT ?1",
+        )
+        .map_err(|error| format!("读取词典历史失败：{error}"))?;
+    let rows = statement
+        .query_map(params![limit.clamp(1, 1000)], |row| {
+            Ok(DictionaryHistoryEntry {
+                normalized_word: row.get(0)?,
+                display_word: row.get(1)?,
+                last_queried_at: row.get(2)?,
+                query_count: row.get(3)?,
+            })
+        })
+        .map_err(|error| format!("读取词典历史失败：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取词典历史失败：{error}"))
+}
+
+pub fn record_dictionary_query(
+    connection: &Connection,
+    normalized_word: &str,
+    display_word: &str,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "INSERT INTO dictionary_history
+                (normalized_word, display_word, last_queried_at, query_count)
+             VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(normalized_word) DO UPDATE SET
+                display_word = excluded.display_word,
+                last_queried_at = excluded.last_queried_at,
+                query_count = dictionary_history.query_count + 1",
+            params![normalized_word, display_word, now],
+        )
+        .map_err(|error| format!("写入词典历史失败：{error}"))?;
+    prune_dictionary_history(connection)
+}
+
+pub fn prune_dictionary_history(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM dictionary_history
+             WHERE normalized_word NOT IN (
+                 SELECT normalized_word FROM dictionary_history
+                 ORDER BY last_queried_at DESC LIMIT ?1
+             )",
+            params![crate::contracts::DICTIONARY_HISTORY_LIMIT],
+        )
+        .map_err(|error| format!("清理词典历史失败：{error}"))?;
+    Ok(())
+}
+
+pub fn clear_dictionary_history(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM dictionary_history", [])
+        .map_err(|error| format!("清空词典历史失败：{error}"))?;
+    Ok(())
+}
+
+pub fn save_dictionary_installation(
+    connection: &Connection,
+    record: &DictionaryInstallationRecord<'_>,
+) -> Result<(), String> {
+    if record.distribution_schema_version != DICTIONARY_DISTRIBUTION_SCHEMA_VERSION
+        || record.sqlite_schema_version != DICTIONARY_SQLITE_SCHEMA_VERSION
+    {
+        return Err("词典安装元数据的契约版本不匹配".to_string());
+    }
+    connection
+        .execute(
+            "INSERT INTO dictionary_installation
+                (id, release_tag, artifact_sha256, installed_at, entry_count,
+                 distribution_schema_version, sqlite_schema_version, compressed_bytes, database_bytes)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                release_tag = excluded.release_tag,
+                artifact_sha256 = excluded.artifact_sha256,
+                installed_at = excluded.installed_at,
+                entry_count = excluded.entry_count,
+                distribution_schema_version = excluded.distribution_schema_version,
+                sqlite_schema_version = excluded.sqlite_schema_version,
+                compressed_bytes = excluded.compressed_bytes,
+                database_bytes = excluded.database_bytes",
+            params![
+                record.release_tag,
+                record.artifact_sha256,
+                record.installed_at,
+                record.entry_count,
+                record.distribution_schema_version,
+                record.sqlite_schema_version,
+                record.compressed_bytes,
+                record.database_bytes,
+            ],
+        )
+        .map_err(|error| format!("写入词典安装信息失败：{error}"))?;
+    Ok(())
+}
+
+pub fn get_dictionary_installation(
+    connection: &Connection,
+) -> Result<Option<DictionaryInstallation>, String> {
+    connection
+        .query_row(
+            "SELECT release_tag, artifact_sha256, installed_at, entry_count,
+                    distribution_schema_version, sqlite_schema_version,
+                    compressed_bytes, database_bytes
+             FROM dictionary_installation WHERE id = 1",
+            [],
+            |row| {
+                Ok(DictionaryInstallation {
+                    release_tag: row.get(0)?,
+                    artifact_sha256: row.get(1)?,
+                    installed_at: row.get(2)?,
+                    entry_count: row.get(3)?,
+                    distribution_schema_version: row.get(4)?,
+                    sqlite_schema_version: row.get(5)?,
+                    compressed_bytes: row.get(6)?,
+                    database_bytes: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("读取词典安装信息失败：{error}"))
+}
+
 fn get_setting(connection: &Connection, key: &str) -> Result<Option<String>, String> {
     connection
         .query_row(
@@ -627,5 +807,33 @@ mod tests {
 
         prune_history(&connection, 2).expect("history pruning should succeed");
         assert_eq!(get_history(&connection, 100).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dictionary_history_deduplicates_and_keeps_recent_limit() {
+        let connection = test_connection();
+        record_dictionary_query(&connection, "word-0", "word-0")
+            .expect("dictionary history write should succeed");
+        record_dictionary_query(&connection, "word-0", "Word")
+            .expect("dictionary history update should succeed");
+        let repeated_before_pruning = list_dictionary_history(&connection, 100)
+            .expect("dictionary history read should succeed")
+            .into_iter()
+            .find(|entry| entry.normalized_word == "word-0")
+            .expect("repeated word should exist before pruning");
+        assert_eq!(repeated_before_pruning.query_count, 2);
+
+        for index in 1..=crate::contracts::DICTIONARY_HISTORY_LIMIT {
+            let word = format!("word-{index}");
+            record_dictionary_query(&connection, &word, &word)
+                .expect("dictionary history write should succeed");
+        }
+
+        let history = list_dictionary_history(&connection, 100)
+            .expect("dictionary history read should succeed");
+        assert_eq!(
+            history.len() as i64,
+            crate::contracts::DICTIONARY_HISTORY_LIMIT
+        );
     }
 }

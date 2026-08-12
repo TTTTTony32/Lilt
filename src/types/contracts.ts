@@ -1,4 +1,6 @@
-export type AppTab = "translate" | "glossary" | "history" | "settings";
+import { DEFAULT_DICTIONARY_STATE, type DictionaryHistoryEntry, type DictionaryState } from "./dictionary";
+
+export type AppTab = "translate" | "dictionary" | "glossary" | "history" | "settings";
 
 export type TranslationStatus = "idle" | "streaming" | "cancelling" | "completed" | "failed";
 
@@ -65,6 +67,8 @@ export interface AppSnapshot {
   glossaryTerms: GlossaryTerm[];
   history: HistoryEntry[];
   cacheStats: CacheStats;
+  dictionary: DictionaryState;
+  dictionaryHistory: DictionaryHistoryEntry[];
 }
 
 export interface TranslationEventStarted {
@@ -189,4 +193,6 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
   glossaryTerms: [],
   history: [],
   cacheStats: { usageBytes: 0, entryCount: 0, maxBytes: 268_435_456 },
+  dictionary: DEFAULT_DICTIONARY_STATE,
+  dictionaryHistory: [],
 };

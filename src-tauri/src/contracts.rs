@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const DEFAULT_PROVIDER_ID: &str = "default";
 pub const DEFAULT_PROMPT_ID: &str = "builtin-general";
 pub const DEFAULT_GLOSSARY_ID: &str = "global";
 pub const DEFAULT_HISTORY_RETENTION: i64 = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: i64 = 256 * 1024 * 1024;
+pub const DICTIONARY_HISTORY_LIMIT: i64 = 20;
+pub const DICTIONARY_DISTRIBUTION_SCHEMA_VERSION: &str = "distribution_entry_v5";
+pub const DICTIONARY_SQLITE_SCHEMA_VERSION: &str = "distribution_sqlite_v1";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +89,103 @@ pub struct AppSnapshot {
     pub glossary_terms: Vec<GlossaryTerm>,
     pub history: Vec<HistoryEntry>,
     pub cache_stats: CacheStats,
+    pub dictionary: DictionaryState,
+    pub dictionary_history: Vec<DictionaryHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DictionaryStatus {
+    NotInstalled,
+    Ready,
+    Updating,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryState {
+    pub status: DictionaryStatus,
+    pub installed_release: Option<String>,
+    pub artifact_sha256: Option<String>,
+    pub entry_count: Option<i64>,
+    pub distribution_schema_version: Option<String>,
+    pub sqlite_schema_version: Option<String>,
+    pub installed_at: Option<String>,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub database_bytes: u64,
+    pub cache_size_bytes: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryHistoryEntry {
+    pub normalized_word: String,
+    pub display_word: String,
+    pub last_queried_at: String,
+    pub query_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryLookupResult {
+    pub word: String,
+    pub normalized_word: String,
+    pub entry: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryCommandResult {
+    pub operation_id: String,
+    pub state: DictionaryState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryUpdateStarted {
+    pub operation_id: String,
+    pub state: DictionaryState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryDownloadProgress {
+    pub operation_id: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryVerifyProgress {
+    pub operation_id: String,
+    pub current: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryExtractProgress {
+    pub operation_id: String,
+    pub current: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryUpdateCompleted {
+    pub operation_id: String,
+    pub state: DictionaryState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryUpdateFailed {
+    pub operation_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +291,25 @@ pub struct ProviderRecord {
 #[derive(Debug, Clone)]
 pub struct CachedTranslation {
     pub translated_text: String,
+}
+
+impl DictionaryState {
+    pub fn not_installed() -> Self {
+        Self {
+            status: DictionaryStatus::NotInstalled,
+            installed_release: None,
+            artifact_sha256: None,
+            entry_count: None,
+            distribution_schema_version: None,
+            sqlite_schema_version: None,
+            installed_at: None,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            database_bytes: 0,
+            cache_size_bytes: 0,
+            error: None,
+        }
+    }
 }
 
 #[cfg(test)]

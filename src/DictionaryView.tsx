@@ -1,0 +1,297 @@
+import { useState } from "react";
+import { Download, LoaderCircle, Search } from "lucide-react";
+import { describeError } from "./lib/errors";
+import { invokeCommand } from "./lib/tauri";
+import {
+  decodeDictionaryLookupResult,
+  collectPronunciations,
+  groupRelationsByType,
+  posLabelZh,
+  splitMeaningsByPriority,
+  type DictionaryEntry,
+  type DictionaryHistoryEntry,
+  type DictionaryMeaning,
+  type DictionaryPosGroup,
+  type DictionaryState,
+} from "./types/dictionary";
+
+export interface DictionaryProgress {
+  operationId: string;
+  phase: "download" | "verify" | "extract";
+  current: number;
+  total: number;
+}
+
+interface DictionaryViewProps {
+  state: DictionaryState;
+  history: DictionaryHistoryEntry[];
+  progress: DictionaryProgress | null;
+  onUpdate: () => Promise<void>;
+  onSnapshotChanged: () => Promise<void>;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function progressPercent(progress: DictionaryProgress | null): number {
+  if (!progress || progress.total <= 0) return 0;
+  return Math.min(100, Math.round((progress.current / progress.total) * 100));
+}
+
+function progressLabel(progress: DictionaryProgress | null): string {
+  if (!progress) return "正在准备词典更新";
+  if (progress.phase === "download") return `正在下载 ${progressPercent(progress)}%`;
+  if (progress.phase === "verify") return `正在校验 ${progressPercent(progress)}%`;
+  return `正在解压 ${progressPercent(progress)}%`;
+}
+
+export default function DictionaryView({
+  state,
+  history,
+  progress,
+  onUpdate,
+  onSnapshotChanged,
+}: DictionaryViewProps) {
+  const [word, setWord] = useState("");
+  const [result, setResult] = useState<DictionaryEntry | null>(null);
+  const [querying, setQuerying] = useState(false);
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const updating = state.status === "updating" || progress !== null;
+
+  const query = async (candidate: string) => {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      setQueryError("请输入要查询的词形。");
+      return;
+    }
+    if (state.status !== "ready") {
+      setQueryError(state.error ?? "词典尚未安装，请先下载词典。");
+      return;
+    }
+    setQuerying(true);
+    setQueryError(null);
+    try {
+      const rawResult = await invokeCommand<unknown>("query_dictionary", { word: trimmed });
+      const decoded = decodeDictionaryLookupResult(rawResult);
+      if (!decoded) {
+        setQueryError("词典命令返回了无法识别的结果。");
+        return;
+      }
+      setWord(decoded.word);
+      setResult(decoded.entry);
+      setHistoryOpen(false);
+      await onSnapshotChanged();
+    } catch (reason) {
+      setResult(null);
+      setQueryError(describeError(reason, "词典查询失败"));
+    } finally {
+      setQuerying(false);
+    }
+  };
+
+  return (
+    <section className="page-section dictionary-page">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">DICTIONARY</p>
+          <h1>词典</h1>
+          <p className="page-description">离线查询英语词条、中文释义和官方双语例句。</p>
+        </div>
+        {state.status === "ready" && state.installedRelease && (
+          <div className="model-pill">{state.installedRelease}</div>
+        )}
+      </div>
+
+      <div className="dictionary-search-card">
+        <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
+          <div className="dictionary-input-wrap">
+            <Search size={17} aria-hidden="true" />
+            <input
+              value={word}
+              onChange={(event) => setWord(event.target.value)}
+              onFocus={() => setHistoryOpen(true)}
+              placeholder="输入英语词形，例如 resolve"
+              aria-label="词典查询"
+              autoComplete="off"
+              disabled={updating}
+            />
+            {historyOpen && history.length > 0 && (
+              <div className="dictionary-history-menu" role="listbox">
+                {history.map((item) => (
+                  <button
+                    key={item.normalizedWord}
+                    type="button"
+                    role="option"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => { setWord(item.displayWord); void query(item.displayWord); }}
+                  >
+                    <span>{item.displayWord}</span>
+                    {item.queryCount > 1 && <small>{item.queryCount} 次</small>}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="dictionary-history-clear"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={async () => {
+                    try {
+                      await invokeCommand("clear_dictionary_history");
+                      await onSnapshotChanged();
+                      setHistoryOpen(false);
+                    } catch (reason) {
+                      setQueryError(describeError(reason, "清空词典历史失败"));
+                    }
+                  }}
+                >
+                  清空历史
+                </button>
+              </div>
+            )}
+          </div>
+          <button className="primary-button" type="submit" disabled={querying || updating || state.status !== "ready"}>
+            {querying ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
+            查询
+          </button>
+        </form>
+      </div>
+
+      {state.status !== "ready" && (
+        <DictionaryInstallCard
+          state={state}
+          progress={progress}
+          onUpdate={onUpdate}
+        />
+      )}
+
+      {queryError && <p className="error-message dictionary-message">{queryError}</p>}
+      {state.status === "ready" && !result && !queryError && (
+        <div className="dictionary-empty-state">输入词形后，结果会显示在这里。</div>
+      )}
+      {state.status === "ready" && result && <DictionaryEntryView entry={result} />}
+    </section>
+  );
+}
+
+function DictionaryInstallCard({
+  state,
+  progress,
+  onUpdate,
+}: {
+  state: DictionaryState;
+  progress: DictionaryProgress | null;
+  onUpdate: () => Promise<void>;
+}) {
+  const updating = state.status === "updating" || progress !== null;
+  const title = state.status === "failed" ? "词典不可用" : state.status === "updating" ? "正在更新词典" : "安装离线词典";
+  const description = state.status === "failed"
+    ? state.error ?? "当前词典完整性检查未通过，可以重新下载。"
+    : "词典数据单独存储在应用数据目录中，首次使用需要下载约 207 MB 工件。";
+  return (
+    <div className="dictionary-install-card">
+      <div>
+        <strong>{title}</strong>
+        <p>{description}</p>
+        {updating && (
+          <div className="dictionary-progress" aria-live="polite">
+            <div className="dictionary-progress-label"><span>{progressLabel(progress)}</span><span>{progress ? `${formatBytes(progress.current)} / ${formatBytes(progress.total)}` : ""}</span></div>
+            <div className="dictionary-progress-track"><span style={{ width: `${progressPercent(progress)}%` }} /></div>
+          </div>
+        )}
+      </div>
+      <button className="secondary-button" type="button" onClick={() => void onUpdate()} disabled={updating}>
+        {updating ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+        {state.status === "failed" ? "重试下载" : "下载词典"}
+      </button>
+    </div>
+  );
+}
+
+function DictionaryEntryView({ entry }: { entry: DictionaryEntry }) {
+  const pronunciations = collectPronunciations(entry).map(
+    (pronunciation) => pronunciation.ipa ?? pronunciation.text,
+  );
+  return (
+    <article className="dictionary-entry">
+      <header className="dictionary-entry-header">
+        <div>
+          <h2>{entry.headword}</h2>
+          {entry.headword_summary && <p>{entry.headword_summary}</p>}
+        </div>
+        {pronunciations.length > 0 && <div className="dictionary-pronunciations">{pronunciations.join(" · ")}</div>}
+      </header>
+      {entry.pos_groups.map((group, index) => <DictionaryPosGroupView key={`${group.pos}-${index}`} group={group} />)}
+    </article>
+  );
+}
+
+function DictionaryPosGroupView({ group }: { group: DictionaryPosGroup }) {
+  const [showRare, setShowRare] = useState(false);
+  const { visible, hidden } = splitMeaningsByPriority(group);
+  const relations = groupRelationsByType(group);
+  return (
+    <section className="dictionary-pos-group">
+      <div className="dictionary-pos-heading">
+        <span className="dictionary-pos-en">{group.pos}</span>
+        {posLabelZh(group.pos) && <span className="dictionary-pos-zh">{posLabelZh(group.pos)}</span>}
+        {group.proper_name && <span className="dictionary-tag">专有名词</span>}
+      </div>
+      {group.summary && <p className="dictionary-pos-summary">{group.summary}</p>}
+      <div className="dictionary-meanings">
+        {visible.map((meaning, index) => <DictionaryMeaningView key={meaning.sense_id} meaning={meaning} index={index} />)}
+        {showRare && hidden.map((meaning, index) => <DictionaryMeaningView key={meaning.sense_id} meaning={meaning} index={visible.length + index} />)}
+      </div>
+      {hidden.length > 0 && (
+        <button className="text-button dictionary-rare-toggle" type="button" onClick={() => setShowRare((current) => !current)}>
+          {showRare ? "隐藏罕见义项" : `显示 ${hidden.length} 条罕见义项`}
+        </button>
+      )}
+      {[...relations.entries()].map(([type, words]) => (
+        <div className="dictionary-relations" key={type}>
+          <span>{relationLabel(type)}</span>
+          <div>{words.map((word) => <span className="dictionary-relation-chip" key={word}>{word}</span>)}</div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function DictionaryMeaningView({ meaning, index }: { meaning: DictionaryMeaning; index: number }) {
+  return (
+    <div className="dictionary-meaning">
+      <div className="dictionary-meaning-title">
+        <span className="dictionary-meaning-index">{index + 1}</span>
+        {meaning.short_gloss && <strong>{meaning.short_gloss}</strong>}
+        {meaning.priority === "core" && <span className="dictionary-core-dot" aria-label="核心义项" />}
+        {meaning.priority === "rare" && <span className="dictionary-tag">罕见</span>}
+        {meaning.labels.length > 0 && <span className="dictionary-labels">[{meaning.labels.join(", ")}]</span>}
+      </div>
+      <p>{meaning.learner_explanation}</p>
+      {meaning.usage_note && <p className="dictionary-usage-note">用法：{meaning.usage_note}</p>}
+      {meaning.examples.length > 0 && (
+        <div className="dictionary-examples">
+          {meaning.examples.map((example, exampleIndex) => (
+            <div className="dictionary-example" key={`${meaning.sense_id}-${exampleIndex}`}>
+              <p>{example.text}</p>
+              <p>{example.translation}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function relationLabel(type: string): string {
+  const labels: Record<string, string> = {
+    synonym: "近义",
+    antonym: "反义",
+    related_term: "相关",
+    derived_term: "派生",
+  };
+  return labels[type] ?? type;
+}

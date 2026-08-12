@@ -1,13 +1,15 @@
 mod contracts;
 mod db;
 mod diagnostics;
+mod dictionary;
 mod provider;
 mod secrets;
 
 use contracts::{
-    AppSnapshot, GlossaryTerm, ModelInfo, Prompt, ProviderConfig, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
-    TranslationStarted, DEFAULT_PROVIDER_ID,
+    AppSnapshot, DictionaryCommandResult, DictionaryState, GlossaryTerm, ModelInfo, Prompt,
+    ProviderConfig, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
+    TranslationFailed, TranslationRequest, TranslationStarted, DEFAULT_PROVIDER_ID,
+    DICTIONARY_HISTORY_LIMIT,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -23,16 +25,24 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
-    database: Arc<Mutex<Connection>>,
-    cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    pub(crate) database: Arc<Mutex<Connection>>,
+    pub(crate) cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    pub(crate) data_dir: Arc<PathBuf>,
+    pub(crate) dictionary_update: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
-    fn new(connection: Connection) -> Self {
+    fn new(connection: Connection, data_dir: PathBuf) -> Self {
         Self {
             database: Arc::new(Mutex::new(connection)),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            data_dir: Arc::new(data_dir),
+            dictionary_update: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn dictionary_dir(&self) -> PathBuf {
+        self.data_dir.join("dictionary")
     }
 }
 
@@ -47,7 +57,7 @@ pub fn run() {
             let connection = Connection::open(data_dir.join("app.sqlite"))
                 .map_err(|error| std::io::Error::other(format!("打开应用数据库失败：{error}")))?;
             db::migrate(&connection).map_err(std::io::Error::other)?;
-            app.manage(AppState::new(connection));
+            app.manage(AppState::new(connection, data_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,7 +68,11 @@ pub fn run() {
             translate,
             cancel_translation,
             upsert_glossary_term,
-            delete_glossary_term
+            delete_glossary_term,
+            query_dictionary,
+            get_dictionary_state,
+            update_dictionary,
+            clear_dictionary_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lilt");
@@ -74,10 +88,13 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    snapshot_from_connection(&connection)
+    snapshot_from_connection(&connection, &state.dictionary_dir())
 }
 
-fn snapshot_from_connection(connection: &Connection) -> Result<AppSnapshot, String> {
+fn snapshot_from_connection(
+    connection: &Connection,
+    dictionary_dir: &std::path::Path,
+) -> Result<AppSnapshot, String> {
     let settings = db::get_settings(connection)?;
     let provider = db::get_provider(connection)?;
     let has_api_key = secrets::load_api_key(&provider.id).ok().flatten().is_some();
@@ -86,6 +103,9 @@ fn snapshot_from_connection(connection: &Connection) -> Result<AppSnapshot, Stri
     let glossary_terms = db::list_glossary_terms(connection)?;
     let history = db::get_history(connection, settings.history_retention)?;
     let cache_stats = db::get_cache_stats(connection, settings.cache_max_bytes)?;
+    let dictionary_installation = db::get_dictionary_installation(connection)?;
+    let dictionary = dictionary::read_state(dictionary_dir, dictionary_installation);
+    let dictionary_history = db::list_dictionary_history(connection, DICTIONARY_HISTORY_LIMIT)?;
     Ok(AppSnapshot {
         settings,
         provider: ProviderConfig {
@@ -101,6 +121,8 @@ fn snapshot_from_connection(connection: &Connection) -> Result<AppSnapshot, Stri
         glossary_terms,
         history,
         cache_stats,
+        dictionary,
+        dictionary_history,
     })
 }
 
@@ -655,6 +677,70 @@ fn delete_glossary_term(state: State<'_, AppState>, id: String) -> Result<(), St
     db::delete_glossary_term(&connection, &id)
 }
 
+#[tauri::command]
+fn query_dictionary(
+    state: State<'_, AppState>,
+    word: String,
+) -> Result<contracts::DictionaryLookupResult, String> {
+    let display_word = word.trim().to_string();
+    let result = dictionary::query(&state.dictionary_dir(), &display_word)
+        .map_err(|error| error.to_string())?;
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::record_dictionary_query(&connection, &result.normalized_word, &result.word)?;
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_dictionary_state(state: State<'_, AppState>) -> Result<DictionaryState, String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let installation = db::get_dictionary_installation(&connection)?;
+    Ok(dictionary::read_state(
+        &state.dictionary_dir(),
+        installation,
+    ))
+}
+
+#[tauri::command]
+async fn update_dictionary(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DictionaryCommandResult, String> {
+    let operation_id = Uuid::new_v4().to_string();
+    {
+        let mut current = state
+            .dictionary_update
+            .lock()
+            .map_err(|_| "词典更新状态锁已损坏".to_string())?;
+        if current.is_some() {
+            return Err("词典更新已经在进行中，请稍候".to_string());
+        }
+        *current = Some(operation_id.clone());
+    }
+
+    let result =
+        dictionary::update_dictionary(app, state.inner(), &state.dictionary_dir(), operation_id)
+            .await;
+    if let Ok(mut current) = state.dictionary_update.lock() {
+        *current = None;
+    }
+    result
+}
+
+#[tauri::command]
+fn clear_dictionary_history(state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::clear_dictionary_history(&connection)
+}
+
 fn unregister_request(state: &AppState, request_id: &str) {
     if let Ok(mut cancellations) = state.cancellations.lock() {
         cancellations.remove(request_id);
@@ -741,7 +827,7 @@ mod tests {
 
     #[test]
     fn cancel_request_reports_active_token_and_cancels_it() {
-        let state = AppState::new(Connection::open_in_memory().unwrap());
+        let state = AppState::new(Connection::open_in_memory().unwrap(), std::env::temp_dir());
         let token = CancellationToken::new();
         state
             .cancellations

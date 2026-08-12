@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles } from "lucide-react";
+import { Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
+import DictionaryView, { type DictionaryProgress } from "./DictionaryView";
 import {
   DEFAULT_SNAPSHOT,
   type AppSettings,
@@ -16,6 +17,12 @@ import {
   decodeTranslationCommandResult,
   decodeTranslationEvent,
 } from "./types/contracts";
+import {
+  decodeDictionaryCommandResult,
+  decodeDictionaryUpdateEvent,
+  DICTIONARY_EVENT_NAMES,
+  type DictionaryUpdateEvent,
+} from "./types/dictionary";
 
 const EVENT_NAMES = [
   "translation_started",
@@ -61,7 +68,10 @@ function App() {
   const [lastCacheHit, setLastCacheHit] = useState(false);
   const [translationEventsReady, setTranslationEventsReady] = useState(false);
   const [translationEventsError, setTranslationEventsError] = useState<string | null>(null);
+  const [dictionaryProgress, setDictionaryProgress] = useState<DictionaryProgress | null>(null);
+  const [dictionaryEventsError, setDictionaryEventsError] = useState<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
+  const activeDictionaryOperationId = useRef<string | null>(null);
 
   const refreshSnapshot = useCallback(async () => {
     try {
@@ -172,6 +182,124 @@ function App() {
     };
   }, [handleEvent]);
 
+  const handleDictionaryEvent = useCallback((event: DictionaryUpdateEvent) => {
+    if (event.type === "started") {
+      activeDictionaryOperationId.current = event.operationId;
+      setDictionaryProgress(null);
+      setSnapshot((current) => ({ ...current, dictionary: event.state }));
+      return;
+    }
+    if (event.operationId !== activeDictionaryOperationId.current) return;
+
+    switch (event.type) {
+      case "downloadProgress":
+        setDictionaryProgress({
+          operationId: event.operationId,
+          phase: "download",
+          current: event.downloadedBytes,
+          total: event.totalBytes,
+        });
+        setSnapshot((current) => ({
+          ...current,
+          dictionary: {
+            ...current.dictionary,
+            status: "updating",
+            downloadedBytes: event.downloadedBytes,
+            totalBytes: event.totalBytes,
+            error: null,
+          },
+        }));
+        break;
+      case "verifyProgress":
+        setDictionaryProgress({
+          operationId: event.operationId,
+          phase: "verify",
+          current: event.current,
+          total: event.total,
+        });
+        break;
+      case "extractProgress":
+        setDictionaryProgress({
+          operationId: event.operationId,
+          phase: "extract",
+          current: event.current,
+          total: event.total,
+        });
+        break;
+      case "completed":
+        activeDictionaryOperationId.current = null;
+        setDictionaryProgress(null);
+        setSnapshot((current) => ({ ...current, dictionary: event.state }));
+        void refreshSnapshot();
+        break;
+      case "failed":
+        activeDictionaryOperationId.current = null;
+        setDictionaryProgress(null);
+        setSnapshot((current) => ({
+          ...current,
+          dictionary: { ...current.dictionary, status: "failed", error: event.message },
+        }));
+        break;
+    }
+  }, [refreshSnapshot]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    setDictionaryEventsError(null);
+
+    const initialiseDictionaryListeners = async () => {
+      const results = await Promise.allSettled(DICTIONARY_EVENT_NAMES.map(async (name) => {
+        return listenTo<unknown>(name, (payload) => {
+          if (disposed) return;
+          const event = decodeDictionaryUpdateEvent(name, payload);
+          if (event) handleDictionaryEvent(event);
+        });
+      }));
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        if (disposed) result.value();
+        else unlisteners.push(result.value);
+      }
+      if (disposed) return;
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") {
+        unlisteners.splice(0).forEach((unlisten) => unlisten());
+        setDictionaryEventsError(describeError(failure.reason, "词典更新事件监听初始化失败。"));
+      }
+    };
+
+    void initialiseDictionaryListeners();
+    return () => {
+      disposed = true;
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
+    };
+  }, [handleDictionaryEvent]);
+
+  const handleDictionaryUpdate = useCallback(async () => {
+    setDictionaryEventsError(null);
+    setSnapshot((current) => ({
+      ...current,
+      dictionary: { ...current.dictionary, status: "updating", error: null },
+    }));
+    try {
+      const rawResult = await invokeCommand<unknown>("update_dictionary");
+      const result = decodeDictionaryCommandResult(rawResult);
+      if (!result) throw new Error("词典更新命令返回了无法识别的结果。");
+      activeDictionaryOperationId.current = result.operationId;
+      setDictionaryProgress(null);
+      setSnapshot((current) => ({ ...current, dictionary: result.state }));
+      await refreshSnapshot();
+    } catch (reason) {
+      const message = describeError(reason, "词典更新失败");
+      setSnapshot((current) => ({
+        ...current,
+        dictionary: { ...current.dictionary, status: "failed", error: message },
+      }));
+      setDictionaryProgress(null);
+    }
+  }, [refreshSnapshot]);
+
   const selectedModel = useMemo(() => {
     const known = snapshot.models.find((model) => model.id === snapshot.provider.modelId);
     return known?.label ?? snapshot.provider.modelId;
@@ -278,6 +406,7 @@ function App() {
         <aside className="sidebar">
           <nav className="nav-list" aria-label="主导航">
             <NavItem icon={<Languages size={17} />} label="段落翻译" active={tab === "translate"} onClick={() => setTab("translate")} />
+            <NavItem icon={<BookOpen size={17} />} label="词典" active={tab === "dictionary"} onClick={() => setTab("dictionary")} />
             <NavItem icon={<FileText size={17} />} label="术语表" active={tab === "glossary"} onClick={() => setTab("glossary")} />
             <NavItem icon={<History size={17} />} label="翻译历史" active={tab === "history"} onClick={() => setTab("history")} />
             <NavItem icon={<Settings size={17} />} label="设置" active={tab === "settings"} onClick={() => setTab("settings")} />
@@ -309,11 +438,28 @@ function App() {
               onCopy={() => void handleCopy()}
             />
           )}
+          {tab === "dictionary" && (
+            <DictionaryView
+              state={snapshot.dictionary}
+              history={snapshot.dictionaryHistory}
+              progress={dictionaryProgress}
+              onUpdate={handleDictionaryUpdate}
+              onSnapshotChanged={refreshSnapshot}
+            />
+          )}
           {tab === "glossary" && (
             <GlossaryView terms={snapshot.glossaryTerms} onChanged={() => void refreshSnapshot()} />
           )}
           {tab === "history" && <HistoryView history={snapshot.history} />}
-          {tab === "settings" && <SettingsView snapshot={snapshot} onSaved={handleSettingsSaved} />}
+          {tab === "settings" && (
+            <SettingsView
+              snapshot={snapshot}
+              dictionaryProgress={dictionaryProgress}
+              dictionaryEventsError={dictionaryEventsError}
+              onDictionaryUpdate={handleDictionaryUpdate}
+              onSaved={handleSettingsSaved}
+            />
+          )}
         </main>
       </div>
     </div>
@@ -487,7 +633,19 @@ function HistoryRow({ item }: { item: HistoryEntry }) {
   return <article className="history-row"><div className="history-meta"><span>{formatDate(item.createdAt)}</span><span>{item.modelId}</span>{item.cacheHit && <span className="tag">缓存命中</span>}</div><p className="history-source">{item.sourceText}</p><p className="history-result">{item.translatedText}</p></article>;
 }
 
-function SettingsView({ snapshot, onSaved }: { snapshot: AppSnapshot; onSaved: (snapshot: AppSnapshot) => void }) {
+function SettingsView({
+  snapshot,
+  dictionaryProgress,
+  dictionaryEventsError,
+  onDictionaryUpdate,
+  onSaved,
+}: {
+  snapshot: AppSnapshot;
+  dictionaryProgress: DictionaryProgress | null;
+  dictionaryEventsError: string | null;
+  onDictionaryUpdate: () => Promise<void>;
+  onSaved: (snapshot: AppSnapshot) => void;
+}) {
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [promptId, setPromptId] = useState(snapshot.provider.promptId);
@@ -547,6 +705,18 @@ function SettingsView({ snapshot, onSaved }: { snapshot: AppSnapshot; onSaved: (
     }
   };
 
+  const dictionaryUpdating = snapshot.dictionary.status === "updating" || dictionaryProgress !== null;
+  const dictionaryStatusLabel = snapshot.dictionary.status === "ready"
+    ? "已安装"
+    : snapshot.dictionary.status === "updating"
+      ? "更新中"
+      : snapshot.dictionary.status === "failed"
+        ? "需要处理"
+        : "未安装";
+  const dictionaryProgressPercent = dictionaryProgress && dictionaryProgress.total > 0
+    ? Math.min(100, Math.round((dictionaryProgress.current / dictionaryProgress.total) * 100))
+    : 0;
+
   return (
     <section className="page-section narrow-page">
       <PageTitle eyebrow="SETTINGS" title="设置" description="配置模型连接，并管理本地历史与段落缓存。" />
@@ -560,6 +730,24 @@ function SettingsView({ snapshot, onSaved }: { snapshot: AppSnapshot; onSaved: (
             <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
           </div>
           <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。</span><div className="button-group"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button><button className="primary-button small-button" type="button" onClick={() => void saveProvider()}>保存 Provider</button></div></div>
+        </div>
+
+        <div className="simple-card dictionary-settings-card">
+          <div className="card-heading"><div><strong>本地词典</strong><span>open-dictionary，离线查询，不依赖 Provider</span></div><span className={`connection-status ${snapshot.dictionary.status === "ready" ? "connected" : ""}`}>{dictionaryStatusLabel}</span></div>
+          <div className="dictionary-settings-grid">
+            <div><span className="fact-label">Release</span><strong>{snapshot.dictionary.installedRelease ?? "尚未安装"}</strong></div>
+            <div><span className="fact-label">词条数量</span><strong>{snapshot.dictionary.entryCount?.toLocaleString("zh-CN") ?? "—"}</strong></div>
+            <div><span className="fact-label">占用空间</span><strong>{formatBytes(snapshot.dictionary.cacheSizeBytes)}</strong></div>
+          </div>
+          {dictionaryUpdating && (
+            <div className="dictionary-progress settings-progress" aria-live="polite">
+              <div className="dictionary-progress-label"><span>{dictionaryProgress?.phase === "verify" ? "正在校验" : dictionaryProgress?.phase === "extract" ? "正在解压" : "正在下载"}</span><span>{dictionaryProgress ? `${dictionaryProgressPercent}%` : ""}</span></div>
+              <div className="dictionary-progress-track"><span style={{ width: `${dictionaryProgressPercent}%` }} /></div>
+            </div>
+          )}
+          {dictionaryEventsError && <p className="error-message settings-message">{dictionaryEventsError}</p>}
+          {snapshot.dictionary.error && !dictionaryUpdating && <p className="error-message settings-message">{snapshot.dictionary.error}</p>}
+          <div className="form-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
         </div>
 
         <div className="simple-card">
