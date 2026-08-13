@@ -155,6 +155,7 @@ pub fn run() {
             if window.label() == "selection" {
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
                     match event {
+                        WindowEvent::Focused(true) => state.selection.handle_focus_gained(),
                         WindowEvent::Focused(false) => state.selection.handle_focus_lost(),
                         WindowEvent::Resized(_) => state.selection.handle_window_resized(),
                         _ => {}

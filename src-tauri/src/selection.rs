@@ -28,6 +28,7 @@ const SELECTION_TTL: Duration = Duration::from_secs(120);
 const AUTOMATIC_DEBOUNCE: Duration = Duration::from_millis(500);
 const DRAG_FOCUS_GRACE: Duration = Duration::from_millis(250);
 const RESIZE_FOCUS_GRACE: Duration = Duration::from_millis(750);
+const FOCUS_LOST_CHECK_DELAY: Duration = Duration::from_millis(320);
 
 #[derive(Clone)]
 pub struct SelectionService {
@@ -54,6 +55,7 @@ struct SelectionInner {
     dragging: bool,
     drag_finished_at: Option<Instant>,
     last_resized_at: Option<Instant>,
+    focus_lost_generation: u64,
     content_width: i64,
     content_height: i64,
 }
@@ -124,6 +126,7 @@ impl SelectionService {
                 dragging: false,
                 drag_finished_at: None,
                 last_resized_at: None,
+                focus_lost_generation: 0,
                 content_width: DEFAULT_SELECTION_WINDOW_WIDTH,
                 content_height: DEFAULT_SELECTION_WINDOW_HEIGHT,
             })),
@@ -454,15 +457,38 @@ impl SelectionService {
     pub fn handle_window_resized(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.last_resized_at = Some(Instant::now());
+            inner.focus_lost_generation = inner.focus_lost_generation.wrapping_add(1);
+        }
+    }
+
+    pub fn handle_focus_gained(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.focus_lost_generation = inner.focus_lost_generation.wrapping_add(1);
         }
     }
 
     pub fn handle_focus_lost(&self) {
+        let generation = match self.inner.lock() {
+            Ok(mut inner) => {
+                inner.focus_lost_generation = inner.focus_lost_generation.wrapping_add(1);
+                inner.focus_lost_generation
+            }
+            Err(_) => return,
+        };
+        let service = self.clone();
+        thread::spawn(move || {
+            thread::sleep(FOCUS_LOST_CHECK_DELAY);
+            service.hide_after_focus_lost(generation);
+        });
+    }
+
+    fn hide_after_focus_lost(&self, generation: u64) {
         let should_hide = self
             .inner
             .lock()
             .map(|inner| {
-                !inner.dragging
+                inner.focus_lost_generation == generation
+                    && !inner.dragging
                     && inner
                         .drag_finished_at
                         .map(|finished_at| finished_at.elapsed() >= DRAG_FOCUS_GRACE)
@@ -1184,13 +1210,34 @@ fn read_prepared_selection(prepared: &PreparedSelection) -> Option<SelectionCand
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_shortcut, recently_resized};
-    use std::time::Instant;
+    use super::{normalize_shortcut, recently_resized, SelectionService};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        time::Instant,
+    };
+
+    fn test_service() -> SelectionService {
+        SelectionService::new(Arc::new(Mutex::new(HashMap::new())))
+    }
 
     #[test]
     fn resize_grace_only_applies_after_a_resize_event() {
         assert!(!recently_resized(None));
         assert!(recently_resized(Some(Instant::now())));
+    }
+
+    #[test]
+    fn resize_and_focus_gain_cancel_pending_focus_hide_checks() {
+        let service = test_service();
+        service.handle_focus_lost();
+        let after_focus_lost = service.inner.lock().unwrap().focus_lost_generation;
+        service.handle_window_resized();
+        let after_resize = service.inner.lock().unwrap().focus_lost_generation;
+        assert_ne!(after_resize, after_focus_lost);
+        service.handle_focus_gained();
+        let after_focus_gained = service.inner.lock().unwrap().focus_lost_generation;
+        assert_ne!(after_focus_gained, after_resize);
     }
 
     #[test]
