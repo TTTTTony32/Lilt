@@ -8,6 +8,18 @@
 
 * { box-sizing: border-box; }
 
+html {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
 body { margin: 0; min-width: 960px; min-height: 100vh; background: #f5f3ed; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
@@ -226,8 +238,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .selection-body #root { height: 100%; min-height: 0; }
 .selection-trigger-window { width: 100%; min-width: 48px; height: 100%; display: grid; place-items: center; background: transparent; }
 .selection-trigger-window.is-reading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border-radius: 10px; color: #657267; background: #fbfaf7; box-shadow: 0 8px 22px rgba(48, 61, 50, .14); font-size: 11px; }
-.selection-trigger-button { width: 40px; height: 40px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
-.selection-trigger-button img { width: 40px; height: 40px; display: block; border-radius: 11px; }
+.selection-trigger-button { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.selection-trigger-button img { width: 34px; height: 34px; display: block; border-radius: 9px; }
 .selection-trigger-button:hover { filter: brightness(1.08); }
 .selection-trigger-button:disabled { cursor: wait; opacity: .65; }
 .selection-trigger-reading { white-space: nowrap; }

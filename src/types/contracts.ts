@@ -456,7 +456,7 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     selectionMode: "shortcut",
     selectionShortcut: "Ctrl+Shift+L",
     selectionWindowWidth: 560,
-    selectionWindowHeight: 360,
+    selectionWindowHeight: 320,
     closeBehavior: "ask",
   },
   provider: {
