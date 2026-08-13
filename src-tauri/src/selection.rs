@@ -904,10 +904,16 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 if enabled {
                     let service_for_event = service.clone();
                     let callback: Box<CustomEventHandlerFn> = Box::new(move |sender, _event| {
+                        if sender.get_process_id().ok() == Some(std::process::id()) {
+                            return Ok(());
+                        }
                         if let Some(value) =
                             prepare_element(&service_for_event, sender, SelectionTrigger::Automatic)
                         {
                             service_for_event.enqueue_prepared(value);
+                        } else {
+                            service_for_event.invalidate_for_new_selection();
+                            service_for_event.send_worker(WorkerCommand::ClearPending);
                         }
                         Ok(())
                     });
