@@ -5,15 +5,17 @@ mod dictionary;
 mod examples;
 mod provider;
 mod secrets;
+mod selection;
 
 use contracts::{
     AppSnapshot, DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
     DictionaryState, GlossaryTerm, ModelInfo, ParagraphExample, Prompt, ProviderConfig,
-    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationFailed,
-    TranslationRequest, TranslationStarted, WordExampleCancelled, WordExampleCommandResult,
-    WordExampleCompleted, WordExampleFailed, WordExamplePosDelta, WordExampleRequest,
-    WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
-    WORD_EXAMPLE_PROTOCOL_VERSION,
+    SelectionMode, SelectionNotice, SelectionRequestPayload, SelectionRuntimeStatus,
+    SelectionSettingsResult, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
+    TranslationFailed, TranslationRequest, TranslationStarted, WordExampleCancelled,
+    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
+    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID,
+    DICTIONARY_HISTORY_LIMIT, WORD_EXAMPLE_PROTOCOL_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -25,7 +27,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -37,19 +39,23 @@ pub struct AppState {
     pub(crate) dictionary_update: Arc<Mutex<Option<String>>>,
     pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
     pub(crate) dictionary_initialising: Arc<AtomicBool>,
+    pub(crate) selection: selection::SelectionService,
 }
 
 impl AppState {
     fn new(connection: Connection, data_dir: PathBuf) -> Self {
+        let cancellations = Arc::new(Mutex::new(HashMap::new()));
+        let selection = selection::SelectionService::new(cancellations.clone());
         let dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
         diagnostics::info("dictionary.store.deferred source=startup");
         Self {
             database: Arc::new(Mutex::new(connection)),
-            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            cancellations,
             data_dir: Arc::new(data_dir),
             dictionary_update: Arc::new(Mutex::new(None)),
             dictionary_store: Arc::new(Mutex::new(dictionary_store)),
             dictionary_initialising: Arc::new(AtomicBool::new(false)),
+            selection,
         }
     }
 
@@ -59,7 +65,15 @@ impl AppState {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            if window.label() == "selection" && matches!(event, WindowEvent::Focused(false)) {
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    state.selection.hide_window();
+                }
+            }
+        })
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -70,7 +84,23 @@ pub fn run() {
                 .map_err(|error| std::io::Error::other(format!("打开应用数据库失败：{error}")))?;
             db::migrate(&connection).map_err(std::io::Error::other)?;
             let state = AppState::new(connection, data_dir);
+            let selection_settings = {
+                let connection = state
+                    .database
+                    .lock()
+                    .map_err(|_| std::io::Error::other("应用数据库锁已损坏"))?;
+                db::get_settings(&connection).map_err(std::io::Error::other)?
+            };
+            state.selection.attach_app(app.handle().clone());
+            state.selection.start_worker();
             app.manage(state.clone());
+            if let Err(error) = state.selection.configure(
+                app.handle(),
+                selection_settings.selection_mode,
+                &selection_settings.selection_shortcut,
+            ) {
+                diagnostics::error(format!("selection.configure.startup_failed reason={error}"));
+            }
             schedule_dictionary_initialisation(state.clone());
             schedule_pending_example_indexes(state);
             Ok(())
@@ -80,6 +110,13 @@ pub fn run() {
             save_provider_config,
             fetch_models,
             save_app_settings,
+            configure_selection,
+            get_selection_status,
+            set_selection_language,
+            selection_window_ready,
+            get_selection_request,
+            open_selection_in_main,
+            dismiss_selection,
             translate,
             cancel_translation,
             upsert_glossary_term,
@@ -91,8 +128,15 @@ pub fn run() {
             update_dictionary,
             clear_dictionary_history
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Lilt");
+        .build(tauri::generate_context!())
+        .expect("error while building Lilt");
+    app.run(|app, event| {
+        if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.selection.shutdown();
+            }
+        }
+    });
 }
 
 fn initialise_database(data_dir: &PathBuf) -> Result<(), String> {
@@ -313,6 +357,76 @@ fn save_app_settings(
         word_ai_cache_enabled,
         paragraph_example_lookup_enabled,
     )
+}
+
+#[tauri::command]
+fn configure_selection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: SelectionMode,
+    shortcut: String,
+) -> Result<SelectionSettingsResult, String> {
+    let previous = state.selection.status();
+    let status = state.selection.configure(&app, mode, &shortcut)?;
+    let settings = match state.database.lock() {
+        Ok(connection) => {
+            if let Err(error) = db::save_selection_settings(&connection, mode, shortcut.trim()) {
+                let _ = state
+                    .selection
+                    .configure(&app, previous.mode, &previous.shortcut);
+                return Err(error);
+            }
+            db::get_settings(&connection)?
+        }
+        Err(_) => {
+            let _ = state
+                .selection
+                .configure(&app, previous.mode, &previous.shortcut);
+            return Err("应用数据库锁已损坏".to_string());
+        }
+    };
+    Ok(SelectionSettingsResult { settings, status })
+}
+
+#[tauri::command]
+fn get_selection_status(state: State<'_, AppState>) -> Result<SelectionRuntimeStatus, String> {
+    Ok(state.selection.status())
+}
+
+#[tauri::command]
+fn set_selection_language(
+    state: State<'_, AppState>,
+    source_language: String,
+    target_language: String,
+) -> Result<(), String> {
+    state
+        .selection
+        .set_language(source_language, target_language);
+    Ok(())
+}
+
+#[tauri::command]
+fn selection_window_ready(state: State<'_, AppState>) -> Result<Option<SelectionNotice>, String> {
+    Ok(state.selection.window_ready())
+}
+
+#[tauri::command]
+fn get_selection_request(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<SelectionRequestPayload, String> {
+    state.selection.get_request(&request_id)
+}
+
+#[tauri::command]
+fn open_selection_in_main(state: State<'_, AppState>, request_id: String) -> Result<(), String> {
+    state.selection.open_in_main(&request_id)
+}
+
+#[tauri::command]
+fn dismiss_selection(state: State<'_, AppState>, request_id: Option<String>) -> Result<(), String> {
+    state.selection.dismiss(request_id.as_deref());
+    Ok(())
 }
 
 #[tauri::command]

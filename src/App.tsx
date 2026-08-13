@@ -17,6 +17,9 @@ import {
   type WordExampleCommandResult,
   type WordExampleEvent,
   type WordExampleState,
+  type SelectionRuntimeStatus,
+  decodeSelectionRequest,
+  decodeSelectionStatus,
   decodeTranslationCommandResult,
   decodeTranslationEvent,
   decodeWordExampleCommandResult,
@@ -116,6 +119,49 @@ function App() {
   useEffect(() => {
     void refreshSnapshot();
   }, [refreshSnapshot]);
+
+  useEffect(() => {
+    void invokeCommand("set_selection_language", {
+      sourceLanguage,
+      targetLanguage,
+    }).catch(() => {
+      // 主窗口启动时后端可能尚未完成初始化，划词功能会在下一次配置或选区事件中恢复。
+    });
+  }, [sourceLanguage, targetLanguage]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    const initialise = async () => {
+      try {
+        const next = await listenTo<unknown>("selection_open_main", async (payload) => {
+          if (disposed || typeof payload !== "string") return;
+          try {
+            const raw = await invokeCommand<unknown>("get_selection_request", { requestId: payload });
+            const request = decodeSelectionRequest(raw);
+            if (!request || disposed) return;
+            setSourceText(request.sourceText);
+            setSourceLanguage(request.sourceLanguage);
+            setTargetLanguage(request.targetLanguage);
+            setTab("translate");
+            setError(null);
+            setNotice("已将选中文本载入段落翻译");
+          } catch (reason) {
+            if (!disposed) setError(describeError(reason, "无法读取选中文本"));
+          }
+        });
+        if (disposed) next();
+        else unlisten = next;
+      } catch (reason) {
+        if (!disposed) setError(describeError(reason, "划词翻译事件监听初始化失败"));
+      }
+    };
+    void initialise();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const applyTranslationResult = useCallback((requestId: string, result: TranslationCommandResult) => {
     if (requestId !== activeRequestId.current) return;
@@ -856,6 +902,9 @@ function SettingsView({
   const [promptId, setPromptId] = useState(snapshot.provider.promptId);
   const [apiKey, setApiKey] = useState("");
   const [settings, setSettings] = useState<AppSettings>(snapshot.settings);
+  const [selectionMode, setSelectionMode] = useState(snapshot.settings.selectionMode);
+  const [selectionShortcut, setSelectionShortcut] = useState(snapshot.settings.selectionShortcut);
+  const [selectionStatus, setSelectionStatus] = useState<SelectionRuntimeStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -864,7 +913,35 @@ function SettingsView({
     setModelId(snapshot.provider.modelId);
     setPromptId(snapshot.provider.promptId);
     setSettings(snapshot.settings);
+    setSelectionMode(snapshot.settings.selectionMode);
+    setSelectionShortcut(snapshot.settings.selectionShortcut);
   }, [snapshot]);
+
+  useEffect(() => {
+    let disposed = false;
+    const loadStatus = async () => {
+      try {
+        const raw = await invokeCommand<unknown>("get_selection_status");
+        const next = decodeSelectionStatus(raw);
+        if (!disposed && next) setSelectionStatus(next);
+      } catch {
+        // 设置页仍可编辑，运行时状态会在后端完成初始化后再次同步。
+      }
+    };
+    void loadStatus();
+    let unlisten: (() => void) | null = null;
+    void listenTo<unknown>("selection_status_changed", (payload) => {
+      const next = decodeSelectionStatus(payload);
+      if (!disposed && next) setSelectionStatus(next);
+    }).then((next) => {
+      if (disposed) next();
+      else unlisten = next;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [snapshot.settings.selectionMode, snapshot.settings.selectionShortcut]);
 
   const saveProvider = async () => {
     setError(null);
@@ -901,6 +978,29 @@ function SettingsView({
     }
   };
 
+  const saveSelectionSettings = async () => {
+    const shortcut = selectionShortcut.trim();
+    if (!shortcut) {
+      setError("快捷键不能为空。");
+      setMessage(null);
+      return;
+    }
+    setError(null);
+    setMessage(null);
+    try {
+      await invokeCommand("configure_selection", { mode: selectionMode, shortcut });
+      const rawStatus = await invokeCommand<unknown>("get_selection_status");
+      const nextStatus = decodeSelectionStatus(rawStatus);
+      if (nextStatus) setSelectionStatus(nextStatus);
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      onSaved(next);
+      setMessage("划词翻译设置已保存");
+    } catch (reason) {
+      setError(describeError(reason, "划词翻译设置保存失败"));
+      setMessage(null);
+    }
+  };
+
   const fetchModels = async () => {
     setError(null);
     setMessage(null);
@@ -927,6 +1027,7 @@ function SettingsView({
   const dictionaryProgressPercent = dictionaryProgress && dictionaryProgress.total > 0
     ? Math.min(100, Math.round((dictionaryProgress.current / dictionaryProgress.total) * 100))
     : 0;
+  const activeSelectionMode = selectionStatus?.mode ?? snapshot.settings.selectionMode;
 
   return (
     <section className="page-section narrow-page">
@@ -959,6 +1060,17 @@ function SettingsView({
           {dictionaryEventsError && <p className="error-message settings-message">{dictionaryEventsError}</p>}
           {snapshot.dictionary.error && !dictionaryUpdating && <p className="error-message settings-message">{snapshot.dictionary.error}</p>}
           <div className="form-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
+        </div>
+
+        <div className="simple-card selection-settings-card">
+          <div className="card-heading"><div><strong>划词翻译</strong><span>从其他 Windows 应用读取选中文本，浮窗复用当前翻译方向。</span></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
+          <div className="form-grid selection-settings-grid">
+            <label>触发方式<select value={selectionMode} onChange={(event) => setSelectionMode(event.target.value as AppSettings["selectionMode"])}><option value="shortcut">按快捷键</option><option value="automatic">自动监听选区</option></select></label>
+            <label>快捷键<input value={selectionShortcut} onChange={(event) => setSelectionShortcut(event.target.value)} placeholder="Ctrl+Shift+L" /></label>
+          </div>
+          <p className="settings-hint">快捷键格式使用 Ctrl+Shift+L 这样的组合。按快捷键模式读取当前选区；自动监听模式在选区稳定 500 毫秒后显示结果。自动模式仍保留快捷键设置，切换回来即可使用。</p>
+          {selectionStatus?.message && <p className="error-message settings-message">{selectionStatus.message}</p>}
+          <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}</span><button className="primary-button small-button" type="button" onClick={() => void saveSelectionSettings()}>保存划词设置</button></div>
         </div>
 
         <div className="simple-card">

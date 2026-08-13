@@ -8,12 +8,14 @@ pub const DEFAULT_HISTORY_RETENTION: i64 = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: i64 = 256 * 1024 * 1024;
 pub const DEFAULT_WORD_AI_CACHE_ENABLED: bool = true;
 pub const DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED: bool = true;
+pub const DEFAULT_SELECTION_SHORTCUT: &str = "Ctrl+Shift+L";
+pub const DEFAULT_SELECTION_MODE: SelectionMode = SelectionMode::Shortcut;
 pub const DICTIONARY_HISTORY_LIMIT: i64 = 20;
 pub const DICTIONARY_DISTRIBUTION_SCHEMA_VERSION: &str = "distribution_entry_v5";
 pub const DICTIONARY_SQLITE_SCHEMA_VERSION: &str = "distribution_sqlite_v1";
 pub const WORD_EXAMPLE_PROTOCOL_VERSION: &str = "word-example-v1";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub history_retention: i64,
@@ -22,6 +24,86 @@ pub struct AppSettings {
     pub cache_usage_bytes: i64,
     pub word_ai_cache_enabled: bool,
     pub paragraph_example_lookup_enabled: bool,
+    pub selection_mode: SelectionMode,
+    pub selection_shortcut: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectionMode {
+    Shortcut,
+    Automatic,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectionTrigger {
+    Shortcut,
+    Automatic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionAnchor {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionNotice {
+    pub request_id: String,
+    pub trigger: SelectionTrigger,
+    pub anchor: Option<SelectionAnchor>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionUnavailable {
+    pub request_id: Option<String>,
+    pub trigger: SelectionTrigger,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionStatusChanged {
+    pub mode: SelectionMode,
+    pub shortcut: String,
+    pub shortcut_registered: bool,
+    pub ui_automation_ready: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionRuntimeStatus {
+    pub mode: SelectionMode,
+    pub shortcut: String,
+    pub shortcut_registered: bool,
+    pub ui_automation_ready: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionRequestPayload {
+    pub request_id: String,
+    pub source_text: String,
+    pub source_language: String,
+    pub target_language: String,
+    pub trigger: SelectionTrigger,
+    pub anchor: Option<SelectionAnchor>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionSettingsResult {
+    pub settings: AppSettings,
+    pub status: SelectionRuntimeStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]

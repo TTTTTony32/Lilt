@@ -1,5 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { decodeTranslationCommandResult, decodeTranslationEvent } from "./contracts";
+import {
+  decodeSelectionNotice,
+  decodeSelectionRequest,
+  decodeSelectionStatus,
+  decodeSelectionUnavailable,
+  decodeTranslationCommandResult,
+  decodeTranslationEvent,
+} from "./contracts";
+
+describe("selection contract", () => {
+  it("decodes notices, requests, and runtime status", () => {
+    expect(decodeSelectionNotice({
+      requestId: "selection-1",
+      trigger: "shortcut",
+      anchor: { x: 10, y: 20, width: 30, height: 12 },
+    })).toEqual({
+      requestId: "selection-1",
+      trigger: "shortcut",
+      anchor: { x: 10, y: 20, width: 30, height: 12 },
+    });
+    expect(decodeSelectionRequest({
+      requestId: "selection-1",
+      sourceText: "hello",
+      sourceLanguage: "en",
+      targetLanguage: "zh-CN",
+      trigger: "shortcut",
+      anchor: null,
+    })?.sourceText).toBe("hello");
+    expect(decodeSelectionStatus({
+      mode: "automatic",
+      shortcut: "Ctrl+Shift+L",
+      shortcutRegistered: false,
+      uiAutomationReady: true,
+      message: null,
+    })?.uiAutomationReady).toBe(true);
+  });
+
+  it("rejects malformed selection payloads and preserves unavailable errors", () => {
+    expect(decodeSelectionNotice({ requestId: "selection-1", trigger: "shortcut", anchor: { x: "10" } })).toBeNull();
+    expect(decodeSelectionRequest({ requestId: "selection-1", sourceText: "hello" })).toBeNull();
+    expect(decodeSelectionUnavailable({
+      requestId: null,
+      trigger: "automatic",
+      code: "unsupported_control",
+      message: "不支持读取",
+    })).toEqual({
+      requestId: null,
+      trigger: "automatic",
+      code: "unsupported_control",
+      message: "不支持读取",
+    });
+    expect(decodeSelectionStatus({ mode: "automatic", shortcut: "Ctrl+Shift+L" })).toBeNull();
+  });
+});
 
 describe("translation event contract", () => {
   it("decodes a delta event at the boundary", () => {

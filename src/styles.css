@@ -183,6 +183,44 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-settings-grid > div:last-child { border-right: 0; }
 .dictionary-settings-grid strong { color: #5f6d60; font-size: 12px; font-weight: 600; }
 .settings-progress { margin: 0 0 12px; }
+.selection-settings-grid { margin-top: 2px; }
+.settings-hint { margin: 14px 0 0; color: #92978e; font-size: 11px; line-height: 1.65; }
+
+.selection-body { min-width: 300px; min-height: 180px; overflow: hidden; background: #fbfaf7; }
+.selection-window { width: 100%; min-height: 100vh; padding: 14px 16px 12px; color: #394b3e; background: #fbfaf7; box-shadow: 0 12px 34px rgba(48, 61, 50, .16); }
+.selection-header { display: flex; align-items: center; justify-content: space-between; color: #4b6354; }
+.selection-header > div { display: flex; align-items: center; gap: 7px; font-family: Georgia, "Songti SC", serif; font-size: 16px; }
+.selection-mark { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: #fffdf8; background: #4b6354; font-size: 14px; }
+.selection-close { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 6px; color: #9a9e96; background: transparent; }
+.selection-close:hover { color: #4b6354; background: #edf0ea; }
+.selection-source { max-height: 82px; margin: 13px 0 10px; overflow: auto; color: #59665a; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.selection-placeholder { margin: 16px 0; color: #a4a69d; font-size: 12px; }
+.selection-result { padding: 11px 12px; border: 1px solid #e1e3dc; border-radius: 8px; background: #f7f8f4; }
+.selection-label { display: flex; justify-content: space-between; color: #89958a; font-size: 10px; }
+.selection-label span { color: #6e8a72; }
+.selection-translation { min-height: 46px; margin-top: 7px; color: #4f5c51; font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.selection-loading { display: flex; align-items: center; gap: 7px; color: #89958a; font-size: 11px; }
+.selection-word-heading { display: flex; align-items: baseline; gap: 9px; }
+.selection-word-heading strong { color: #394b3e; font-family: Georgia, "Songti SC", serif; font-size: 20px; font-weight: 500; }
+.selection-word-heading span { color: #8b958b; font-size: 10px; }
+.selection-dictionary > p { margin: 6px 0 0; color: #657267; font-size: 12px; line-height: 1.6; }
+.selection-muted { color: #9a9e96 !important; font-size: 11px !important; }
+.selection-candidates { display: grid; gap: 7px; color: #7d857c; font-size: 11px; }
+.selection-candidates button { width: fit-content; padding: 5px 8px; border: 1px solid #d5ded4; border-radius: 5px; color: #58705c; background: #f5f8f2; font-size: 11px; }
+.selection-example { margin-top: 10px; padding: 9px 10px; border-left: 2px solid #d4dfd3; background: #f0f3ed; }
+.selection-example > span:first-child { color: #9ba399; font-size: 10px; }
+.selection-example p { margin: 4px 0 0; color: #69756b; font-size: 11px; line-height: 1.6; }
+.selection-example .selection-example-translation { color: #556558; }
+.selection-example small { display: block; margin-top: 5px; color: #a25e53; font-size: 10px; }
+.selection-pos { display: inline-block; margin-top: 5px; padding: 2px 5px; border-radius: 4px; color: #6d8a73; background: #e8efe7; font-size: 10px; }
+.selection-error, .selection-notice { margin: 9px 0 0; font-size: 11px; }
+.selection-error { color: #a25e53; }
+.selection-notice { color: #61816a; }
+.selection-actions { min-height: 30px; margin-top: 11px; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #a1a39a; font-size: 10px; }
+.selection-actions > div { display: flex; gap: 5px; }
+.selection-action { min-height: 27px; padding: 0 7px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid #e0e2da; border-radius: 5px; color: #748276; background: #fffefb; font-size: 10px; }
+.selection-action:hover:not(:disabled) { border-color: #b7c6b7; color: #4b6354; }
+.selection-action.danger { color: #a25e53; }
 
 @media (max-width: 1080px) {
   .main-content { padding-right: 32px; padding-left: 32px; }

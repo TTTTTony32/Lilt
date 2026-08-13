@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window capability with only the permissions required by the app",
+  "description": "Main window and selection window permissions required by the app",
   "windows": [
-    "main"
+    "main",
+    "selection"
   ],
   "permissions": [
     "core:default",

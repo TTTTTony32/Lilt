@@ -1,8 +1,9 @@
 use crate::contracts::{
     AppSettings, CacheStats, CachedTranslation, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
-    ModelInfo, Prompt, ProviderRecord, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
+    ModelInfo, Prompt, ProviderRecord, SelectionMode, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
     DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID,
-    DEFAULT_PROVIDER_ID, DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
+    DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
+    DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
     DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use chrono::Utc;
@@ -316,6 +317,13 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         get_setting(connection, "paragraph_example_lookup_enabled")?
             .map(|value| value != "0")
             .unwrap_or(DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED);
+    let selection_mode = match get_setting(connection, "selection_mode")?.as_deref() {
+        Some("automatic") => SelectionMode::Automatic,
+        _ => DEFAULT_SELECTION_MODE,
+    };
+    let selection_shortcut = get_setting(connection, "selection_shortcut")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SELECTION_SHORTCUT.to_string());
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
         history_retention,
@@ -324,6 +332,8 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         cache_usage_bytes: stats.usage_bytes,
         word_ai_cache_enabled,
         paragraph_example_lookup_enabled,
+        selection_mode,
+        selection_shortcut,
     })
 }
 
@@ -371,6 +381,22 @@ pub fn save_settings(
         connection,
         cache_max_bytes.clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
     )
+}
+
+pub fn save_selection_settings(
+    connection: &Connection,
+    mode: SelectionMode,
+    shortcut: &str,
+) -> Result<(), String> {
+    set_setting(
+        connection,
+        "selection_mode",
+        match mode {
+            SelectionMode::Shortcut => "shortcut",
+            SelectionMode::Automatic => "automatic",
+        },
+    )?;
+    set_setting(connection, "selection_shortcut", shortcut)
 }
 
 pub fn get_provider(connection: &Connection) -> Result<ProviderRecord, String> {
@@ -1347,6 +1373,15 @@ mod tests {
         assert_eq!(settings.history_retention, 12);
         assert!(!settings.word_ai_cache_enabled);
         assert!(!settings.paragraph_example_lookup_enabled);
+        assert_eq!(settings.selection_mode, SelectionMode::Shortcut);
+        assert_eq!(settings.selection_shortcut, DEFAULT_SELECTION_SHORTCUT);
+
+        save_selection_settings(&connection, SelectionMode::Automatic, "Alt+L")
+            .expect("selection settings write should succeed");
+        let selection_settings =
+            get_settings(&connection).expect("selection settings read should succeed");
+        assert_eq!(selection_settings.selection_mode, SelectionMode::Automatic);
+        assert_eq!(selection_settings.selection_shortcut, "Alt+L");
     }
 
     #[test]

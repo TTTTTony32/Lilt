@@ -11,6 +11,48 @@ export interface AppSettings {
   cacheUsageBytes: number;
   wordAiCacheEnabled: boolean;
   paragraphExampleLookupEnabled: boolean;
+  selectionMode: "shortcut" | "automatic";
+  selectionShortcut: string;
+}
+
+export type SelectionMode = "shortcut" | "automatic";
+export type SelectionTrigger = "shortcut" | "automatic";
+
+export interface SelectionAnchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SelectionNotice {
+  requestId: string;
+  trigger: SelectionTrigger;
+  anchor: SelectionAnchor | null;
+}
+
+export interface SelectionUnavailable {
+  requestId: string | null;
+  trigger: SelectionTrigger;
+  code: string;
+  message: string;
+}
+
+export interface SelectionRuntimeStatus {
+  mode: SelectionMode;
+  shortcut: string;
+  shortcutRegistered: boolean;
+  uiAutomationReady: boolean;
+  message: string | null;
+}
+
+export interface SelectionRequestPayload {
+  requestId: string;
+  sourceText: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  trigger: SelectionTrigger;
+  anchor: SelectionAnchor | null;
 }
 
 export interface ProviderConfig {
@@ -192,6 +234,69 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function selectionAnchor(value: unknown): SelectionAnchor | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  const x = value.x;
+  const y = value.y;
+  const width = value.width;
+  const height = value.height;
+  return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
+    && typeof width === "number" && Number.isFinite(width) && typeof height === "number" && Number.isFinite(height)
+    ? { x, y, width, height }
+    : undefined;
+}
+
+function selectionTrigger(value: unknown): SelectionTrigger | null {
+  return value === "shortcut" || value === "automatic" ? value : null;
+}
+
+export function decodeSelectionNotice(value: unknown): SelectionNotice | null {
+  if (!isRecord(value)) return null;
+  const requestId = stringValue(value.requestId);
+  const trigger = selectionTrigger(value.trigger);
+  const anchor = selectionAnchor(value.anchor);
+  return requestId === null || trigger === null || anchor === undefined
+    ? null
+    : { requestId, trigger, anchor };
+}
+
+export function decodeSelectionUnavailable(value: unknown): SelectionUnavailable | null {
+  if (!isRecord(value)) return null;
+  const requestId = value.requestId === null || value.requestId === undefined ? null : stringValue(value.requestId);
+  const trigger = selectionTrigger(value.trigger);
+  const code = stringValue(value.code);
+  const message = stringValue(value.message);
+  return trigger === null || code === null || message === null || (requestId === null && value.requestId !== null && value.requestId !== undefined)
+    ? null
+    : { requestId, trigger, code, message };
+}
+
+export function decodeSelectionStatus(value: unknown): SelectionRuntimeStatus | null {
+  if (!isRecord(value)) return null;
+  const mode = value.mode === "shortcut" || value.mode === "automatic" ? value.mode : null;
+  const shortcut = stringValue(value.shortcut);
+  const message = value.message === null || value.message === undefined ? null : stringValue(value.message);
+  return mode === null || shortcut === null || typeof value.shortcutRegistered !== "boolean"
+    || typeof value.uiAutomationReady !== "boolean" || (message === null && value.message !== null && value.message !== undefined)
+    ? null
+    : { mode, shortcut, shortcutRegistered: value.shortcutRegistered, uiAutomationReady: value.uiAutomationReady, message };
+}
+
+export function decodeSelectionRequest(value: unknown): SelectionRequestPayload | null {
+  if (!isRecord(value)) return null;
+  const requestId = stringValue(value.requestId);
+  const sourceText = stringValue(value.sourceText);
+  const sourceLanguage = stringValue(value.sourceLanguage);
+  const targetLanguage = stringValue(value.targetLanguage);
+  const trigger = selectionTrigger(value.trigger);
+  const anchor = selectionAnchor(value.anchor);
+  return requestId === null || sourceText === null || sourceLanguage === null || targetLanguage === null
+    || trigger === null || anchor === undefined
+    ? null
+    : { requestId, sourceText, sourceLanguage, targetLanguage, trigger, anchor };
+}
+
 export function decodeTranslationEvent(name: string, value: unknown): TranslationEvent | null {
   if (!isRecord(value)) return null;
   const requestId = stringValue(value.requestId);
@@ -304,6 +409,8 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     cacheUsageBytes: 0,
     wordAiCacheEnabled: true,
     paragraphExampleLookupEnabled: true,
+    selectionMode: "shortcut",
+    selectionShortcut: "Ctrl+Shift+L",
   },
   provider: {
     id: "default",

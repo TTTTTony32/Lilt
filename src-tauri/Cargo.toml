@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -31,3 +32,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+uiautomation = { version = "0.21.6", default-features = false, features = ["event", "pattern"] }
