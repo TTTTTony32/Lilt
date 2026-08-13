@@ -6,16 +6,19 @@ mod examples;
 mod provider;
 mod secrets;
 mod selection;
+#[cfg(desktop)]
+mod tray;
 
 use contracts::{
-    AppSnapshot, DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
-    DictionaryState, GlossaryTerm, ModelInfo, ParagraphExample, Prompt, ProviderConfig,
-    SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
-    SelectionTriggerNotice, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
-    TranslationFailed, TranslationRequest, TranslationStarted, WordExampleCancelled,
-    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
-    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID,
-    DICTIONARY_HISTORY_LIMIT, WORD_EXAMPLE_PROTOCOL_VERSION,
+    AppSnapshot, CloseBehavior, DictionaryCommandResult, DictionaryLookupCandidate,
+    DictionaryLookupCommandResult, DictionaryState, GlossaryTerm, ModelInfo, ParagraphExample,
+    PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
+    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, TranslationCancelled,
+    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
+    TranslationStarted, WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted,
+    WordExampleFailed, WordExamplePosDelta, WordExampleRequest, WordExampleStarted,
+    WordExampleTranslationDelta, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
+    WORD_EXAMPLE_PROTOCOL_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -153,6 +156,47 @@ pub fn run() {
                     state.selection.handle_focus_lost();
                 }
             }
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let Some(state) = window.app_handle().try_state::<AppState>() else {
+                        diagnostics::error("window.close.failed reason=app_state_unavailable");
+                        return;
+                    };
+                    let behavior = match state.database.lock() {
+                        Ok(connection) => match db::get_settings(&connection) {
+                            Ok(settings) => settings.close_behavior,
+                            Err(error) => {
+                                diagnostics::error(format!(
+                                    "window.close.failed reason=settings_read_failed error={error}"
+                                ));
+                                return;
+                            }
+                        },
+                        Err(_) => {
+                            diagnostics::error("window.close.failed reason=database_lock_failed");
+                            return;
+                        }
+                    };
+                    match behavior {
+                        CloseBehavior::Exit => window.app_handle().exit(0),
+                        CloseBehavior::Tray => {
+                            if let Err(error) = window.hide() {
+                                diagnostics::error(format!(
+                                    "window.close.tray_failed error={error}"
+                                ));
+                            }
+                        }
+                        CloseBehavior::Ask => {
+                            if let Err(error) = window.emit("window_close_requested", ()) {
+                                diagnostics::error(format!(
+                                    "window.close.dialog_event_failed error={error}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         })
         .setup(|app| {
             let startup = Arc::new(StartupRuntime::new());
@@ -179,6 +223,13 @@ pub fn run() {
             };
             state.selection.attach_app(app.handle().clone());
             app.manage(state.clone());
+            #[cfg(desktop)]
+            {
+                tray::init_tray(app.handle()).map_err(|error| {
+                    std::io::Error::other(format!("初始化系统托盘失败：{error}"))
+                })?;
+                tray::register_menu_handler(app.handle());
+            }
             schedule_selection_initialisation(
                 state.clone(),
                 app.handle().clone(),
@@ -212,6 +263,15 @@ pub fn run() {
             cancel_translation,
             upsert_glossary_term,
             delete_glossary_term,
+            create_prompt,
+            update_prompt,
+            duplicate_prompt,
+            delete_prompt,
+            set_default_prompt,
+            save_personal_word,
+            remove_personal_word,
+            resolve_window_close,
+            reset_close_behavior,
             query_dictionary,
             generate_word_example,
             cancel_word_example,
@@ -304,6 +364,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         cache_stats: snapshot_data.cache_stats,
         dictionary,
         dictionary_history: snapshot_data.dictionary_history,
+        personal_dictionary: snapshot_data.personal_dictionary,
     })
 }
 
@@ -317,6 +378,7 @@ struct SnapshotData {
     cache_stats: contracts::CacheStats,
     dictionary_installation: Option<db::DictionaryInstallation>,
     dictionary_history: Vec<contracts::DictionaryHistoryEntry>,
+    personal_dictionary: Vec<PersonalDictionaryEntry>,
 }
 
 fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
@@ -330,6 +392,7 @@ fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
     let cache_stats = db::get_cache_stats(connection, settings.cache_max_bytes)?;
     let dictionary_installation = db::get_dictionary_installation(connection)?;
     let dictionary_history = db::list_dictionary_history(connection, DICTIONARY_HISTORY_LIMIT)?;
+    let personal_dictionary = db::list_personal_dictionary(connection)?;
     Ok(SnapshotData {
         settings,
         provider: ProviderConfig {
@@ -347,6 +410,7 @@ fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
         cache_stats,
         dictionary_installation,
         dictionary_history,
+        personal_dictionary,
     })
 }
 
@@ -1181,6 +1245,165 @@ fn delete_glossary_term(state: State<'_, AppState>, id: String) -> Result<(), St
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
     db::delete_glossary_term(&connection, &id)
+}
+
+#[tauri::command]
+fn create_prompt(
+    state: State<'_, AppState>,
+    name: String,
+    content: String,
+) -> Result<Prompt, String> {
+    let name = name.trim();
+    let content = content.trim();
+    if name.is_empty() || content.is_empty() {
+        return Err("Prompt 名称和内容不能为空".to_string());
+    }
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::create_prompt(&connection, name, content)
+}
+
+#[tauri::command]
+fn update_prompt(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    content: String,
+) -> Result<Prompt, String> {
+    let name = name.trim();
+    let content = content.trim();
+    if id.trim().is_empty() || name.is_empty() || content.is_empty() {
+        return Err("Prompt ID、名称和内容不能为空".to_string());
+    }
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::update_prompt(&connection, id.trim(), name, content)
+}
+
+#[tauri::command]
+fn duplicate_prompt(
+    state: State<'_, AppState>,
+    id: String,
+    name: Option<String>,
+) -> Result<Prompt, String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let source = db::get_prompt(&connection, id.trim())?;
+    let name = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}（副本）", source.name));
+    db::duplicate_prompt(&connection, id.trim(), &name)
+}
+
+#[tauri::command]
+fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let provider = db::get_provider(&connection)?;
+    db::delete_prompt(&connection, id.trim(), &provider.prompt_id)
+}
+
+#[tauri::command]
+fn set_default_prompt(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("Prompt ID 不能为空".to_string());
+    }
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::set_default_prompt(&connection, id.trim())
+}
+
+#[tauri::command]
+fn save_personal_word(
+    state: State<'_, AppState>,
+    lookup_word: String,
+    canonical_word: String,
+) -> Result<PersonalDictionaryEntry, String> {
+    let lookup_word = lookup_word.trim();
+    let canonical_word = canonical_word.trim();
+    let normalized_canonical_word = dictionary::normalize_headword(canonical_word);
+    if lookup_word.is_empty() || canonical_word.is_empty() || normalized_canonical_word.is_empty() {
+        return Err("个人词典词条不能为空".to_string());
+    }
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::save_personal_word(
+        &connection,
+        &normalized_canonical_word,
+        canonical_word,
+        lookup_word,
+    )
+}
+
+#[tauri::command]
+fn remove_personal_word(state: State<'_, AppState>, canonical_word: String) -> Result<(), String> {
+    let normalized_canonical_word = dictionary::normalize_headword(&canonical_word);
+    if normalized_canonical_word.is_empty() {
+        return Err("个人词典词条不能为空".to_string());
+    }
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::remove_personal_word(&connection, &normalized_canonical_word)
+}
+
+#[tauri::command]
+fn resolve_window_close(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: String,
+    remember: bool,
+) -> Result<(), String> {
+    let behavior = match action.trim() {
+        "exit" => CloseBehavior::Exit,
+        "tray" => CloseBehavior::Tray,
+        _ => return Err("关闭行为无效".to_string()),
+    };
+    if remember {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::save_close_behavior(&connection, behavior)?;
+    }
+    match behavior {
+        CloseBehavior::Exit => app.exit(0),
+        CloseBehavior::Tray => {
+            let window = app
+                .get_webview_window("main")
+                .ok_or_else(|| "主窗口不存在".to_string())?;
+            window
+                .hide()
+                .map_err(|error| format!("隐藏主窗口失败：{error}"))?;
+        }
+        CloseBehavior::Ask => unreachable!("ask is not a valid close resolution"),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_close_behavior(state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::save_close_behavior(&connection, CloseBehavior::Ask)
 }
 
 #[tauri::command]

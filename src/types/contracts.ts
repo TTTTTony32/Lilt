@@ -1,6 +1,6 @@
 import { DEFAULT_DICTIONARY_STATE, type DictionaryHistoryEntry, type DictionaryState } from "./dictionary";
 
-export type AppTab = "translate" | "dictionary" | "glossary" | "history" | "settings";
+export type AppTab = "translate" | "dictionary" | "personal" | "glossary" | "history" | "settings";
 
 export type TranslationStatus = "idle" | "streaming" | "cancelling" | "completed" | "failed";
 
@@ -13,10 +13,12 @@ export interface AppSettings {
   paragraphExampleLookupEnabled: boolean;
   selectionMode: "shortcut" | "automatic";
   selectionShortcut: string;
+  closeBehavior: CloseBehavior;
 }
 
 export type SelectionMode = "shortcut" | "automatic";
 export type SelectionTrigger = "shortcut" | "automatic";
+export type CloseBehavior = "ask" | "exit" | "tray";
 
 export interface SelectionAnchor {
   x: number;
@@ -86,6 +88,13 @@ export interface Prompt {
   isBuiltin: boolean;
 }
 
+export interface PersonalDictionaryEntry {
+  normalizedCanonicalWord: string;
+  canonicalWord: string;
+  lookupWord: string;
+  savedAt: string;
+}
+
 export interface GlossaryTerm {
   id: string;
   source: string;
@@ -121,6 +130,7 @@ export interface AppSnapshot {
   cacheStats: CacheStats;
   dictionary: DictionaryState;
   dictionaryHistory: DictionaryHistoryEntry[];
+  personalDictionary: PersonalDictionaryEntry[];
 }
 
 export interface TranslationEventStarted {
@@ -421,6 +431,18 @@ export function decodeWordExampleCommandResult(value: unknown): WordExampleComma
   return { outcome, translation, partOfSpeech, cacheHit: value.cacheHit, message };
 }
 
+export function decodePrompt(value: unknown): Prompt | null {
+  if (!isRecord(value)) return null;
+  const id = stringValue(value.id);
+  const name = stringValue(value.name);
+  const content = stringValue(value.content);
+  const version = value.version;
+  if (id === null || name === null || content === null || typeof version !== "number" || !Number.isInteger(version) || version < 1 || typeof value.isBuiltin !== "boolean") {
+    return null;
+  }
+  return { id, name, content, version, isBuiltin: value.isBuiltin };
+}
+
 export const DEFAULT_SNAPSHOT: AppSnapshot = {
   settings: {
     historyRetention: 50,
@@ -431,6 +453,7 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     paragraphExampleLookupEnabled: true,
     selectionMode: "shortcut",
     selectionShortcut: "Ctrl+Shift+L",
+    closeBehavior: "ask",
   },
   provider: {
     id: "default",
@@ -447,4 +470,5 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
   cacheStats: { usageBytes: 0, entryCount: 0, maxBytes: 268_435_456 },
   dictionary: DEFAULT_DICTIONARY_STATE,
   dictionaryHistory: [],
+  personalDictionary: [],
 };

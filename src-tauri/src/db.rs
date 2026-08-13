@@ -1,10 +1,10 @@
 use crate::contracts::{
-    AppSettings, CacheStats, CachedTranslation, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
-    ModelInfo, Prompt, ProviderRecord, SelectionMode, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
-    DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID,
-    DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
-    DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
-    DICTIONARY_SQLITE_SCHEMA_VERSION,
+    AppSettings, CacheStats, CachedTranslation, CloseBehavior, DictionaryHistoryEntry,
+    GlossaryTerm, HistoryEntry, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
+    SelectionMode, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION,
+    DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
+    DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_WORD_AI_CACHE_ENABLED,
+    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -240,6 +240,16 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_dictionary_history_last_queried_at
                 ON dictionary_history(last_queried_at DESC);
 
+            CREATE TABLE IF NOT EXISTS personal_dictionary (
+                normalized_canonical_word TEXT PRIMARY KEY NOT NULL,
+                canonical_word TEXT NOT NULL,
+                lookup_word TEXT NOT NULL,
+                saved_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_personal_dictionary_saved_at
+                ON personal_dictionary(saved_at DESC);
+
             CREATE TABLE IF NOT EXISTS dictionary_installation (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 release_tag TEXT NOT NULL,
@@ -268,16 +278,46 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("默认 Provider 初始化失败：{error}"))?;
 
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
-            params![
-                DEFAULT_PROMPT_ID,
-                "通用段落翻译",
-                "你是一名严谨的专业译者。将用户提供的段落翻译成目标语言，保留原文事实、语气、段落结构和 Markdown 格式。不要添加原文没有的信息，只输出译文。"
-            ],
-        )
-        .map_err(|error| format!("默认 Prompt 初始化失败：{error}"))?;
+    let builtin_prompts = [
+        (
+            DEFAULT_PROMPT_ID,
+            "通用段落翻译",
+            "你是一名严谨的专业译者。将用户提供的段落翻译成目标语言，保留原文事实、语气、段落结构和 Markdown 格式。不要添加原文没有的信息，只输出译文。",
+        ),
+        (
+            "builtin-academic",
+            "学术论文",
+            "你是一名学术翻译者。将用户提供的段落翻译成目标语言，准确保留术语、论证关系、限定条件和引用信息，保持原文段落结构与 Markdown 格式。不要添加原文没有的信息，只输出译文。",
+        ),
+        (
+            "builtin-technical",
+            "技术文档",
+            "你是一名技术文档译者。将用户提供的段落翻译成目标语言，准确处理 API、代码、命令、产品名称和专业术语，保留列表、标题、代码块和 Markdown 格式。不要添加原文没有的信息，只输出译文。",
+        ),
+        (
+            "builtin-literal",
+            "忠实直译",
+            "将用户提供的段落忠实翻译成目标语言，尽量保持原文的句式、语气、信息顺序和段落结构。只在目标语言语法要求下调整表达，不解释、不扩写，只输出译文。",
+        ),
+        (
+            "builtin-natural",
+            "自然表达",
+            "将用户提供的段落翻译成自然、流畅、符合目标语言习惯的表达，同时准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出译文。",
+        ),
+        (
+            "builtin-concise",
+            "简洁阅读",
+            "将用户提供的段落翻译成简洁清晰、适合快速阅读的目标语言表达，保留全部关键信息、逻辑关系和原文结构。不要擅自删减信息，只输出译文。",
+        ),
+    ];
+    for (id, name, content) in builtin_prompts {
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
+                params![id, name, content],
+            )
+            .map_err(|error| format!("默认 Prompt 初始化失败：{error}"))?;
+    }
 
     connection
         .execute(
@@ -308,6 +348,11 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         get_setting(connection, "paragraph_example_lookup_enabled")?
             .map(|value| value != "0")
             .unwrap_or(DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED);
+    let close_behavior = match get_setting(connection, "close_behavior")?.as_deref() {
+        Some("exit") => CloseBehavior::Exit,
+        Some("tray") => CloseBehavior::Tray,
+        _ => CloseBehavior::Ask,
+    };
     let (selection_mode, selection_shortcut) = get_selection_settings(connection)?;
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
@@ -319,6 +364,7 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         paragraph_example_lookup_enabled,
         selection_mode,
         selection_shortcut,
+        close_behavior,
     })
 }
 
@@ -498,6 +544,74 @@ pub fn get_prompt(connection: &Connection, prompt_id: &str) -> Result<Prompt, St
             },
         )
         .map_err(|error| format!("读取 Prompt 失败：{error}"))
+}
+
+pub fn create_prompt(connection: &Connection, name: &str, content: &str) -> Result<Prompt, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    connection
+        .execute(
+            "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 0)",
+            params![id, name, content],
+        )
+        .map_err(|error| format!("创建 Prompt 失败：{error}"))?;
+    get_prompt(connection, &id)
+}
+
+pub fn update_prompt(
+    connection: &Connection,
+    prompt_id: &str,
+    name: &str,
+    content: &str,
+) -> Result<Prompt, String> {
+    let prompt = get_prompt(connection, prompt_id)?;
+    if prompt.is_builtin {
+        return Err("内置 Prompt 只读，请先复制后编辑".to_string());
+    }
+    connection
+        .execute(
+            "UPDATE prompts SET name = ?1, content = ?2, version = version + 1 WHERE id = ?3",
+            params![name, content, prompt_id],
+        )
+        .map_err(|error| format!("更新 Prompt 失败：{error}"))?;
+    get_prompt(connection, prompt_id)
+}
+
+pub fn duplicate_prompt(
+    connection: &Connection,
+    prompt_id: &str,
+    name: &str,
+) -> Result<Prompt, String> {
+    let source = get_prompt(connection, prompt_id)?;
+    create_prompt(connection, name, &source.content)
+}
+
+pub fn delete_prompt(
+    connection: &Connection,
+    prompt_id: &str,
+    current_prompt_id: &str,
+) -> Result<(), String> {
+    let prompt = get_prompt(connection, prompt_id)?;
+    if prompt.is_builtin {
+        return Err("内置 Prompt 不能删除".to_string());
+    }
+    if prompt_id == current_prompt_id {
+        return Err("当前正在使用的 Prompt 不能删除".to_string());
+    }
+    connection
+        .execute("DELETE FROM prompts WHERE id = ?1", params![prompt_id])
+        .map_err(|error| format!("删除 Prompt 失败：{error}"))?;
+    Ok(())
+}
+
+pub fn set_default_prompt(connection: &Connection, prompt_id: &str) -> Result<(), String> {
+    get_prompt(connection, prompt_id)?;
+    connection
+        .execute(
+            "UPDATE providers SET prompt_id = ?1 WHERE id = ?2",
+            params![prompt_id, DEFAULT_PROVIDER_ID],
+        )
+        .map_err(|error| format!("设置默认 Prompt 失败：{error}"))?;
+    Ok(())
 }
 
 pub fn list_glossary_terms(connection: &Connection) -> Result<Vec<GlossaryTerm>, String> {
@@ -1170,6 +1284,87 @@ pub fn clear_dictionary_history(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+pub fn list_personal_dictionary(
+    connection: &Connection,
+) -> Result<Vec<PersonalDictionaryEntry>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT normalized_canonical_word, canonical_word, lookup_word, saved_at
+             FROM personal_dictionary
+             ORDER BY saved_at DESC",
+        )
+        .map_err(|error| format!("读取个人词典失败：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(PersonalDictionaryEntry {
+                normalized_canonical_word: row.get(0)?,
+                canonical_word: row.get(1)?,
+                lookup_word: row.get(2)?,
+                saved_at: row.get(3)?,
+            })
+        })
+        .map_err(|error| format!("读取个人词典失败：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取个人词典失败：{error}"))
+}
+
+pub fn save_personal_word(
+    connection: &Connection,
+    normalized_canonical_word: &str,
+    canonical_word: &str,
+    lookup_word: &str,
+) -> Result<PersonalDictionaryEntry, String> {
+    let saved_at = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "INSERT INTO personal_dictionary
+                (normalized_canonical_word, canonical_word, lookup_word, saved_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(normalized_canonical_word) DO UPDATE SET
+                canonical_word = excluded.canonical_word,
+                lookup_word = excluded.lookup_word,
+                saved_at = excluded.saved_at",
+            params![
+                normalized_canonical_word,
+                canonical_word,
+                lookup_word,
+                saved_at
+            ],
+        )
+        .map_err(|error| format!("保存个人词典词条失败：{error}"))?;
+    Ok(PersonalDictionaryEntry {
+        normalized_canonical_word: normalized_canonical_word.to_string(),
+        canonical_word: canonical_word.to_string(),
+        lookup_word: lookup_word.to_string(),
+        saved_at,
+    })
+}
+
+pub fn remove_personal_word(
+    connection: &Connection,
+    normalized_canonical_word: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM personal_dictionary WHERE normalized_canonical_word = ?1",
+            params![normalized_canonical_word],
+        )
+        .map_err(|error| format!("移除个人词典词条失败：{error}"))?;
+    Ok(())
+}
+
+pub fn save_close_behavior(connection: &Connection, behavior: CloseBehavior) -> Result<(), String> {
+    set_setting(
+        connection,
+        "close_behavior",
+        match behavior {
+            CloseBehavior::Ask => "ask",
+            CloseBehavior::Exit => "exit",
+            CloseBehavior::Tray => "tray",
+        },
+    )
+}
+
 pub fn save_dictionary_installation(
     connection: &Connection,
     record: &DictionaryInstallationRecord<'_>,
@@ -1541,6 +1736,63 @@ mod tests {
         assert_eq!(
             history.len() as i64,
             crate::contracts::DICTIONARY_HISTORY_LIMIT
+        );
+    }
+
+    #[test]
+    fn prompt_management_preserves_builtin_read_only_and_versions_custom_prompts() {
+        let connection = test_connection();
+        assert_eq!(list_prompts(&connection).unwrap().len(), 6);
+        assert!(update_prompt(&connection, DEFAULT_PROMPT_ID, "不能改", "不能改").is_err());
+
+        let created = create_prompt(&connection, "自定义翻译", "只输出译文")
+            .expect("custom prompt should be created");
+        assert!(!created.is_builtin);
+        assert_eq!(created.version, 1);
+        let updated = update_prompt(&connection, &created.id, "自定义翻译 2", "保留 Markdown")
+            .expect("custom prompt should be updated");
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.content, "保留 Markdown");
+
+        set_default_prompt(&connection, &updated.id).expect("custom prompt should become default");
+        assert!(delete_prompt(&connection, &updated.id, &updated.id).is_err());
+        let duplicate = duplicate_prompt(&connection, DEFAULT_PROMPT_ID, "通用副本")
+            .expect("builtin prompt should be duplicable");
+        assert_eq!(
+            duplicate.content,
+            get_prompt(&connection, DEFAULT_PROMPT_ID).unwrap().content
+        );
+        delete_prompt(&connection, &duplicate.id, &updated.id)
+            .expect("unused custom prompt should delete");
+    }
+
+    #[test]
+    fn personal_dictionary_upserts_by_normalized_canonical_word() {
+        let connection = test_connection();
+        let first = save_personal_word(&connection, "Resolved", "Resolve", "resolved")
+            .expect("personal word should save");
+        let second = save_personal_word(&connection, "resolve", "resolve", "resolve")
+            .expect("same canonical word should update");
+        assert_eq!(first.normalized_canonical_word, "resolve");
+        assert_eq!(second.lookup_word, "resolve");
+        let entries = list_personal_dictionary(&connection).expect("personal words should list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].canonical_word, "resolve");
+        remove_personal_word(&connection, "RESOLVE").expect("personal word should remove");
+        assert!(list_personal_dictionary(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn close_behavior_defaults_to_ask_and_round_trips() {
+        let connection = test_connection();
+        assert_eq!(
+            get_settings(&connection).unwrap().close_behavior,
+            CloseBehavior::Ask
+        );
+        save_close_behavior(&connection, CloseBehavior::Tray).expect("close behavior should save");
+        assert_eq!(
+            get_settings(&connection).unwrap().close_behavior,
+            CloseBehavior::Tray
         );
     }
 }

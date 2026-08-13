@@ -143,7 +143,10 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-empty-state { padding: 55px 20px; border: 1px dashed #d9d9d0; border-radius: 10px; color: #a4a69d; background: rgba(251, 250, 247, .55); text-align: center; font-size: 12px; }
 .dictionary-entry { overflow: hidden; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; }
 .dictionary-entry-header { padding: 25px 25px 21px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e7e5de; }
+.dictionary-entry-title-row { display: flex; align-items: center; gap: 9px; }
 .dictionary-entry-header h2 { margin: 0; color: #394b3e; font-family: Georgia, "Songti SC", serif; font-size: 28px; font-weight: 500; }
+.dictionary-favorite-button { color: #9ba79a; }
+.dictionary-favorite-button.is-active { color: #6f8d74; background: #edf3ea; }
 .dictionary-entry-header p { max-width: 680px; margin: 9px 0 0; color: #70796f; font-size: 13px; line-height: 1.7; }
 .dictionary-entry-header .dictionary-form-source { margin-top: 5px; color: #8c978b; font-size: 11px; }
 .dictionary-source-example { margin-top: 14px; padding: 11px 13px; border-left: 2px solid #d4dfd3; background: #f3f5ef; }
@@ -185,6 +188,34 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-progress { margin: 0 0 12px; }
 .selection-settings-grid { margin-top: 2px; }
 .settings-hint { margin: 14px 0 0; color: #92978e; font-size: 11px; line-height: 1.65; }
+.prompt-manager-grid { display: grid; grid-template-columns: 220px 1fr; gap: 18px; }
+.prompt-list { display: grid; align-content: start; gap: 5px; }
+.prompt-list-item { min-height: 52px; padding: 9px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid transparent; border-radius: 7px; color: #68766b; background: #f4f5ef; text-align: left; }
+.prompt-list-item:hover { border-color: #d0dbcf; background: #edf2ea; }
+.prompt-list-item.is-active { border-color: #b9cbb8; color: #4b6354; background: #e9f0e6; }
+.prompt-list-item strong, .prompt-list-item small { display: block; }
+.prompt-list-item strong { font-size: 12px; font-weight: 600; }
+.prompt-list-item small { margin-top: 4px; color: #9ba399; font-size: 10px; }
+.prompt-list-item em { color: #6e8a72; font-size: 10px; font-style: normal; white-space: nowrap; }
+.prompt-editor-panel { min-width: 0; display: grid; gap: 12px; }
+.prompt-editor-panel label { display: grid; gap: 7px; color: #7c8178; font-size: 11px; }
+.prompt-editor { min-height: 160px; padding: 11px; resize: vertical; border: 1px solid #deded5; border-radius: 6px; color: #4c554d; background: #fffefb; font-size: 12px; line-height: 1.7; }
+.prompt-editor:focus { border: 1px solid #9fb1a0; box-shadow: 0 0 0 2px rgba(131, 169, 142, .12); }
+.prompt-actions { margin-top: 0; }
+.personal-dictionary-open { min-width: 0; padding: 0; display: flex; align-items: center; gap: 9px; border: 0; color: #667166; background: transparent; text-align: left; }
+.personal-dictionary-open:hover { color: #38513f; }
+.personal-dictionary-open > span { min-width: 0; }
+.personal-dictionary-open strong { display: block; }
+.personal-dictionary-open small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-backdrop { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; background: rgba(44, 53, 45, .24); }
+.modal-card { width: min(420px, calc(100vw - 48px)); padding: 21px; border: 1px solid #d8d9d0; border-radius: 10px; background: #fbfaf7; box-shadow: 0 18px 46px rgba(43, 53, 44, .18); }
+.modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
+.modal-heading strong, .modal-heading span { display: block; }
+.modal-heading strong { color: #4e5e51; font-size: 14px; }
+.modal-heading span { margin-top: 6px; color: #92978e; font-size: 11px; }
+.modal-check { margin-top: 21px; display: flex; align-items: center; gap: 8px; color: #70796f; font-size: 12px; }
+.modal-check input { width: 16px; height: 16px; accent-color: #5b775f; }
+.modal-actions { justify-content: flex-end; }
 
 .selection-body { height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: transparent; }
 .selection-body #root { height: 100%; min-height: 0; }
@@ -234,4 +265,5 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 @media (max-width: 1080px) {
   .main-content { padding-right: 32px; padding-left: 32px; }
   .sidebar { width: 190px; }
+  .prompt-manager-grid { grid-template-columns: 1fr; }
 }

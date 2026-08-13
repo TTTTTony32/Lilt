@@ -7,6 +7,7 @@ import {
   decodeSelectionUnavailable,
   decodeTranslationCommandResult,
   decodeTranslationEvent,
+  decodePrompt,
 } from "./contracts";
 
 describe("selection contract", () => {
@@ -174,5 +175,28 @@ describe("translation command result contract", () => {
       cacheHit: false,
       message: null,
     })).toBeNull();
+  });
+});
+
+describe("prompt contract", () => {
+  it("decodes editable and builtin prompts", () => {
+    expect(decodePrompt({
+      id: "custom-1",
+      name: "技术翻译",
+      content: "只输出译文",
+      version: 2,
+      isBuiltin: false,
+    })).toEqual({
+      id: "custom-1",
+      name: "技术翻译",
+      content: "只输出译文",
+      version: 2,
+      isBuiltin: false,
+    });
+  });
+
+  it("rejects malformed prompt results", () => {
+    expect(decodePrompt({ id: "p", name: "缺正文", version: 1, isBuiltin: true })).toBeNull();
+    expect(decodePrompt({ id: "p", name: "错误版本", content: "正文", version: 1.5, isBuiltin: true })).toBeNull();
   });
 });

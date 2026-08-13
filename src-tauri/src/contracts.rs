@@ -26,6 +26,7 @@ pub struct AppSettings {
     pub paragraph_example_lookup_enabled: bool,
     pub selection_mode: SelectionMode,
     pub selection_shortcut: String,
+    pub close_behavior: CloseBehavior,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +34,14 @@ pub struct AppSettings {
 pub enum SelectionMode {
     Shortcut,
     Automatic,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseBehavior {
+    Ask,
+    Exit,
+    Tray,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +156,15 @@ pub struct Prompt {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PersonalDictionaryEntry {
+    pub normalized_canonical_word: String,
+    pub canonical_word: String,
+    pub lookup_word: String,
+    pub saved_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GlossaryTerm {
     pub id: String,
     pub source: String,
@@ -188,6 +206,7 @@ pub struct AppSnapshot {
     pub cache_stats: CacheStats,
     pub dictionary: DictionaryState,
     pub dictionary_history: Vec<DictionaryHistoryEntry>,
+    pub personal_dictionary: Vec<PersonalDictionaryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

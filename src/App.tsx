@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen } from "lucide-react";
+import { Bookmark, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
+import type { DictionaryOpenRequest } from "./DictionaryView";
+import PersonalDictionaryView from "./PersonalDictionaryView";
 import {
   DEFAULT_SNAPSHOT,
   type AppSettings,
   type AppSnapshot,
   type AppTab,
+  type CloseBehavior,
   type GlossaryTerm,
   type HistoryEntry,
   type ModelInfo,
+  type PersonalDictionaryEntry,
+  type Prompt,
   type TranslationCommandResult,
   type TranslationEvent,
   type TranslationStatus,
@@ -24,6 +29,7 @@ import {
   decodeTranslationEvent,
   decodeWordExampleCommandResult,
   decodeWordExampleEvent,
+  decodePrompt,
 } from "./types/contracts";
 import {
   decodeDictionaryCommandResult,
@@ -99,6 +105,8 @@ function App() {
   const [dictionaryProgress, setDictionaryProgress] = useState<DictionaryProgress | null>(null);
   const [dictionaryEventsError, setDictionaryEventsError] = useState<string | null>(null);
   const [wordExample, setWordExample] = useState<WordExampleState>(DEFAULT_WORD_EXAMPLE_STATE);
+  const [dictionaryOpenRequest, setDictionaryOpenRequest] = useState<DictionaryOpenRequest | null>(null);
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const activeRequestId = useRef<string | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
@@ -115,6 +123,28 @@ function App() {
   const handleDictionaryHistoryChanged = useCallback((history: DictionaryHistoryEntry[]) => {
     setSnapshot((current) => ({ ...current, dictionaryHistory: history }));
   }, []);
+
+  const handlePersonalDictionaryChanged = useCallback(async () => {
+    await refreshSnapshot();
+  }, [refreshSnapshot]);
+
+  const openPersonalWord = useCallback((entry: PersonalDictionaryEntry) => {
+    setDictionaryOpenRequest({
+      requestId: crypto.randomUUID(),
+      lookupWord: entry.lookupWord,
+      canonicalWord: entry.canonicalWord,
+    });
+    setTab("dictionary");
+  }, []);
+
+  const removePersonalWord = useCallback(async (entry: PersonalDictionaryEntry) => {
+    try {
+      await invokeCommand("remove_personal_word", { canonicalWord: entry.canonicalWord });
+      await refreshSnapshot();
+    } catch (reason) {
+      setError(describeError(reason, "移除个人词典词条失败"));
+    }
+  }, [refreshSnapshot]);
 
   useEffect(() => {
     void refreshSnapshot();
@@ -157,6 +187,23 @@ function App() {
       }
     };
     void initialise();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listenTo<unknown>("window_close_requested", () => {
+      if (!disposed) setCloseDialogOpen(true);
+    }).then((next) => {
+      if (disposed) next();
+      else unlisten = next;
+    }).catch((reason) => {
+      if (!disposed) setError(describeError(reason, "关闭确认事件监听初始化失败"));
+    });
     return () => {
       disposed = true;
       unlisten?.();
@@ -653,6 +700,7 @@ function App() {
           <nav className="nav-list" aria-label="主导航">
             <NavItem icon={<Languages size={17} />} label="段落翻译" active={tab === "translate"} onClick={() => setTab("translate")} />
             <NavItem icon={<BookOpen size={17} />} label="词典" active={tab === "dictionary"} onClick={() => setTab("dictionary")} />
+            <NavItem icon={<Bookmark size={17} />} label="个人词典" active={tab === "personal"} onClick={() => setTab("personal")} />
             <NavItem icon={<FileText size={17} />} label="术语表" active={tab === "glossary"} onClick={() => setTab("glossary")} />
             <NavItem icon={<History size={17} />} label="翻译历史" active={tab === "history"} onClick={() => setTab("history")} />
             <NavItem icon={<Settings size={17} />} label="设置" active={tab === "settings"} onClick={() => setTab("settings")} />
@@ -696,6 +744,17 @@ function App() {
               onSnapshotChanged={refreshSnapshot}
               onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
               onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
+              personalDictionary={snapshot.personalDictionary}
+              openRequest={dictionaryOpenRequest}
+              onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
+              onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
+            />
+          )}
+          {tab === "personal" && (
+            <PersonalDictionaryView
+              entries={snapshot.personalDictionary}
+              onOpen={openPersonalWord}
+              onRemove={(entry) => { void removePersonalWord(entry); }}
             />
           )}
           {tab === "glossary" && (
@@ -712,6 +771,31 @@ function App() {
             />
           )}
         </main>
+      </div>
+      {closeDialogOpen && <CloseBehaviorDialog onResolved={() => setCloseDialogOpen(false)} />}
+    </div>
+  );
+}
+
+function CloseBehaviorDialog({ onResolved }: { onResolved: () => void }) {
+  const [remember, setRemember] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resolve = async (action: Exclude<CloseBehavior, "ask">) => {
+    setError(null);
+    try {
+      await invokeCommand("resolve_window_close", { action, remember });
+      onResolved();
+    } catch (reason) {
+      setError(describeError(reason, "关闭窗口失败"));
+    }
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
+        <div className="modal-heading"><div><strong id="close-dialog-title">关闭 Lilt</strong><span>选择本次关闭窗口的处理方式。</span></div><button className="icon-button" type="button" onClick={onResolved} aria-label="取消"><X size={17} /></button></div>
+        <label className="modal-check"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住我的选择</label>
+        {error && <p className="error-message settings-message">{error}</p>}
+        <div className="form-actions modal-actions"><button className="secondary-button" type="button" onClick={() => void resolve("tray")}>缩小到托盘</button><button className="primary-button" type="button" onClick={() => void resolve("exit")}>退出程序</button></div>
       </div>
     </div>
   );
@@ -884,6 +968,144 @@ function HistoryRow({ item }: { item: HistoryEntry }) {
   return <article className="history-row"><div className="history-meta"><span>{formatDate(item.createdAt)}</span><span>{item.modelId}</span>{item.cacheHit && <span className="tag">缓存命中</span>}</div><p className="history-source">{item.sourceText}</p><p className="history-result">{item.translatedText}</p></article>;
 }
 
+function PromptManager({
+  prompts,
+  currentPromptId,
+  onChanged,
+}: {
+  prompts: Prompt[];
+  currentPromptId: string;
+  onChanged: () => Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(currentPromptId || null);
+  const [name, setName] = useState("");
+  const [content, setContent] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedPrompt = prompts.find((prompt) => prompt.id === selectedId) ?? null;
+
+  useEffect(() => {
+    if (selectedId === null) return;
+    const selected = prompts.find((prompt) => prompt.id === selectedId);
+    if (!selected) return;
+    setName(selected.name);
+    setContent(selected.content);
+  }, [currentPromptId, prompts, selectedId]);
+
+  const selectPrompt = (prompt: Prompt) => {
+    setSelectedId(prompt.id);
+    setName(prompt.name);
+    setContent(prompt.content);
+    setError(null);
+    setMessage(null);
+  };
+
+  const startNew = () => {
+    setSelectedId(null);
+    setName("我的 Prompt");
+    setContent("");
+    setError(null);
+    setMessage(null);
+  };
+
+  const save = async () => {
+    if (!name.trim() || !content.trim()) {
+      setError("Prompt 名称和内容不能为空。");
+      setMessage(null);
+      return;
+    }
+    setError(null);
+    setMessage(null);
+    try {
+      const raw = selectedId
+        ? await invokeCommand<unknown>("update_prompt", { id: selectedId, name, content })
+        : await invokeCommand<unknown>("create_prompt", { name, content });
+      const next = decodePrompt(raw);
+      if (!next) throw new Error("Prompt 命令返回了无法识别的结果。");
+      setSelectedId(next.id);
+      setName(next.name);
+      setContent(next.content);
+      await onChanged();
+      setMessage(selectedId ? "Prompt 已更新" : "Prompt 已创建");
+    } catch (reason) {
+      setError(describeError(reason, "Prompt 保存失败"));
+    }
+  };
+
+  const duplicate = async (prompt: Prompt) => {
+    setError(null);
+    setMessage(null);
+    try {
+      const raw = await invokeCommand<unknown>("duplicate_prompt", { id: prompt.id });
+      const next = decodePrompt(raw);
+      if (!next) throw new Error("Prompt 命令返回了无法识别的结果。");
+      setSelectedId(next.id);
+      setName(next.name);
+      setContent(next.content);
+      await onChanged();
+      setMessage("已复制 Prompt，可以继续编辑");
+    } catch (reason) {
+      setError(describeError(reason, "复制 Prompt 失败"));
+    }
+  };
+
+  const setDefault = async (prompt: Prompt) => {
+    try {
+      await invokeCommand("set_default_prompt", { id: prompt.id });
+      await onChanged();
+      setMessage(`已将「${prompt.name}」设为默认 Prompt`);
+      setError(null);
+    } catch (reason) {
+      setError(describeError(reason, "设置默认 Prompt 失败"));
+      setMessage(null);
+    }
+  };
+
+  const remove = async (prompt: Prompt) => {
+    if (!window.confirm(`确定删除 Prompt「${prompt.name}」吗？`)) return;
+    try {
+      await invokeCommand("delete_prompt", { id: prompt.id });
+      await onChanged();
+      setSelectedId(currentPromptId);
+      setMessage("Prompt 已删除");
+      setError(null);
+    } catch (reason) {
+      setError(describeError(reason, "删除 Prompt 失败"));
+      setMessage(null);
+    }
+  };
+
+  return (
+    <div className="simple-card prompt-manager-card">
+      <div className="card-heading"><div><strong>Prompt</strong><span>内置 Prompt 只读；复制后可以编辑并设为默认。</span></div><button className="secondary-button small-button" type="button" onClick={startNew}>新建</button></div>
+      <div className="prompt-manager-grid">
+        <div className="prompt-list">
+          {prompts.map((prompt) => (
+            <button className={`prompt-list-item ${prompt.id === selectedId ? "is-active" : ""}`} type="button" key={prompt.id} onClick={() => selectPrompt(prompt)}>
+              <span><strong>{prompt.name}</strong><small>{prompt.isBuiltin ? "内置" : "自定义"} · v{prompt.version}</small></span>
+              {prompt.id === currentPromptId && <em>默认</em>}
+            </button>
+          ))}
+        </div>
+        <div className="prompt-editor-panel">
+          <label>名称<input value={name} onChange={(event) => setName(event.target.value)} disabled={selectedPrompt?.isBuiltin ?? false} /></label>
+          <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => setContent(event.target.value)} readOnly={selectedPrompt?.isBuiltin ?? false} /></label>
+          <div className="form-actions prompt-actions">
+            <div className="button-group">
+              {selectedPrompt?.isBuiltin ? <button className="secondary-button" type="button" onClick={() => void duplicate(selectedPrompt)}>复制并编辑</button> : <button className="primary-button small-button" type="button" onClick={() => void save()}>保存 Prompt</button>}
+              {selectedPrompt && selectedPrompt.id !== currentPromptId && <button className="secondary-button" type="button" onClick={() => void setDefault(selectedPrompt)}>设为默认</button>}
+              {selectedPrompt && !selectedPrompt.isBuiltin && selectedPrompt.id !== currentPromptId && <button className="text-button danger-text" type="button" onClick={() => void remove(selectedPrompt)}>删除</button>}
+            </div>
+          </div>
+        </div>
+      </div>
+      {message && <p className="notice-message settings-message">{message}</p>}
+      {error && <p className="error-message settings-message">{error}</p>}
+    </div>
+  );
+}
+
 function SettingsView({
   snapshot,
   dictionaryProgress,
@@ -1016,6 +1238,24 @@ function SettingsView({
     }
   };
 
+  const refreshAfterPromptChange = async () => {
+    const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+    onSaved(next);
+  };
+
+  const resetCloseBehavior = async () => {
+    try {
+      await invokeCommand("reset_close_behavior");
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      onSaved(next);
+      setMessage("关闭行为已恢复为每次询问");
+      setError(null);
+    } catch (reason) {
+      setError(describeError(reason, "恢复关闭行为失败"));
+      setMessage(null);
+    }
+  };
+
   const dictionaryUpdating = snapshot.dictionary.status === "updating" || dictionaryProgress !== null;
   const dictionaryStatusLabel = snapshot.dictionary.status === "ready"
     ? "已安装"
@@ -1043,6 +1283,8 @@ function SettingsView({
           </div>
           <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。</span><div className="button-group"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button><button className="primary-button small-button" type="button" onClick={() => void saveProvider()}>保存 Provider</button></div></div>
         </div>
+
+        <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} />
 
         <div className="simple-card dictionary-settings-card">
           <div className="card-heading"><div><strong>本地词典</strong><span>open-dictionary，离线查询，不依赖 Provider</span></div><span className={`connection-status ${snapshot.dictionary.status === "ready" ? "connected" : ""}`}>{dictionaryStatusLabel}</span></div>
@@ -1081,6 +1323,11 @@ function SettingsView({
           <label className="setting-line"><span><strong>从段落缓存查找例句</strong><small>关闭后，词典查询不再读取段落翻译缓存中的例句。</small></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => setSettings({ ...settings, paragraphExampleLookupEnabled: event.target.checked })} /></label>
           <label className="setting-line slider-line"><span><strong>段落缓存上限</strong><small>已使用 {formatBytes(snapshot.cacheStats.usageBytes)}，上限 {formatBytes(settings.cacheMaxBytes)}。</small></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => setSettings({ ...settings, cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
           <div className="form-actions"><span className="muted-text">缓存不包含 API Key。</span><button className="primary-button small-button" type="button" onClick={() => void saveAppSettings()}>保存本地设置</button></div>
+        </div>
+
+        <div className="simple-card">
+          <div className="card-heading"><div><strong>关闭行为</strong><span>点击主窗口关闭按钮时的处理方式。</span></div></div>
+          <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong><small>{settings.closeBehavior === "ask" ? "关闭窗口时显示选择对话框。" : "已经记住选择，可在这里恢复询问。"}</small></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
         </div>
       </div>
       {message && <p className="notice-message settings-message">{message}</p>}

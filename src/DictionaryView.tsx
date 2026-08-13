@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Download, LoaderCircle, Search } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Bookmark, Download, LoaderCircle, Search } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand } from "./lib/tauri";
 import {
@@ -17,7 +17,7 @@ import {
   type DictionaryLookupCandidate,
   type ParagraphExample,
 } from "./types/dictionary";
-import type { WordExampleState } from "./types/contracts";
+import type { PersonalDictionaryEntry, WordExampleState } from "./types/contracts";
 
 export interface DictionaryProgress {
   operationId: string;
@@ -37,6 +37,10 @@ interface DictionaryViewProps {
   onSnapshotChanged: () => Promise<void>;
   onWordExampleRequested: (request: WordExampleRequestInput | null) => void;
   onWordExampleCancelled: () => void;
+  personalDictionary: PersonalDictionaryEntry[];
+  openRequest: DictionaryOpenRequest | null;
+  onOpenRequestHandled: () => void;
+  onPersonalDictionaryChanged: () => Promise<void>;
 }
 
 export interface WordExampleRequestInput {
@@ -44,6 +48,12 @@ export interface WordExampleRequestInput {
   word: string;
   canonicalWord: string;
   targetLanguage: string;
+}
+
+export interface DictionaryOpenRequest {
+  requestId: string;
+  lookupWord: string;
+  canonicalWord: string;
 }
 
 function formatBytes(bytes: number): string {
@@ -76,6 +86,10 @@ export default function DictionaryView({
   onSnapshotChanged,
   onWordExampleRequested,
   onWordExampleCancelled,
+  personalDictionary,
+  openRequest,
+  onOpenRequestHandled,
+  onPersonalDictionaryChanged,
 }: DictionaryViewProps) {
   const [word, setWord] = useState("");
   const [result, setResult] = useState<DictionaryEntry | null>(null);
@@ -86,9 +100,11 @@ export default function DictionaryView({
   const [querying, setQuerying] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [savingFavorite, setSavingFavorite] = useState(false);
+  const lastOpenRequestId = useRef<string | null>(null);
   const updating = state.status === "updating" || progress !== null;
 
-  const query = async (candidate: string, selectedCanonicalWord?: string) => {
+  const query = useCallback(async (candidate: string, selectedCanonicalWord?: string) => {
     const trimmed = candidate.trim();
     if (!trimmed) {
       setQueryError("请输入要查询的词形。");
@@ -142,6 +158,37 @@ export default function DictionaryView({
       setQueryError(describeError(reason, "词典查询失败"));
     } finally {
       setQuerying(false);
+    }
+  }, [onHistoryChanged, onWordExampleRequested, state.error, state.status, targetLanguage]);
+
+  useEffect(() => {
+    if (!openRequest || openRequest.requestId === lastOpenRequestId.current) return;
+    lastOpenRequestId.current = openRequest.requestId;
+    setWord(openRequest.lookupWord);
+    void query(openRequest.lookupWord, openRequest.canonicalWord).finally(onOpenRequestHandled);
+  }, [onOpenRequestHandled, openRequest, query]);
+
+  const isFavorite = lookupMeta !== null && personalDictionary.some(
+    (item) => item.normalizedCanonicalWord === lookupMeta.canonicalWord.trim().toLowerCase(),
+  );
+
+  const toggleFavorite = async () => {
+    if (!lookupMeta || savingFavorite) return;
+    setSavingFavorite(true);
+    try {
+      if (isFavorite) {
+        await invokeCommand("remove_personal_word", { canonicalWord: lookupMeta.canonicalWord });
+      } else {
+        await invokeCommand("save_personal_word", {
+          lookupWord: lookupMeta.word,
+          canonicalWord: lookupMeta.canonicalWord,
+        });
+      }
+      await onPersonalDictionaryChanged();
+    } catch (reason) {
+      setQueryError(describeError(reason, isFavorite ? "移除个人词典词条失败" : "收藏词条失败"));
+    } finally {
+      setSavingFavorite(false);
     }
   };
 
@@ -250,6 +297,9 @@ export default function DictionaryView({
           example={example}
           wordExample={wordExample}
           onCancelExample={onWordExampleCancelled}
+          isFavorite={isFavorite}
+          savingFavorite={savingFavorite}
+          onFavoriteToggle={() => void toggleFavorite()}
         />
       )}
     </section>
@@ -296,12 +346,18 @@ function DictionaryEntryView({
   example,
   wordExample,
   onCancelExample,
+  isFavorite,
+  savingFavorite,
+  onFavoriteToggle,
 }: {
   entry: DictionaryEntry;
   lookup: DictionaryLookupResult | null;
   example: ParagraphExample | null;
   wordExample: WordExampleState;
   onCancelExample: () => void;
+  isFavorite: boolean;
+  savingFavorite: boolean;
+  onFavoriteToggle: () => void;
 }) {
   const pronunciations = collectPronunciations(entry).map(
     (pronunciation) => pronunciation.ipa ?? pronunciation.text,
@@ -310,7 +366,19 @@ function DictionaryEntryView({
     <article className="dictionary-entry">
       <header className="dictionary-entry-header">
         <div>
-          <h2>{entry.headword}</h2>
+          <div className="dictionary-entry-title-row">
+            <h2>{entry.headword}</h2>
+            <button
+              className={`icon-button dictionary-favorite-button ${isFavorite ? "is-active" : ""}`}
+              type="button"
+              title={isFavorite ? "取消收藏" : "收藏词条"}
+              aria-label={isFavorite ? "取消收藏" : "收藏词条"}
+              onClick={onFavoriteToggle}
+              disabled={savingFavorite}
+            >
+              <Bookmark size={18} fill={isFavorite ? "currentColor" : "none"} />
+            </button>
+          </div>
           {entry.headword_summary && <p>{entry.headword_summary}</p>}
           {lookup?.matchType === "form" && (
             <p className="dictionary-form-source">
