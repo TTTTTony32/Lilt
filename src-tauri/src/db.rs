@@ -270,15 +270,6 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
 
     connection
         .execute(
-            "INSERT OR IGNORE INTO translation_cache_example_index_state
-                (cache_key, status, attempts, indexed_at, last_error)
-             SELECT cache_key, 'pending', 0, NULL, NULL FROM translation_cache",
-            [],
-        )
-        .map_err(|error| format!("初始化例句索引任务失败：{error}"))?;
-
-    connection
-        .execute(
             "INSERT OR IGNORE INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
             params![
                 DEFAULT_PROMPT_ID,
@@ -317,13 +308,7 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         get_setting(connection, "paragraph_example_lookup_enabled")?
             .map(|value| value != "0")
             .unwrap_or(DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED);
-    let selection_mode = match get_setting(connection, "selection_mode")?.as_deref() {
-        Some("automatic") => SelectionMode::Automatic,
-        _ => DEFAULT_SELECTION_MODE,
-    };
-    let selection_shortcut = get_setting(connection, "selection_shortcut")?
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SELECTION_SHORTCUT.to_string());
+    let (selection_mode, selection_shortcut) = get_selection_settings(connection)?;
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
         history_retention,
@@ -335,6 +320,17 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         selection_mode,
         selection_shortcut,
     })
+}
+
+pub fn get_selection_settings(connection: &Connection) -> Result<(SelectionMode, String), String> {
+    let selection_mode = match get_setting(connection, "selection_mode")?.as_deref() {
+        Some("automatic") => SelectionMode::Automatic,
+        _ => DEFAULT_SELECTION_MODE,
+    };
+    let selection_shortcut = get_setting(connection, "selection_shortcut")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SELECTION_SHORTCUT.to_string());
+    Ok((selection_mode, selection_shortcut))
 }
 
 pub fn save_settings(
@@ -760,6 +756,67 @@ pub fn mark_example_index_pending(connection: &Connection, cache_key: &str) -> R
         )
         .map_err(|error| format!("标记例句索引任务失败：{error}"))?;
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExampleIndexBackfillBatch {
+    pub last_key: Option<String>,
+    pub inserted: usize,
+}
+
+pub fn enqueue_missing_example_indexes(
+    connection: &Connection,
+    after_key: Option<&str>,
+    limit: i64,
+) -> Result<ExampleIndexBackfillBatch, String> {
+    let limit = limit.clamp(1, 1000);
+    let mut statement = connection
+        .prepare(
+            "SELECT cache.cache_key
+             FROM translation_cache AS cache
+             LEFT JOIN translation_cache_example_index_state AS state
+               ON state.cache_key = cache.cache_key
+             WHERE state.cache_key IS NULL
+               AND (?1 IS NULL OR cache.cache_key > ?1)
+             ORDER BY cache.cache_key
+             LIMIT ?2",
+        )
+        .map_err(|error| format!("读取待登记例句索引失败：{error}"))?;
+    let rows = statement
+        .query_map(params![after_key, limit], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("读取待登记例句索引失败：{error}"))?;
+    let keys = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取待登记例句索引失败：{error}"))?;
+    drop(statement);
+    let Some(last_key) = keys.last().cloned() else {
+        return Ok(ExampleIndexBackfillBatch {
+            last_key: None,
+            inserted: 0,
+        });
+    };
+
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("开启例句索引登记事务失败：{error}"))?;
+    for cache_key in &keys {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO translation_cache_example_index_state
+                    (cache_key, status, attempts, indexed_at, last_error)
+                 VALUES (?1, 'pending', 0, NULL, NULL)",
+                params![cache_key],
+            )
+            .map_err(|error| format!("登记例句索引任务失败：{error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交例句索引登记事务失败：{error}"))?;
+
+    Ok(ExampleIndexBackfillBatch {
+        last_key: Some(last_key),
+        inserted: keys.len(),
+    })
 }
 
 pub fn list_pending_example_indexes(
@@ -1254,6 +1311,58 @@ mod tests {
 
         prune_cache(&connection, 1).expect("cache pruning should succeed");
         assert_eq!(get_cache_stats(&connection, 1).unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn example_index_backfill_is_batched_and_idempotent() {
+        let connection = test_connection();
+        let provider = test_provider();
+        for index in 0..3 {
+            let cache_key = format!("cache-{index}");
+            let source_text = format!("The target word appears in example {index}.");
+            let record = CacheRecord {
+                cache_key: &cache_key,
+                source_text: &source_text,
+                translated_text: "译文",
+                source_language: "en",
+                target_language: "zh-CN",
+                provider: &provider,
+                prompt_id: DEFAULT_PROMPT_ID,
+                glossary_version: 1,
+            };
+            save_cache(&connection, &record).expect("cache write should succeed");
+        }
+        connection
+            .execute("DELETE FROM translation_cache_example_index_state", [])
+            .expect("old cache index state should be removable");
+
+        let first = enqueue_missing_example_indexes(&connection, None, 2)
+            .expect("first backfill batch should succeed");
+        assert_eq!(first.inserted, 2);
+        let cursor = first.last_key.expect("first batch should have a cursor");
+        let second = enqueue_missing_example_indexes(&connection, Some(&cursor), 2)
+            .expect("second backfill batch should succeed");
+        assert_eq!(second.inserted, 1);
+        assert!(second.last_key.is_some());
+        let done = enqueue_missing_example_indexes(&connection, second.last_key.as_deref(), 2)
+            .expect("completed backfill should be queryable");
+        assert_eq!(
+            done,
+            ExampleIndexBackfillBatch {
+                last_key: None,
+                inserted: 0,
+            }
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM translation_cache_example_index_state",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3
+        );
     }
 
     #[test]

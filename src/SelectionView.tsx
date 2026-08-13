@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Copy, ExternalLink, LoaderCircle, Square, X } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { describeError } from "./lib/errors";
 import { isDictionarySelection } from "./lib/selection";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -67,6 +68,13 @@ export default function SelectionView() {
   const activeSelectionId = useRef<string | null>(null);
   const activeTranslationId = useRef<string | null>(null);
   const activeWordExampleId = useRef<string | null>(null);
+  const selectionScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const handleHeaderMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest("[data-no-drag], button, a, input, select, textarea")) return;
+    void getCurrentWindow().startDragging();
+  }, []);
 
   const cancelCurrent = useCallback(async () => {
     const translationId = activeTranslationId.current;
@@ -379,6 +387,10 @@ export default function SelectionView() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  useEffect(() => {
+    if (selectionScrollRef.current) selectionScrollRef.current.scrollTop = 0;
+  }, [selection?.requestId]);
+
   const cancel = async () => {
     setTranslationStatus("cancelling");
     await cancelCurrent();
@@ -411,23 +423,25 @@ export default function SelectionView() {
 
   return (
     <main className="selection-window" role="dialog" aria-label="Lilt 划词翻译">
-      <header className="selection-header">
+      <header className="selection-header" onMouseDown={handleHeaderMouseDown}>
         <div><span className="selection-mark">L</span><strong>Lilt</strong></div>
-        <button className="selection-close" type="button" onClick={() => void invokeCommand("dismiss_selection", { requestId: activeSelectionId.current })} aria-label="关闭"><X size={16} /></button>
+        <button className="selection-close" type="button" data-no-drag onClick={() => void invokeCommand("dismiss_selection", { requestId: activeSelectionId.current })} aria-label="关闭"><X size={16} /></button>
       </header>
-      {selection ? <p className="selection-source">{selection.sourceText}</p> : <p className="selection-placeholder">读取选区中……</p>}
-      {route === "dictionary" && (
-        <section className="selection-result">
-          {dictionaryLoading && <div className="selection-loading"><LoaderCircle className="spin" size={16} />正在查询词典</div>}
-          {dictionary?.candidates.length ? <div className="selection-candidates"><span>请选择规范词头</span>{dictionary.candidates.map((candidate) => <button key={candidate.normalizedCanonicalWord} type="button" onClick={() => selection && void lookupWord(selection, selection.sourceText, candidate.canonicalWord)}>{candidate.canonicalWord}</button>)}</div> : null}
-          {dictionary?.lookup && <DictionarySummary group={dictionaryGroup} summary={dictionary.lookup.entry.headword_summary} canonical={dictionary.lookup.canonicalWord} />}
-          {dictionary && !dictionary.lookup && dictionary.candidates.length === 0 && !dictionaryLoading && <p className="selection-muted">词典中未找到这个词。</p>}
-          {dictionary?.example && <div className="selection-example"><span>例句</span><p>{dictionary.example.sourceText}</p>{wordExample.status === "failed" && <small>{wordExample.error}</small>}{wordExample.translation && <p className="selection-example-translation">{wordExample.translation}</p>}{wordExample.partOfSpeech && <span className="selection-pos">{wordExample.partOfSpeech}</span>}</div>}
-        </section>
-      )}
-      {route === "paragraph" && <section className="selection-result"><div className="selection-label">译文{translationCacheHit && <span>缓存命中</span>}</div><div className="selection-translation">{translation || (translationStatus === "loading" ? "准备翻译……" : "")}{translationStatus === "streaming" && <span className="stream-caret" />}</div>{translationStatus === "failed" && <p className="selection-muted">翻译失败</p>}</section>}
-      {error && <p className="selection-error">{error}</p>}
-      {notice && <p className="selection-notice">{notice}</p>}
+      <div className="selection-scroll" ref={selectionScrollRef}>
+        {selection ? <p className="selection-source">{selection.sourceText}</p> : <p className="selection-placeholder">读取选区中……</p>}
+        {route === "dictionary" && (
+          <section className="selection-result">
+            {dictionaryLoading && <div className="selection-loading"><LoaderCircle className="spin" size={16} />正在查询词典</div>}
+            {dictionary?.candidates.length ? <div className="selection-candidates"><span>请选择规范词头</span>{dictionary.candidates.map((candidate) => <button key={candidate.normalizedCanonicalWord} type="button" onClick={() => selection && void lookupWord(selection, selection.sourceText, candidate.canonicalWord)}>{candidate.canonicalWord}</button>)}</div> : null}
+            {dictionary?.lookup && <DictionarySummary group={dictionaryGroup} summary={dictionary.lookup.entry.headword_summary} canonical={dictionary.lookup.canonicalWord} />}
+            {dictionary && !dictionary.lookup && dictionary.candidates.length === 0 && !dictionaryLoading && <p className="selection-muted">词典中未找到这个词。</p>}
+            {dictionary?.example && <div className="selection-example"><span>例句</span><p>{dictionary.example.sourceText}</p>{wordExample.status === "failed" && <small>{wordExample.error}</small>}{wordExample.translation && <p className="selection-example-translation">{wordExample.translation}</p>}{wordExample.partOfSpeech && <span className="selection-pos">{wordExample.partOfSpeech}</span>}</div>}
+          </section>
+        )}
+        {route === "paragraph" && <section className="selection-result"><div className="selection-label">译文{translationCacheHit && <span>缓存命中</span>}</div><div className="selection-translation">{translation || (translationStatus === "loading" ? "准备翻译……" : "")}{translationStatus === "streaming" && <span className="stream-caret" />}</div>{translationStatus === "failed" && <p className="selection-muted">翻译失败</p>}</section>}
+        {error && <p className="selection-error">{error}</p>}
+        {notice && <p className="selection-notice">{notice}</p>}
+      </div>
       <footer className="selection-actions">
         <span>{route === "dictionary" ? "词典" : route === "paragraph" ? "段落翻译" : ""}</span>
         <div>

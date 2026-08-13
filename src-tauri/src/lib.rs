@@ -27,9 +27,76 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const STARTUP_BACKGROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+struct StartupGate {
+    first_paint: AtomicBool,
+}
+
+impl StartupGate {
+    fn new() -> Self {
+        Self {
+            first_paint: AtomicBool::new(false),
+        }
+    }
+
+    fn open(&self) {
+        self.first_paint.store(true, Ordering::Release);
+    }
+
+    async fn wait(&self, timeout: std::time::Duration) -> bool {
+        if self.first_paint.load(Ordering::Acquire) {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.first_paint.load(Ordering::Acquire) {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(16))).await;
+        }
+    }
+}
+
+struct StartupRuntime {
+    started_at: Instant,
+    gate: StartupGate,
+}
+
+impl StartupRuntime {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            gate: StartupGate::new(),
+        }
+    }
+
+    fn log(&self, stage: &str, window: &str) {
+        diagnostics::info(format!(
+            "startup.stage stage={stage} window={window} elapsed_ms={}",
+            self.started_at.elapsed().as_millis()
+        ));
+    }
+
+    fn report_frontend_stage(&self, stage: &str, window: &str) -> Result<(), String> {
+        if !matches!(stage, "webview_script" | "dom_mounted" | "first_paint") {
+            return Err("无效的启动阶段".to_string());
+        }
+        self.log(stage, window);
+        if stage == "first_paint" {
+            self.gate.open();
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,10 +107,11 @@ pub struct AppState {
     pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
     pub(crate) dictionary_initialising: Arc<AtomicBool>,
     pub(crate) selection: selection::SelectionService,
+    startup: Arc<StartupRuntime>,
 }
 
 impl AppState {
-    fn new(connection: Connection, data_dir: PathBuf) -> Self {
+    fn new(connection: Connection, data_dir: PathBuf, startup: Arc<StartupRuntime>) -> Self {
         let cancellations = Arc::new(Mutex::new(HashMap::new()));
         let selection = selection::SelectionService::new(cancellations.clone());
         let dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
@@ -56,6 +124,7 @@ impl AppState {
             dictionary_store: Arc::new(Mutex::new(dictionary_store)),
             dictionary_initialising: Arc::new(AtomicBool::new(false)),
             selection,
+            startup,
         }
     }
 
@@ -75,37 +144,45 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let startup = Arc::new(StartupRuntime::new());
+            startup.log("setup.begin", "main");
             let data_dir = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| std::io::Error::other(format!("无法定位应用数据目录：{error}")))?;
             initialise_database(&data_dir).map_err(std::io::Error::other)?;
+            startup.log("data_dir.completed", "main");
             let connection = Connection::open(data_dir.join("app.sqlite"))
                 .map_err(|error| std::io::Error::other(format!("打开应用数据库失败：{error}")))?;
+            startup.log("database.opened", "main");
             db::migrate(&connection).map_err(std::io::Error::other)?;
-            let state = AppState::new(connection, data_dir);
-            let selection_settings = {
+            startup.log("database.migrated", "main");
+            let state = AppState::new(connection, data_dir, startup.clone());
+            startup.log("state.created", "main");
+            let (selection_mode, selection_shortcut) = {
                 let connection = state
                     .database
                     .lock()
                     .map_err(|_| std::io::Error::other("应用数据库锁已损坏"))?;
-                db::get_settings(&connection).map_err(std::io::Error::other)?
+                db::get_selection_settings(&connection).map_err(std::io::Error::other)?
             };
             state.selection.attach_app(app.handle().clone());
-            state.selection.start_worker();
             app.manage(state.clone());
-            if let Err(error) = state.selection.configure(
-                app.handle(),
-                selection_settings.selection_mode,
-                &selection_settings.selection_shortcut,
-            ) {
-                diagnostics::error(format!("selection.configure.startup_failed reason={error}"));
-            }
+            schedule_selection_initialisation(
+                state.clone(),
+                app.handle().clone(),
+                selection_mode,
+                selection_shortcut,
+            );
+            startup.log("selection.scheduled", "main");
             schedule_dictionary_initialisation(state.clone());
             schedule_pending_example_indexes(state);
+            startup.log("background.scheduled", "main");
+            startup.log("setup.completed", "main");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            report_startup_stage,
             get_app_snapshot,
             save_provider_config,
             fetch_models,
@@ -141,6 +218,18 @@ pub fn run() {
 
 fn initialise_database(data_dir: &PathBuf) -> Result<(), String> {
     fs::create_dir_all(data_dir).map_err(|error| format!("创建应用数据目录失败：{error}"))
+}
+
+#[tauri::command]
+fn report_startup_stage(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    stage: String,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("启动阶段只允许主窗口上报".to_string());
+    }
+    state.startup.report_frontend_stage(&stage, window.label())
 }
 
 #[tauri::command]
@@ -514,8 +603,7 @@ async fn translate_impl(
         };
         if let Some(cached) = cached {
             diagnostics::info(format!(
-                "command.translate.cache_hit request_id={} cache_key={}",
-                request_id, prepared.cache_key
+                "command.translate.cache_hit request_id={request_id}"
             ));
             let persist = {
                 let connection = state
@@ -845,9 +933,30 @@ fn cancel_request(state: &AppState, request_id: &str) -> Result<bool, String> {
     }
 }
 
+fn schedule_selection_initialisation(
+    state: AppState,
+    app: AppHandle,
+    mode: SelectionMode,
+    shortcut: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        state.selection.start_worker();
+        if let Err(error) = state.selection.configure(&app, mode, &shortcut) {
+            diagnostics::error(format!("selection.configure.startup_failed reason={error}"));
+            return;
+        }
+        state.startup.log("selection.ready", "main");
+    });
+}
+
 fn schedule_dictionary_initialisation(state: AppState) {
     state.dictionary_initialising.store(true, Ordering::Release);
     tauri::async_runtime::spawn(async move {
+        let first_paint = state.startup.gate.wait(STARTUP_BACKGROUND_WAIT).await;
+        if !first_paint {
+            diagnostics::warn("startup.gate.timeout task=dictionary");
+        }
+        state.startup.log("background.dictionary.begin", "main");
         let worker_state = state.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
             let mut store = worker_state
@@ -882,6 +991,52 @@ fn schedule_dictionary_initialisation(state: AppState) {
 
 fn schedule_pending_example_indexes(state: AppState) {
     tauri::async_runtime::spawn(async move {
+        let first_paint = state.startup.gate.wait(STARTUP_BACKGROUND_WAIT).await;
+        if !first_paint {
+            diagnostics::warn("startup.gate.timeout task=examples");
+        }
+        state.startup.log("background.examples.begin", "main");
+
+        let mut cursor = None;
+        loop {
+            let batch = match tauri::async_runtime::spawn_blocking({
+                let state = state.clone();
+                let cursor = cursor.clone();
+                move || {
+                    let connection = state
+                        .database
+                        .lock()
+                        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+                    db::enqueue_missing_example_indexes(&connection, cursor.as_deref(), 128)
+                }
+            })
+            .await
+            {
+                Ok(Ok(batch)) => batch,
+                Ok(Err(error)) => {
+                    diagnostics::error(format!(
+                        "examples.index_backfill.enqueue_failed reason={error}"
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    diagnostics::error(format!(
+                        "examples.index_backfill.enqueue_worker_failed reason={error}"
+                    ));
+                    return;
+                }
+            };
+            let Some(last_key) = batch.last_key else {
+                break;
+            };
+            diagnostics::info(format!(
+                "examples.index_backfill.enqueued count={} has_cursor=true",
+                batch.inserted
+            ));
+            cursor = Some(last_key);
+            tokio::task::yield_now().await;
+        }
+
         let keys = match tauri::async_runtime::spawn_blocking({
             let state = state.clone();
             move || {
@@ -889,7 +1044,7 @@ fn schedule_pending_example_indexes(state: AppState) {
                     .database
                     .lock()
                     .map_err(|_| "应用数据库锁已损坏".to_string())?;
-                db::list_pending_example_indexes(&connection, 1000)
+                db::list_pending_example_indexes(&connection, 128)
             }
         })
         .await
@@ -903,14 +1058,16 @@ fn schedule_pending_example_indexes(state: AppState) {
             }
             Err(error) => {
                 diagnostics::error(format!(
-                    "examples.index_backfill.worker_failed reason={error}"
+                    "examples.index_backfill.list_worker_failed reason={error}"
                 ));
                 return;
             }
         };
         for cache_key in keys {
             index_example_cache(state.clone(), cache_key).await;
+            tokio::task::yield_now().await;
         }
+        state.startup.log("background.examples.completed", "main");
     });
 }
 
@@ -923,7 +1080,6 @@ fn schedule_example_index(state: &AppState, cache_key: &str) {
 }
 
 async fn index_example_cache(state: AppState, cache_key: String) {
-    let log_key = cache_key.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let connection = state
             .database
@@ -933,13 +1089,9 @@ async fn index_example_cache(state: AppState, cache_key: String) {
     })
     .await;
     match result {
-        Ok(Ok(())) => diagnostics::info(format!("examples.index.completed cache_key={log_key}")),
-        Ok(Err(error)) => diagnostics::error(format!(
-            "examples.index.failed cache_key={log_key} reason={error}"
-        )),
-        Err(error) => diagnostics::error(format!(
-            "examples.index.worker_failed cache_key={log_key} reason={error}"
-        )),
+        Ok(Ok(())) => diagnostics::info("examples.index.completed"),
+        Ok(Err(error)) => diagnostics::error(format!("examples.index.failed reason={error}")),
+        Err(error) => diagnostics::error(format!("examples.index.worker_failed reason={error}")),
     }
 }
 
@@ -1835,11 +1987,12 @@ fn emit_word_failed(
 mod tests {
     use super::{
         build_system_prompt, cancel_request, make_cache_key, make_word_ai_cache_key,
-        unregister_request, AppState, CacheKeyInput, WordAiCacheKeyInput, WordExampleDelta,
-        WordExampleProtocolParser, WORD_EXAMPLE_PROTOCOL_VERSION,
+        unregister_request, AppState, CacheKeyInput, StartupRuntime, WordAiCacheKeyInput,
+        WordExampleDelta, WordExampleProtocolParser, WORD_EXAMPLE_PROTOCOL_VERSION,
     };
     use crate::contracts::GlossaryTerm;
     use rusqlite::Connection;
+    use std::sync::{atomic::Ordering, Arc};
     use tokio_util::sync::CancellationToken;
 
     fn test_cache_key(source_text: &str) -> String {
@@ -1924,7 +2077,11 @@ mod tests {
 
     #[test]
     fn cancel_request_reports_active_token_and_cancels_it() {
-        let state = AppState::new(Connection::open_in_memory().unwrap(), std::env::temp_dir());
+        let state = AppState::new(
+            Connection::open_in_memory().unwrap(),
+            std::env::temp_dir(),
+            Arc::new(StartupRuntime::new()),
+        );
         let token = CancellationToken::new();
         state
             .cancellations
@@ -1937,6 +2094,16 @@ mod tests {
 
         unregister_request(&state, "active");
         assert!(!cancel_request(&state, "active").unwrap());
+    }
+
+    #[test]
+    fn startup_stage_report_accepts_only_known_stages_and_opens_gate_at_first_paint() {
+        let startup = StartupRuntime::new();
+        assert!(startup.report_frontend_stage("dom_mounted", "main").is_ok());
+        assert!(!startup.gate.first_paint.load(Ordering::Acquire));
+        assert!(startup.report_frontend_stage("first_paint", "main").is_ok());
+        assert!(startup.gate.first_paint.load(Ordering::Acquire));
+        assert!(startup.report_frontend_stage("unexpected", "main").is_err());
     }
 
     #[test]

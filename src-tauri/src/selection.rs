@@ -11,6 +11,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use tauri::window::Color;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -457,6 +458,7 @@ impl SelectionService {
                 .skip_taskbar(true)
                 .focused(false)
                 .visible(false)
+                .background_color(Color(251, 250, 247, 255))
                 .build();
         if let Err(error) = result {
             self.emit_unavailable(
