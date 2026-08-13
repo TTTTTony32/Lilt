@@ -13,6 +13,8 @@ export interface AppSettings {
   paragraphExampleLookupEnabled: boolean;
   selectionMode: "shortcut" | "automatic";
   selectionShortcut: string;
+  selectionWindowWidth: number;
+  selectionWindowHeight: number;
   closeBehavior: CloseBehavior;
 }
 
@@ -453,6 +455,8 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     paragraphExampleLookupEnabled: true,
     selectionMode: "shortcut",
     selectionShortcut: "Ctrl+Shift+L",
+    selectionWindowWidth: 560,
+    selectionWindowHeight: 360,
     closeBehavior: "ask",
   },
   provider: {

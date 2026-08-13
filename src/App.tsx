@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bookmark, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Bookmark, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
+import liltLogo from "../lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
@@ -107,9 +109,63 @@ function App() {
   const [wordExample, setWordExample] = useState<WordExampleState>(DEFAULT_WORD_EXAMPLE_STATE);
   const [dictionaryOpenRequest, setDictionaryOpenRequest] = useState<DictionaryOpenRequest | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const activeRequestId = useRef<string | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
+
+  useEffect(() => {
+    const window = getCurrentWindow();
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    const syncMaximized = async () => {
+      try {
+        const maximized = await window.isMaximized();
+        if (!disposed) setMainWindowMaximized(maximized);
+      } catch {
+        // 浏览器预览模式没有 Tauri 窗口状态，保留默认的未最大化状态。
+      }
+    };
+    void syncMaximized();
+    void window.onResized(() => {
+      void syncMaximized();
+    }).then((next) => {
+      if (disposed) next();
+      else unlisten = next;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleTitlebarMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest("button, a, input, select, textarea, [data-no-drag]")) return;
+    event.preventDefault();
+    void getCurrentWindow().startDragging().catch(() => undefined);
+  }, []);
+
+  const minimizeMainWindow = useCallback(() => {
+    void getCurrentWindow().minimize().catch((reason) => {
+      setError(describeError(reason, "无法最小化主窗口"));
+    });
+  }, []);
+
+  const toggleMainWindowMaximized = useCallback(async () => {
+    try {
+      await getCurrentWindow().toggleMaximize();
+      setMainWindowMaximized(await getCurrentWindow().isMaximized());
+    } catch (reason) {
+      setError(describeError(reason, "无法切换主窗口大小"));
+    }
+  }, []);
+
+  const closeMainWindow = useCallback(() => {
+    void getCurrentWindow().close().catch((reason) => {
+      setError(describeError(reason, "无法关闭主窗口"));
+    });
+  }, []);
 
   const refreshSnapshot = useCallback(async () => {
     try {
@@ -681,17 +737,24 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className="topbar" onMouseDown={handleTitlebarMouseDown}>
         <div className="brand-lockup">
-          <div className="brand-mark">L</div>
+          <img className="brand-logo" src={liltLogo} alt="" />
           <div>
             <div className="brand-name">Lilt</div>
             <div className="brand-caption">阅读辅助工具</div>
           </div>
         </div>
-        <div className="topbar-status">
-          <span className="status-dot" />
-          本地运行
+        <div className="topbar-actions">
+          <div className="topbar-status">
+            <span className="status-dot" />
+            本地运行
+          </div>
+          <div className="window-controls" data-no-drag>
+            <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={15} /></button>
+            <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
+            <button className="window-control window-control-close" type="button" onClick={closeMainWindow} aria-label="关闭窗口" title="关闭"><X size={15} /></button>
+          </div>
         </div>
       </header>
 

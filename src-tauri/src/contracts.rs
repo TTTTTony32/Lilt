@@ -10,6 +10,12 @@ pub const DEFAULT_WORD_AI_CACHE_ENABLED: bool = true;
 pub const DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED: bool = true;
 pub const DEFAULT_SELECTION_SHORTCUT: &str = "Ctrl+Shift+L";
 pub const DEFAULT_SELECTION_MODE: SelectionMode = SelectionMode::Shortcut;
+pub const DEFAULT_SELECTION_WINDOW_WIDTH: i64 = 560;
+pub const DEFAULT_SELECTION_WINDOW_HEIGHT: i64 = 360;
+pub const MIN_SELECTION_WINDOW_WIDTH: i64 = 360;
+pub const MAX_SELECTION_WINDOW_WIDTH: i64 = 1200;
+pub const MIN_SELECTION_WINDOW_HEIGHT: i64 = 240;
+pub const MAX_SELECTION_WINDOW_HEIGHT: i64 = 900;
 pub const DICTIONARY_HISTORY_LIMIT: i64 = 20;
 pub const DICTIONARY_DISTRIBUTION_SCHEMA_VERSION: &str = "distribution_entry_v5";
 pub const DICTIONARY_SQLITE_SCHEMA_VERSION: &str = "distribution_sqlite_v1";
@@ -26,7 +32,33 @@ pub struct AppSettings {
     pub paragraph_example_lookup_enabled: bool,
     pub selection_mode: SelectionMode,
     pub selection_shortcut: String,
+    pub selection_window_width: i64,
+    pub selection_window_height: i64,
     pub close_behavior: CloseBehavior,
+}
+
+pub fn parse_selection_window_dimension(
+    value: Option<&str>,
+    default: i64,
+    minimum: i64,
+    maximum: i64,
+) -> i64 {
+    value
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| (*value >= minimum) && (*value <= maximum))
+        .unwrap_or(default)
+}
+
+pub fn clamp_selection_window_dimension(
+    value: f64,
+    default: i64,
+    minimum: i64,
+    maximum: i64,
+) -> i64 {
+    if !value.is_finite() {
+        return default;
+    }
+    value.round().clamp(minimum as f64, maximum as f64) as i64
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,7 +601,70 @@ impl DictionaryState {
 
 #[cfg(test)]
 mod tests {
-    use super::{TranslationCommandResult, TranslationOutcome};
+    use super::{
+        clamp_selection_window_dimension, parse_selection_window_dimension,
+        TranslationCommandResult, TranslationOutcome, DEFAULT_SELECTION_WINDOW_HEIGHT,
+        DEFAULT_SELECTION_WINDOW_WIDTH, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+        MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
+    };
+
+    #[test]
+    fn selection_window_dimensions_parse_and_clamp_at_the_contract_boundary() {
+        assert_eq!(
+            parse_selection_window_dimension(
+                Some("800"),
+                DEFAULT_SELECTION_WINDOW_WIDTH,
+                MIN_SELECTION_WINDOW_WIDTH,
+                MAX_SELECTION_WINDOW_WIDTH,
+            ),
+            800
+        );
+        assert_eq!(
+            parse_selection_window_dimension(
+                Some("not-a-size"),
+                DEFAULT_SELECTION_WINDOW_WIDTH,
+                MIN_SELECTION_WINDOW_WIDTH,
+                MAX_SELECTION_WINDOW_WIDTH,
+            ),
+            DEFAULT_SELECTION_WINDOW_WIDTH
+        );
+        assert_eq!(
+            parse_selection_window_dimension(
+                Some("120"),
+                DEFAULT_SELECTION_WINDOW_WIDTH,
+                MIN_SELECTION_WINDOW_WIDTH,
+                MAX_SELECTION_WINDOW_WIDTH,
+            ),
+            DEFAULT_SELECTION_WINDOW_WIDTH
+        );
+        assert_eq!(
+            clamp_selection_window_dimension(
+                1_500.4,
+                DEFAULT_SELECTION_WINDOW_WIDTH,
+                MIN_SELECTION_WINDOW_WIDTH,
+                MAX_SELECTION_WINDOW_WIDTH,
+            ),
+            MAX_SELECTION_WINDOW_WIDTH
+        );
+        assert_eq!(
+            clamp_selection_window_dimension(
+                120.0,
+                DEFAULT_SELECTION_WINDOW_HEIGHT,
+                MIN_SELECTION_WINDOW_HEIGHT,
+                MAX_SELECTION_WINDOW_HEIGHT,
+            ),
+            MIN_SELECTION_WINDOW_HEIGHT
+        );
+        assert_eq!(
+            clamp_selection_window_dimension(
+                f64::NAN,
+                DEFAULT_SELECTION_WINDOW_HEIGHT,
+                MIN_SELECTION_WINDOW_HEIGHT,
+                MAX_SELECTION_WINDOW_HEIGHT,
+            ),
+            DEFAULT_SELECTION_WINDOW_HEIGHT
+        );
+    }
 
     #[test]
     fn command_result_constructors_keep_terminal_fields_consistent() {

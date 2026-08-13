@@ -14,13 +14,18 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .58; }
 
 .app-shell { min-height: 100vh; }
-.topbar { height: 68px; padding: 0 30px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dedbd2; background: rgba(250, 249, 245, .88); }
+.topbar { height: 68px; padding: 0 18px 0 30px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dedbd2; background: rgba(250, 249, 245, .88); user-select: none; }
 .brand-lockup { display: flex; align-items: center; gap: 11px; }
-.brand-mark { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 9px; color: #fffdf8; background: #4b6354; font-family: Georgia, serif; font-size: 21px; }
+.brand-logo { width: 31px; height: 31px; display: block; border-radius: 9px; }
 .brand-name { color: #303f35; font-family: Georgia, serif; font-size: 21px; line-height: 1; }
 .brand-caption { margin-top: 4px; color: #92948c; font-size: 11px; }
+.topbar-actions { display: flex; align-items: center; gap: 18px; }
 .topbar-status { display: flex; align-items: center; gap: 7px; color: #81857a; font-size: 12px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #83a98e; }
+.window-controls { height: 68px; display: flex; align-items: stretch; }
+.window-control { width: 42px; height: 100%; padding: 0; display: grid; place-items: center; border: 0; color: #81857a; background: transparent; }
+.window-control:hover { color: #394b3e; background: #e9ebe4; }
+.window-control-close:hover { color: #fff; background: #b8665a; }
 
 .workspace { display: flex; min-height: calc(100vh - 68px); }
 .sidebar { width: 208px; padding: 26px 16px 20px; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px solid #e2dfd7; background: #f0eee7; }
@@ -221,15 +226,16 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .selection-body #root { height: 100%; min-height: 0; }
 .selection-trigger-window { width: 100%; min-width: 48px; height: 100%; display: grid; place-items: center; background: transparent; }
 .selection-trigger-window.is-reading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border-radius: 10px; color: #657267; background: #fbfaf7; box-shadow: 0 8px 22px rgba(48, 61, 50, .14); font-size: 11px; }
-.selection-trigger-button { width: 38px; height: 38px; padding: 0; border: 0; border-radius: 50%; background: #4b6354; box-shadow: 0 3px 12px rgba(48, 61, 50, .28); cursor: pointer; }
-.selection-trigger-button:hover { background: #5e7966; }
+.selection-trigger-button { width: 40px; height: 40px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; box-shadow: 0 3px 12px rgba(48, 61, 50, .28); cursor: pointer; }
+.selection-trigger-button img { width: 40px; height: 40px; display: block; border-radius: 11px; }
+.selection-trigger-button:hover { filter: brightness(1.08); }
 .selection-trigger-button:disabled { cursor: wait; opacity: .65; }
 .selection-trigger-reading { white-space: nowrap; }
 .selection-trigger-error { position: fixed; top: 52px; left: 0; max-width: 260px; padding: 6px 8px; color: #a25e53; background: #fbfaf7; box-shadow: 0 4px 14px rgba(48, 61, 50, .16); font-size: 11px; }
 .selection-window { width: 100%; min-width: 300px; height: 100%; min-height: 0; padding: 14px 16px 12px; display: flex; flex-direction: column; overflow: hidden; color: #394b3e; background: #fbfaf7; box-shadow: 0 12px 34px rgba(48, 61, 50, .16); }
 .selection-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; color: #4b6354; cursor: move; user-select: none; }
 .selection-header > div { display: flex; align-items: center; gap: 7px; font-family: Georgia, "Songti SC", serif; font-size: 16px; }
-.selection-mark { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: #fffdf8; background: #4b6354; font-size: 14px; }
+.selection-mark { width: 22px; height: 22px; display: block; border-radius: 6px; }
 .selection-close { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 6px; color: #9a9e96; background: transparent; cursor: pointer; }
 .selection-close:hover { color: #4b6354; background: #edf0ea; }
 .selection-scroll { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }

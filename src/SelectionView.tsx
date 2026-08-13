@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Copy, ExternalLink, LoaderCircle, Square, X } from "lucide-react";
 import { getCurrentWindow, PhysicalSize } from "@tauri-apps/api/window";
+import liltLogo from "../lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { isDictionarySelection } from "./lib/selection";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -82,16 +83,51 @@ export default function SelectionView() {
     const window = getCurrentWindow();
     const size = triggerStatus === "failed"
       ? new PhysicalSize(280, 80)
-      : triggerStatus === "reading"
-        ? new PhysicalSize(440, 320)
-        : new PhysicalSize(48, 48);
+      : triggerStatus === "available"
+        ? new PhysicalSize(48, 48)
+        : null;
+    if (!size) return;
     void window.setSize(size).catch(() => undefined);
   }, [triggerNotice, triggerStatus, selection]);
 
   useEffect(() => {
-    if (!selection) return;
     const window = getCurrentWindow();
-    void window.setSize(new PhysicalSize(440, 320)).catch(() => undefined);
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleResized = async (size: PhysicalSize) => {
+      if (disposed || !selection || !activeSelectionId.current) return;
+      try {
+        const scaleFactor = await window.scaleFactor();
+        if (disposed || !selection || !activeSelectionId.current) return;
+        const logical = size.toLogical(scaleFactor);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (!disposed && selection && activeSelectionId.current) {
+            void invokeCommand("save_selection_window_size", {
+              width: logical.width,
+              height: logical.height,
+            });
+          }
+        }, 240);
+      } catch {
+        // 尺寸持久化失败不影响当前浮窗继续显示。
+      }
+    };
+
+    void window.onResized(({ payload }) => {
+      void handleResized(payload);
+    }).then((next) => {
+      if (disposed) next();
+      else unlisten = next;
+    }).catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (timer) clearTimeout(timer);
+    };
   }, [selection]);
 
   const handleHeaderMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
@@ -534,7 +570,7 @@ export default function SelectionView() {
           aria-label="读取选中文本"
           disabled={triggerStatus !== "available"}
           onClick={() => void activateTrigger()}
-        />
+        ><img src={liltLogo} alt="" /></button>
         {triggerStatus === "failed" && triggerError && <span className="selection-trigger-error">{triggerError}</span>}
       </main>
     );
@@ -543,7 +579,7 @@ export default function SelectionView() {
   return (
     <main className="selection-window" role="dialog" aria-label="Lilt 划词翻译">
       <header className="selection-header" onMouseDown={handleHeaderMouseDown}>
-        <div><span className="selection-mark">L</span><strong>Lilt</strong></div>
+        <div><img className="selection-mark" src={liltLogo} alt="" /><strong>Lilt</strong></div>
         <button className="selection-close" type="button" data-no-drag onClick={closeSelection} aria-label="关闭"><X size={16} /></button>
       </header>
       <div className="selection-scroll" ref={selectionScrollRef}>

@@ -3,6 +3,9 @@ use crate::{
         SelectionAnchor, SelectionMode, SelectionNotice, SelectionRequestPayload,
         SelectionRuntimeStatus, SelectionStatusChanged, SelectionTrigger, SelectionTriggerNotice,
         SelectionUnavailable, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
+        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH,
+        MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
+        MIN_SELECTION_WINDOW_WIDTH,
     },
     diagnostics,
 };
@@ -12,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::window::Color;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -49,6 +52,8 @@ struct SelectionInner {
     last_signature: Option<SelectionSignature>,
     dragging: bool,
     drag_finished_at: Option<Instant>,
+    content_width: i64,
+    content_height: i64,
 }
 
 struct StoredSelection {
@@ -116,6 +121,8 @@ impl SelectionService {
                 last_signature: None,
                 dragging: false,
                 drag_finished_at: None,
+                content_width: DEFAULT_SELECTION_WINDOW_WIDTH,
+                content_height: DEFAULT_SELECTION_WINDOW_HEIGHT,
             })),
             worker: Arc::new(Mutex::new(None)),
             app: Arc::new(Mutex::new(None)),
@@ -171,6 +178,25 @@ impl SelectionService {
                 inner.target_language = target_language.trim().to_string();
             }
         }
+    }
+
+    pub fn set_window_size(&self, width: i64, height: i64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.content_width =
+                width.clamp(MIN_SELECTION_WINDOW_WIDTH, MAX_SELECTION_WINDOW_WIDTH);
+            inner.content_height =
+                height.clamp(MIN_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_HEIGHT);
+        }
+    }
+
+    fn window_size(&self) -> (i64, i64) {
+        self.inner
+            .lock()
+            .map(|inner| (inner.content_width, inner.content_height))
+            .unwrap_or((
+                DEFAULT_SELECTION_WINDOW_WIDTH,
+                DEFAULT_SELECTION_WINDOW_HEIGHT,
+            ))
     }
 
     pub fn configure(
@@ -683,16 +709,23 @@ impl SelectionService {
         let result =
             WebviewWindowBuilder::new(&app, "selection", WebviewUrl::App("index.html".into()))
                 .title("Lilt")
-                .inner_size(440.0, 320.0)
-                .min_inner_size(48.0, 48.0)
+                .inner_size(
+                    DEFAULT_SELECTION_WINDOW_WIDTH as f64,
+                    DEFAULT_SELECTION_WINDOW_HEIGHT as f64,
+                )
+                .min_inner_size(
+                    MIN_SELECTION_WINDOW_WIDTH as f64,
+                    MIN_SELECTION_WINDOW_HEIGHT as f64,
+                )
                 .decorations(false)
                 .transparent(true)
-                .resizable(false)
+                .shadow(false)
+                .resizable(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .focused(false)
                 .visible(false)
-                .background_color(Color(251, 250, 247, 0))
+                .background_color(Color(0, 0, 0, 0))
                 .build();
         if let Err(error) = result {
             self.emit_unavailable(
@@ -705,20 +738,42 @@ impl SelectionService {
     }
 
     fn show_trigger(&self, anchor: Option<&SelectionAnchor>) {
-        self.show_at(anchor, tauri::PhysicalSize::new(48, 48));
+        self.show_at(anchor, 48.0, 48.0, false);
     }
 
     fn show_window(&self, anchor: Option<&SelectionAnchor>) {
-        self.show_at(anchor, tauri::PhysicalSize::new(440, 320));
+        let (width, height) = self.window_size();
+        self.show_at(anchor, width as f64, height as f64, true);
     }
 
-    fn show_at(&self, anchor: Option<&SelectionAnchor>, desired_size: tauri::PhysicalSize<u32>) {
+    fn show_at(
+        &self,
+        anchor: Option<&SelectionAnchor>,
+        desired_width: f64,
+        desired_height: f64,
+        resizable: bool,
+    ) {
         let Some(app) = self.app_handle() else { return };
         let Some(window) = app.get_webview_window("selection") else {
             return;
         };
-        let _ = window.set_size(desired_size);
-        let size = desired_size;
+        let min_size = if resizable {
+            LogicalSize::new(
+                MIN_SELECTION_WINDOW_WIDTH as f64,
+                MIN_SELECTION_WINDOW_HEIGHT as f64,
+            )
+        } else {
+            LogicalSize::new(48.0, 48.0)
+        };
+        let _ = window.set_min_size(Some(min_size));
+        let _ = window.set_resizable(resizable);
+        let _ = window.set_size(LogicalSize::new(desired_width, desired_height));
+        let size = window.inner_size().unwrap_or_else(|_| {
+            tauri::PhysicalSize::new(
+                desired_width.max(1.0) as u32,
+                desired_height.max(1.0) as u32,
+            )
+        });
         let desired = anchor.map(|value| (value.x, value.y + value.height + 8));
         let monitor = desired
             .and_then(|(x, y)| window.monitor_from_point(x as f64, y as f64).ok().flatten())

@@ -10,15 +10,16 @@ mod selection;
 mod tray;
 
 use contracts::{
-    AppSnapshot, CloseBehavior, DictionaryCommandResult, DictionaryLookupCandidate,
-    DictionaryLookupCommandResult, DictionaryState, GlossaryTerm, ModelInfo, ParagraphExample,
-    PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
-    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
-    TranslationStarted, WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted,
-    WordExampleFailed, WordExamplePosDelta, WordExampleRequest, WordExampleStarted,
-    WordExampleTranslationDelta, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
-    WORD_EXAMPLE_PROTOCOL_VERSION,
+    clamp_selection_window_dimension, AppSnapshot, CloseBehavior, DictionaryCommandResult,
+    DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryState, GlossaryTerm,
+    ModelInfo, ParagraphExample, PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode,
+    SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
+    SelectionTriggerNotice, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
+    TranslationFailed, TranslationRequest, TranslationStarted, WordExampleCancelled,
+    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
+    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID,
+    DICTIONARY_HISTORY_LIMIT, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, WORD_EXAMPLE_PROTOCOL_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -214,14 +215,28 @@ pub fn run() {
             startup.log("database.migrated", "main");
             let state = AppState::new(connection, data_dir, startup.clone());
             startup.log("state.created", "main");
-            let (selection_mode, selection_shortcut) = {
+            let (
+                selection_mode,
+                selection_shortcut,
+                selection_window_width,
+                selection_window_height,
+            ) = {
                 let connection = state
                     .database
                     .lock()
                     .map_err(|_| std::io::Error::other("应用数据库锁已损坏"))?;
-                db::get_selection_settings(&connection).map_err(std::io::Error::other)?
+                let settings = db::get_settings(&connection).map_err(std::io::Error::other)?;
+                (
+                    settings.selection_mode,
+                    settings.selection_shortcut,
+                    settings.selection_window_width,
+                    settings.selection_window_height,
+                )
             };
             state.selection.attach_app(app.handle().clone());
+            state
+                .selection
+                .set_window_size(selection_window_width, selection_window_height);
             app.manage(state.clone());
             #[cfg(desktop)]
             {
@@ -256,6 +271,7 @@ pub fn run() {
             activate_selection,
             begin_selection_drag,
             end_selection_drag,
+            save_selection_window_size,
             get_selection_request,
             open_selection_in_main,
             dismiss_selection,
@@ -611,6 +627,33 @@ fn begin_selection_drag(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn end_selection_drag(state: State<'_, AppState>) -> Result<(), String> {
     state.selection.end_drag();
+    Ok(())
+}
+
+#[tauri::command]
+fn save_selection_window_size(
+    state: State<'_, AppState>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let width = clamp_selection_window_dimension(
+        width,
+        contracts::DEFAULT_SELECTION_WINDOW_WIDTH,
+        MIN_SELECTION_WINDOW_WIDTH,
+        MAX_SELECTION_WINDOW_WIDTH,
+    );
+    let height = clamp_selection_window_dimension(
+        height,
+        contracts::DEFAULT_SELECTION_WINDOW_HEIGHT,
+        MIN_SELECTION_WINDOW_HEIGHT,
+        MAX_SELECTION_WINDOW_HEIGHT,
+    );
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::save_selection_window_size(&connection, width, height)?;
+    state.selection.set_window_size(width, height);
     Ok(())
 }
 

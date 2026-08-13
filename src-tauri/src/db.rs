@@ -1,10 +1,13 @@
 use crate::contracts::{
-    AppSettings, CacheStats, CachedTranslation, CloseBehavior, DictionaryHistoryEntry,
-    GlossaryTerm, HistoryEntry, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
-    SelectionMode, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION,
-    DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
-    DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_WORD_AI_CACHE_ENABLED,
+    parse_selection_window_dimension, AppSettings, CacheStats, CachedTranslation, CloseBehavior,
+    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, ModelInfo, PersonalDictionaryEntry, Prompt,
+    ProviderRecord, SelectionMode, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
+    DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID,
+    DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
+    DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_WORD_AI_CACHE_ENABLED,
     DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
+    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
+    MIN_SELECTION_WINDOW_WIDTH,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -354,6 +357,18 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         _ => CloseBehavior::Ask,
     };
     let (selection_mode, selection_shortcut) = get_selection_settings(connection)?;
+    let selection_window_width = parse_selection_window_dimension(
+        get_setting(connection, "selection_window_width")?.as_deref(),
+        DEFAULT_SELECTION_WINDOW_WIDTH,
+        MIN_SELECTION_WINDOW_WIDTH,
+        MAX_SELECTION_WINDOW_WIDTH,
+    );
+    let selection_window_height = parse_selection_window_dimension(
+        get_setting(connection, "selection_window_height")?.as_deref(),
+        DEFAULT_SELECTION_WINDOW_HEIGHT,
+        MIN_SELECTION_WINDOW_HEIGHT,
+        MAX_SELECTION_WINDOW_HEIGHT,
+    );
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
         history_retention,
@@ -364,6 +379,8 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         paragraph_example_lookup_enabled,
         selection_mode,
         selection_shortcut,
+        selection_window_width,
+        selection_window_height,
         close_behavior,
     })
 }
@@ -439,6 +456,27 @@ pub fn save_selection_settings(
         },
     )?;
     set_setting(connection, "selection_shortcut", shortcut)
+}
+
+pub fn save_selection_window_size(
+    connection: &Connection,
+    width: i64,
+    height: i64,
+) -> Result<(), String> {
+    set_setting(
+        connection,
+        "selection_window_width",
+        &width
+            .clamp(MIN_SELECTION_WINDOW_WIDTH, MAX_SELECTION_WINDOW_WIDTH)
+            .to_string(),
+    )?;
+    set_setting(
+        connection,
+        "selection_window_height",
+        &height
+            .clamp(MIN_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_HEIGHT)
+            .to_string(),
+    )
 }
 
 pub fn get_provider(connection: &Connection) -> Result<ProviderRecord, String> {
@@ -1679,6 +1717,14 @@ mod tests {
         assert!(!settings.paragraph_example_lookup_enabled);
         assert_eq!(settings.selection_mode, SelectionMode::Shortcut);
         assert_eq!(settings.selection_shortcut, DEFAULT_SELECTION_SHORTCUT);
+        assert_eq!(
+            settings.selection_window_width,
+            DEFAULT_SELECTION_WINDOW_WIDTH
+        );
+        assert_eq!(
+            settings.selection_window_height,
+            DEFAULT_SELECTION_WINDOW_HEIGHT
+        );
 
         save_selection_settings(&connection, SelectionMode::Automatic, "Alt+L")
             .expect("selection settings write should succeed");
@@ -1686,6 +1732,44 @@ mod tests {
             get_settings(&connection).expect("selection settings read should succeed");
         assert_eq!(selection_settings.selection_mode, SelectionMode::Automatic);
         assert_eq!(selection_settings.selection_shortcut, "Alt+L");
+    }
+
+    #[test]
+    fn selection_window_size_is_clamped_on_write_and_defaults_on_invalid_storage() {
+        let connection = test_connection();
+        save_selection_window_size(&connection, 800, 500)
+            .expect("selection window size should save");
+        let saved = get_settings(&connection).expect("selection window size should read");
+        assert_eq!(saved.selection_window_width, 800);
+        assert_eq!(saved.selection_window_height, 500);
+
+        save_selection_window_size(&connection, 10_000, 1)
+            .expect("out-of-range selection window size should save");
+        let clamped = get_settings(&connection).expect("clamped selection window size should read");
+        assert_eq!(clamped.selection_window_width, MAX_SELECTION_WINDOW_WIDTH);
+        assert_eq!(clamped.selection_window_height, MIN_SELECTION_WINDOW_HEIGHT);
+
+        connection
+            .execute(
+                "UPDATE app_settings SET value = ?1 WHERE key = 'selection_window_width'",
+                params!["invalid"],
+            )
+            .expect("invalid width fixture should write");
+        connection
+            .execute(
+                "UPDATE app_settings SET value = ?1 WHERE key = 'selection_window_height'",
+                params!["100"],
+            )
+            .expect("invalid height fixture should write");
+        let defaults = get_settings(&connection).expect("invalid size should fall back");
+        assert_eq!(
+            defaults.selection_window_width,
+            DEFAULT_SELECTION_WINDOW_WIDTH
+        );
+        assert_eq!(
+            defaults.selection_window_height,
+            DEFAULT_SELECTION_WINDOW_HEIGHT
+        );
     }
 
     #[test]
