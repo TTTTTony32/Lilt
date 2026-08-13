@@ -6,9 +6,12 @@ pub const DEFAULT_PROMPT_ID: &str = "builtin-general";
 pub const DEFAULT_GLOSSARY_ID: &str = "global";
 pub const DEFAULT_HISTORY_RETENTION: i64 = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: i64 = 256 * 1024 * 1024;
+pub const DEFAULT_WORD_AI_CACHE_ENABLED: bool = true;
+pub const DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED: bool = true;
 pub const DICTIONARY_HISTORY_LIMIT: i64 = 20;
 pub const DICTIONARY_DISTRIBUTION_SCHEMA_VERSION: &str = "distribution_entry_v5";
 pub const DICTIONARY_SQLITE_SCHEMA_VERSION: &str = "distribution_sqlite_v1";
+pub const WORD_EXAMPLE_PROTOCOL_VERSION: &str = "word-example-v1";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +20,8 @@ pub struct AppSettings {
     pub cache_enabled: bool,
     pub cache_max_bytes: i64,
     pub cache_usage_bytes: i64,
+    pub word_ai_cache_enabled: bool,
+    pub paragraph_example_lookup_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,18 +133,44 @@ pub struct DictionaryHistoryEntry {
     pub query_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DictionaryMatchType {
+    Exact,
+    Form,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictionaryLookupResult {
     pub word: String,
     pub normalized_word: String,
+    pub canonical_word: String,
+    pub match_type: DictionaryMatchType,
     pub entry: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictionaryLookupCandidate {
+    pub canonical_word: String,
+    pub normalized_canonical_word: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParagraphExample {
+    pub example_id: i64,
+    pub source_text: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DictionaryLookupCommandResult {
-    pub lookup: DictionaryLookupResult,
+    pub lookup: Option<DictionaryLookupResult>,
+    pub candidates: Vec<DictionaryLookupCandidate>,
+    pub example: Option<ParagraphExample>,
     pub history: Vec<DictionaryHistoryEntry>,
 }
 
@@ -255,6 +286,112 @@ pub struct TranslationCommandResult {
     pub content: Option<String>,
     pub cache_hit: bool,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleRequest {
+    pub request_id: String,
+    pub example_id: i64,
+    pub word: String,
+    pub canonical_word: String,
+    pub target_language: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleStarted {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleTranslationDelta {
+    pub request_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExamplePosDelta {
+    pub request_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleCompleted {
+    pub request_id: String,
+    pub translation: String,
+    pub part_of_speech: String,
+    pub cache_hit: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleCancelled {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleFailed {
+    pub request_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WordExampleOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WordExampleCommandResult {
+    pub outcome: WordExampleOutcome,
+    pub translation: Option<String>,
+    pub part_of_speech: Option<String>,
+    pub cache_hit: bool,
+    pub message: Option<String>,
+}
+
+impl WordExampleCommandResult {
+    pub fn completed(
+        translation: impl Into<String>,
+        part_of_speech: impl Into<String>,
+        cache_hit: bool,
+    ) -> Self {
+        Self {
+            outcome: WordExampleOutcome::Completed,
+            translation: Some(translation.into()),
+            part_of_speech: Some(part_of_speech.into()),
+            cache_hit,
+            message: None,
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self {
+            outcome: WordExampleOutcome::Cancelled,
+            translation: None,
+            part_of_speech: None,
+            cache_hit: false,
+            message: None,
+        }
+    }
+
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            outcome: WordExampleOutcome::Failed,
+            translation: None,
+            part_of_speech: None,
+            cache_hit: false,
+            message: Some(message.into()),
+        }
+    }
 }
 
 impl TranslationCommandResult {

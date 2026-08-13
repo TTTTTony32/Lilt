@@ -1,8 +1,9 @@
 use crate::contracts::{
     DictionaryCommandResult, DictionaryDownloadProgress, DictionaryExtractProgress,
-    DictionaryLookupResult, DictionaryState, DictionaryStatus, DictionaryUpdateCompleted,
-    DictionaryUpdateFailed, DictionaryUpdateStarted, DictionaryVerifyProgress,
-    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
+    DictionaryLookupResult, DictionaryMatchType, DictionaryState, DictionaryStatus,
+    DictionaryUpdateCompleted, DictionaryUpdateFailed, DictionaryUpdateStarted,
+    DictionaryVerifyProgress, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
+    DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use crate::db::{self, DictionaryInstallationRecord};
 use crate::diagnostics;
@@ -15,6 +16,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -53,8 +55,11 @@ pub enum DictionaryError {
     ContractMismatch(String),
     #[error("词典正在更新，请稍候")]
     Updating,
+    #[cfg(test)]
     #[error("未找到词条：{0}")]
     NotFound(String),
+    #[error("词形候选词头无效：{0}")]
+    InvalidCanonicalSelection(String),
 }
 
 impl DictionaryError {
@@ -65,7 +70,9 @@ impl DictionaryError {
             Self::DatabaseUnreadable(_) => "database_unreadable",
             Self::ContractMismatch(_) => "contract_mismatch",
             Self::Updating => "updating",
+            #[cfg(test)]
             Self::NotFound(_) => "not_found",
+            Self::InvalidCanonicalSelection(_) => "invalid_canonical_selection",
         }
     }
 }
@@ -83,10 +90,17 @@ pub struct DictionaryLookupMeasurement {
     pub json_decode_elapsed: Duration,
 }
 
+pub enum DictionaryLookupResolution {
+    Found(DictionaryLookupMeasurement),
+    Ambiguous(Vec<(String, String)>),
+    NotFound,
+}
+
 pub struct DictionaryStore {
     current_path: PathBuf,
     connection: Option<Connection>,
     metadata: Option<DistributionMetadata>,
+    form_index: HashMap<String, Vec<(String, String)>>,
     validation_error: Option<DictionaryError>,
     #[cfg(test)]
     validation_count: usize,
@@ -99,14 +113,58 @@ impl DictionaryStore {
             current_path,
             connection: None,
             metadata: None,
+            form_index: HashMap::new(),
             validation_error: None,
             #[cfg(test)]
             validation_count: 0,
         }
     }
 
+    #[cfg(test)]
     pub fn open_and_validate(&mut self) -> Result<DistributionMetadata, DictionaryError> {
         self.open_and_validate_with_origin("startup")
+    }
+
+    pub fn open_runtime(&mut self, origin: &str) -> Result<(), DictionaryError> {
+        self.close();
+        if !self.current_path.is_file() {
+            return Err(DictionaryError::NotInstalled);
+        }
+
+        let started = Instant::now();
+        let open_started = Instant::now();
+        let connection = match open_read_only(&self.current_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                self.validation_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let database_open_ms = open_started.elapsed().as_millis();
+        let index_started = Instant::now();
+        let form_index = match load_form_index(&connection) {
+            Ok(form_index) => form_index,
+            Err(error) => {
+                self.validation_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let index_ms = index_started.elapsed().as_millis();
+        diagnostics::info(format!(
+            "dictionary.form_index.ready origin={origin} key_count={} candidate_count={} database_open_ms={database_open_ms} index_ms={index_ms} total_ms={}",
+            form_index.len(),
+            form_index.values().map(Vec::len).sum::<usize>(),
+            started.elapsed().as_millis()
+        ));
+        self.form_index = form_index;
+        self.connection = Some(connection);
+        self.metadata = None;
+        self.validation_error = None;
+        Ok(())
+    }
+
+    pub fn is_runtime_ready(&self) -> bool {
+        self.connection.is_some()
     }
 
     fn open_and_validate_with_origin(
@@ -123,12 +181,25 @@ impl DictionaryStore {
             self.validation_count += 1;
         }
         match open_and_validate_path(&self.current_path, origin) {
-            Ok((connection, metadata)) => {
-                self.connection = Some(connection);
-                self.metadata = Some(metadata.clone());
-                self.validation_error = None;
-                Ok(metadata)
-            }
+            Ok((connection, metadata)) => match load_form_index(&connection) {
+                Ok(form_index) => {
+                    diagnostics::info(format!(
+                        "dictionary.form_index.ready origin={origin} key_count={} candidate_count={}",
+                        form_index.len(),
+                        form_index.values().map(Vec::len).sum::<usize>()
+                    ));
+                    self.form_index = form_index;
+                    self.connection = Some(connection);
+                    self.metadata = Some(metadata.clone());
+                    self.validation_error = None;
+                    Ok(metadata)
+                }
+                Err(error) => {
+                    self.metadata = None;
+                    self.validation_error = Some(error.clone());
+                    Err(error)
+                }
+            },
             Err(error) => {
                 self.metadata = None;
                 self.validation_error = Some(error.clone());
@@ -157,6 +228,13 @@ impl DictionaryStore {
                 return Err(error);
             }
         };
+        self.form_index = match load_form_index(&connection) {
+            Ok(form_index) => form_index,
+            Err(error) => {
+                self.validation_error = Some(error.clone());
+                return Err(error);
+            }
+        };
         self.connection = Some(connection);
         self.metadata = Some(metadata);
         self.validation_error = None;
@@ -166,10 +244,15 @@ impl DictionaryStore {
     pub fn close(&mut self) {
         self.connection.take();
         self.metadata = None;
+        self.form_index.clear();
         self.validation_error = None;
     }
 
-    pub fn lookup(&self, word: &str) -> Result<DictionaryLookupMeasurement, DictionaryError> {
+    pub fn resolve(
+        &self,
+        word: &str,
+        selected_canonical: Option<&str>,
+    ) -> Result<DictionaryLookupResolution, DictionaryError> {
         let display_word = word.trim();
         if display_word.is_empty() {
             return Err(DictionaryError::EmptyInput);
@@ -185,6 +268,76 @@ impl DictionaryStore {
             }
         };
 
+        let exact_started = Instant::now();
+        let exact = self
+            .read_entry_raw(connection, &normalized_word)?
+            .map(|(raw, sql_elapsed)| (raw, sql_elapsed, DictionaryMatchType::Exact));
+        if let Some((raw, sql_elapsed, match_type)) = exact {
+            return self.measurement_from_raw(
+                display_word,
+                normalized_word,
+                raw,
+                sql_elapsed.max(exact_started.elapsed()),
+                match_type,
+            );
+        }
+
+        let candidates_started = Instant::now();
+        let candidates = self.form_candidates(&normalized_word)?;
+        let candidates_sql_elapsed = candidates_started.elapsed();
+        if candidates.is_empty() {
+            return Ok(DictionaryLookupResolution::NotFound);
+        }
+
+        let selected_normalized = selected_canonical.map(normalize_headword);
+        let selected = match selected_normalized {
+            Some(selected_normalized) => candidates
+                .iter()
+                .find(|(_, normalized)| normalized == &selected_normalized)
+                .cloned()
+                .ok_or_else(|| {
+                    DictionaryError::InvalidCanonicalSelection(
+                        selected_canonical.unwrap_or_default().to_string(),
+                    )
+                })?,
+            None if candidates.len() > 1 => {
+                return Ok(DictionaryLookupResolution::Ambiguous(candidates));
+            }
+            None => candidates[0].clone(),
+        };
+
+        let (raw, entry_sql_elapsed) =
+            self.read_entry_raw(connection, &selected.1)?
+                .ok_or_else(|| {
+                    DictionaryError::DatabaseUnreadable("词形映射指向不存在的词条".to_string())
+                })?;
+        self.measurement_from_raw(
+            display_word,
+            normalized_word,
+            raw,
+            candidates_sql_elapsed + entry_sql_elapsed,
+            DictionaryMatchType::Form,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn lookup(&self, word: &str) -> Result<DictionaryLookupMeasurement, DictionaryError> {
+        match self.resolve(word, None)? {
+            DictionaryLookupResolution::Found(measurement) => Ok(measurement),
+            DictionaryLookupResolution::Ambiguous(_) => {
+                Err(DictionaryError::NotFound(word.trim().to_string()))
+            }
+            DictionaryLookupResolution::NotFound => {
+                Err(DictionaryError::NotFound(word.trim().to_string()))
+            }
+        }
+    }
+
+    fn read_entry_raw(
+        &self,
+        connection: &Connection,
+        normalized_word: &str,
+    ) -> Result<Option<(String, Duration)>, DictionaryError> {
         let sql_started = Instant::now();
         let mut statement = connection
             .prepare_cached(
@@ -194,12 +347,31 @@ impl DictionaryStore {
             )
             .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
         let raw: Option<String> = statement
-            .query_row([&normalized_word], |row| row.get(0))
+            .query_row([normalized_word], |row| row.get(0))
             .optional()
             .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
-        let sql_elapsed = sql_started.elapsed();
-        let raw = raw.ok_or_else(|| DictionaryError::NotFound(display_word.to_string()))?;
+        Ok(raw.map(|value| (value, sql_started.elapsed())))
+    }
 
+    fn form_candidates(
+        &self,
+        normalized_word: &str,
+    ) -> Result<Vec<(String, String)>, DictionaryError> {
+        Ok(self
+            .form_index
+            .get(normalized_word)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn measurement_from_raw(
+        &self,
+        display_word: &str,
+        normalized_word: String,
+        raw: String,
+        sql_elapsed: Duration,
+        match_type: DictionaryMatchType,
+    ) -> Result<DictionaryLookupResolution, DictionaryError> {
         let json_decode_started = Instant::now();
         let entry: Value = serde_json::from_str(&raw).map_err(|error| {
             DictionaryError::DatabaseUnreadable(format!("词条 JSON 无法解析：{error}"))
@@ -209,17 +381,26 @@ impl DictionaryStore {
                 "词条 JSON 不是对象".to_string(),
             ));
         }
+        let canonical_word = entry
+            .get("headword")
+            .and_then(Value::as_str)
+            .unwrap_or(display_word)
+            .to_string();
         let json_decode_elapsed = json_decode_started.elapsed();
 
-        Ok(DictionaryLookupMeasurement {
-            result: DictionaryLookupResult {
-                word: display_word.to_string(),
-                normalized_word,
-                entry,
+        Ok(DictionaryLookupResolution::Found(
+            DictionaryLookupMeasurement {
+                result: DictionaryLookupResult {
+                    word: display_word.to_string(),
+                    normalized_word,
+                    canonical_word,
+                    match_type,
+                    entry,
+                },
+                sql_elapsed,
+                json_decode_elapsed,
             },
-            sql_elapsed,
-            json_decode_elapsed,
-        })
+        ))
     }
 
     pub fn state(&self, installation: Option<&db::DictionaryInstallation>) -> DictionaryState {
@@ -263,20 +444,22 @@ impl DictionaryStore {
             return state;
         }
 
-        let Some(metadata) = self.metadata.as_ref() else {
-            state.status = DictionaryStatus::Failed;
-            state.error = Some("词典尚未完成生命周期校验".to_string());
-            return state;
-        };
-        if let Some(installation) = installation {
-            if metadata.entry_count != installation.entry_count
-                || metadata.distribution_schema_version != installation.distribution_schema_version
-                || metadata.sqlite_schema_version != installation.sqlite_schema_version
-            {
-                state.status = DictionaryStatus::Failed;
-                state.error = Some("词典安装记录与分发数据库不一致".to_string());
-                return state;
+        if let Some(metadata) = self.metadata.as_ref() {
+            if let Some(installation) = installation {
+                if metadata.entry_count != installation.entry_count
+                    || metadata.distribution_schema_version
+                        != installation.distribution_schema_version
+                    || metadata.sqlite_schema_version != installation.sqlite_schema_version
+                {
+                    state.status = DictionaryStatus::Failed;
+                    state.error = Some("词典安装记录与分发数据库不一致".to_string());
+                    return state;
+                }
             }
+        } else if !self.is_runtime_ready() && installation.is_none() {
+            state.status = DictionaryStatus::Failed;
+            state.error = Some("词典尚未完成运行时初始化".to_string());
+            return state;
         }
         state.status = DictionaryStatus::Ready;
         state
@@ -286,6 +469,46 @@ impl DictionaryStore {
     fn validation_count(&self) -> usize {
         self.validation_count
     }
+}
+
+pub fn deferred_state(
+    dictionary_dir: &Path,
+    installation: Option<&db::DictionaryInstallation>,
+) -> DictionaryState {
+    let current_path = database_path(dictionary_dir);
+    let database_bytes = fs::metadata(&current_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let mut state = DictionaryState::not_installed();
+    state.cache_size_bytes = database_bytes;
+    state.database_bytes = database_bytes;
+
+    if let Some(installation) = installation {
+        state.installed_release = Some(installation.release_tag.clone());
+        state.artifact_sha256 = Some(installation.artifact_sha256.clone());
+        state.entry_count = Some(installation.entry_count);
+        state.distribution_schema_version = Some(installation.distribution_schema_version.clone());
+        state.sqlite_schema_version = Some(installation.sqlite_schema_version.clone());
+        state.installed_at = Some(installation.installed_at.clone());
+        state.downloaded_bytes = installation.compressed_bytes.max(0) as u64;
+        state.total_bytes = state.downloaded_bytes;
+        state.database_bytes = installation.database_bytes.max(0) as u64;
+    }
+
+    if !current_path.is_file() {
+        if installation.is_some() {
+            state.error = Some("词典安装记录存在，但 distribution.sqlite 不存在".to_string());
+        }
+        return state;
+    }
+
+    if installation.is_some() {
+        state.status = DictionaryStatus::Ready;
+    } else {
+        state.status = DictionaryStatus::Failed;
+        state.error = Some("词典尚未完成运行时初始化".to_string());
+    }
+    state
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,6 +715,61 @@ pub fn validate_distribution_database(
     }
     let (_, metadata) = open_and_validate_path(path, "standalone")?;
     Ok(metadata)
+}
+
+fn load_form_index(
+    connection: &Connection,
+) -> Result<HashMap<String, Vec<(String, String)>>, DictionaryError> {
+    let has_forms_table = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pos_group_forms'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?
+        .is_some();
+    if !has_forms_table {
+        return Ok(HashMap::new());
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT lower(f.text), MIN(e.headword), e.normalized_headword
+             FROM pos_group_forms AS f
+             JOIN entries AS e ON e.entry_id = f.entry_id
+             WHERE e.headword_language_code = 'en'
+             GROUP BY lower(f.text), e.normalized_headword
+             ORDER BY lower(f.text), e.normalized_headword",
+        )
+        .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+    let mut index = HashMap::new();
+    for row in rows {
+        let (form, canonical_word, normalized_canonical_word) =
+            row.map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+        let normalized_form = normalize_headword(&form);
+        if normalized_form.is_empty() {
+            continue;
+        }
+        index
+            .entry(normalized_form)
+            .or_insert_with(Vec::new)
+            .push((canonical_word, normalized_canonical_word));
+    }
+    for candidates in index.values_mut() {
+        candidates.sort_by(|left, right| left.1.cmp(&right.1));
+        candidates.dedup_by(|left, right| left.1 == right.1);
+    }
+    Ok(index)
 }
 
 #[cfg(test)]
@@ -1122,7 +1400,25 @@ mod tests {
                     document_json TEXT NOT NULL
                  );
                  CREATE INDEX entries_lookup_idx
-                    ON entries (headword_language_code, normalized_headword);",
+                    ON entries (headword_language_code, normalized_headword);
+                 CREATE TABLE pos_group_forms (
+                    entry_id TEXT NOT NULL,
+                    pos_group_index INTEGER NOT NULL,
+                    form_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    roman TEXT
+                 );
+                 CREATE INDEX pos_group_forms_lookup_idx
+                    ON pos_group_forms (text);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO pos_group_forms
+                    (entry_id, pos_group_index, form_index, text, tags_json, roman)
+                 VALUES ('fixture-resolve', 0, 0, 'resolved', '[]', NULL)",
+                [],
             )
             .unwrap();
         connection
@@ -1214,6 +1510,62 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
             result.entry["schema_version"],
             DICTIONARY_DISTRIBUTION_SCHEMA_VERSION
         );
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn resolves_a_case_insensitive_inflected_form_to_its_canonical_entry() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_and_validate().unwrap();
+        let resolution = store.resolve("RESOLVED", None).unwrap();
+        let DictionaryLookupResolution::Found(measurement) = resolution else {
+            panic!("form lookup should resolve to one canonical entry");
+        };
+        assert_eq!(measurement.result.match_type, DictionaryMatchType::Form);
+        assert_eq!(measurement.result.canonical_word, "resolve");
+        assert_eq!(measurement.result.normalized_word, "resolved");
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn returns_stable_candidates_and_validates_the_selected_canonical_word() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_and_validate().unwrap();
+        store.form_index.insert(
+            "ambiguous".to_string(),
+            vec![
+                ("alpha".to_string(), "alpha".to_string()),
+                ("resolve".to_string(), "resolve".to_string()),
+            ],
+        );
+
+        let resolution = store.resolve("AMBIGUOUS", None).unwrap();
+        let DictionaryLookupResolution::Ambiguous(candidates) = resolution else {
+            panic!("multiple canonical words should return candidates");
+        };
+        assert_eq!(
+            candidates,
+            vec![
+                ("alpha".to_string(), "alpha".to_string()),
+                ("resolve".to_string(), "resolve".to_string()),
+            ]
+        );
+        assert!(matches!(
+            store.resolve("ambiguous", Some("not-a-candidate")),
+            Err(DictionaryError::InvalidCanonicalSelection(value))
+                if value == "not-a-candidate"
+        ));
+        let DictionaryLookupResolution::Found(measurement) =
+            store.resolve("ambiguous", Some("RESOLVE")).unwrap()
+        else {
+            panic!("a valid canonical selection should resolve the entry");
+        };
+        assert_eq!(measurement.result.canonical_word, "resolve");
+        assert_eq!(measurement.result.match_type, DictionaryMatchType::Form);
         remove_directory(&directory);
     }
 
@@ -1313,6 +1665,29 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
     }
 
     #[test]
+    fn runtime_index_build_skips_distribution_validation() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let connection = Connection::open(directory.join(DISTRIBUTION_DB_FILE)).unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value_json = '\"runtime-only\"' WHERE key = 'sqlite_schema_version'",
+                [],
+            )
+            .unwrap();
+
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_runtime("startup").unwrap();
+        assert_eq!(store.validation_count(), 0);
+        assert_eq!(
+            store.lookup("RESOLVED").unwrap().result.match_type,
+            DictionaryMatchType::Form
+        );
+        assert_eq!(store.state(None).status, DictionaryStatus::Ready);
+        remove_directory(&directory);
+    }
+
+    #[test]
     fn promoted_database_can_be_reopened_and_recovered() {
         let directory = temporary_directory();
         create_fixture(&directory);
@@ -1403,5 +1778,25 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
         let metadata =
             validate_distribution_database(&database_path(Path::new(&directory))).unwrap();
         assert!(metadata.entry_count > 20_000);
+    }
+
+    #[test]
+    #[ignore = "requires a real open-dictionary distribution.sqlite"]
+    fn smoke_real_distribution_form_lookup_uses_memory_index() {
+        let directory = std::env::var("LILT_DICTIONARY_DIR")
+            .expect("LILT_DICTIONARY_DIR must point to a dictionary cache directory");
+        let mut store = DictionaryStore::new(PathBuf::from(&directory));
+        store.open_runtime("smoke").unwrap();
+        let started = Instant::now();
+        let resolution = store.resolve("$h!ting", None).unwrap();
+        let elapsed_ms = started.elapsed().as_millis();
+        diagnostics::info(format!(
+            "dictionary.form_lookup.completed word=$h!ting elapsed_ms={elapsed_ms}"
+        ));
+        let DictionaryLookupResolution::Found(measurement) = resolution else {
+            panic!("resolved should map to one canonical entry");
+        };
+        assert_eq!(measurement.result.canonical_word, "$h!t");
+        assert_eq!(measurement.result.match_type, DictionaryMatchType::Form);
     }
 }

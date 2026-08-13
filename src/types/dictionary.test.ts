@@ -58,7 +58,13 @@ const entry = {
   }],
 };
 
-const lookup = { word: "RESOLVE", normalizedWord: "resolve", entry };
+const lookup = {
+  word: "RESOLVE",
+  normalizedWord: "resolve",
+  canonicalWord: "resolve",
+  matchType: "exact",
+  entry,
+};
 const historyEntry = {
   normalizedWord: "resolve",
   displayWord: "RESOLVE",
@@ -73,16 +79,28 @@ describe("dictionary contracts", () => {
   });
 
   it("decodes a combined lookup result and latest history", () => {
-    expect(decodeDictionaryLookupCommandResult({ lookup, history })).toEqual({ lookup, history });
+    expect(decodeDictionaryLookupCommandResult({
+      lookup,
+      candidates: [],
+      example: null,
+      history,
+    })).toEqual({ lookup, candidates: [], example: null, history });
   });
 
   it("rejects missing or malformed lookup and history fields", () => {
     expect(decodeDictionaryLookupCommandResult({ history })).toBeNull();
-    expect(decodeDictionaryLookupCommandResult({ lookup: { ...lookup, entry: null }, history })).toBeNull();
+    expect(decodeDictionaryLookupResult({ ...lookup, entry: null })).toBeNull();
     expect(decodeDictionaryLookupCommandResult({ lookup })).toBeNull();
-    expect(decodeDictionaryLookupCommandResult({ lookup, history: {} })).toBeNull();
     expect(decodeDictionaryLookupCommandResult({
       lookup,
+      candidates: [],
+      example: null,
+      history: {},
+    })).toBeNull();
+    expect(decodeDictionaryLookupCommandResult({
+      lookup,
+      candidates: [],
+      example: null,
       history: [{ ...historyEntry, queryCount: "2" }],
     })).toBeNull();
   });

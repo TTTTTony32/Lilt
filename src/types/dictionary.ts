@@ -78,7 +78,20 @@ export interface DictionaryEntry {
 export interface DictionaryLookupResult {
   word: string;
   normalizedWord: string;
+  canonicalWord: string;
+  matchType: "exact" | "form";
   entry: DictionaryEntry;
+}
+
+export interface DictionaryLookupCandidate {
+  canonicalWord: string;
+  normalizedCanonicalWord: string;
+}
+
+export interface ParagraphExample {
+  exampleId: number;
+  sourceText: string;
+  createdAt: string;
 }
 
 export interface DictionaryHistoryEntry {
@@ -89,7 +102,9 @@ export interface DictionaryHistoryEntry {
 }
 
 export interface DictionaryLookupCommandResult {
-  lookup: DictionaryLookupResult;
+  lookup: DictionaryLookupResult | null;
+  candidates: DictionaryLookupCandidate[];
+  example: ParagraphExample | null;
   history: DictionaryHistoryEntry[];
 }
 
@@ -446,18 +461,52 @@ export function decodeDictionaryLookupResult(value: unknown): DictionaryLookupRe
   if (!isRecord(value)) return null;
   const word = stringValue(value.word);
   const normalizedWord = stringValue(value.normalizedWord);
+  const canonicalWord = stringValue(value.canonicalWord);
+  const matchType = value.matchType;
   const entry = decodeDictionaryEntry(value.entry);
-  return word === null || normalizedWord === null || entry === null
+  return word === null || normalizedWord === null || canonicalWord === null ||
+    (matchType !== "exact" && matchType !== "form") || entry === null
     ? null
-    : { word, normalizedWord, entry };
+    : { word, normalizedWord, canonicalWord, matchType, entry };
 }
 
 export function decodeDictionaryLookupCommandResult(value: unknown): DictionaryLookupCommandResult | null {
-  if (!isRecord(value) || !Array.isArray(value.history)) return null;
+  if (!isRecord(value) || !Array.isArray(value.history) || !Array.isArray(value.candidates)) return null;
   const lookup = decodeDictionaryLookupResult(value.lookup);
+  const candidates = value.candidates.map(decodeDictionaryLookupCandidate);
+  const example = decodeParagraphExample(value.example);
   const history = value.history.map(decodeDictionaryHistoryEntry);
-  if (lookup === null || history.some((item) => item === null)) return null;
-  return { lookup, history: history as DictionaryHistoryEntry[] };
+  if (
+    history.some((item) => item === null) ||
+    candidates.some((item) => item === null) ||
+    (example === null && value.example !== null)
+  ) return null;
+  return {
+    lookup,
+    candidates: candidates as DictionaryLookupCandidate[],
+    example,
+    history: history as DictionaryHistoryEntry[],
+  };
+}
+
+function decodeDictionaryLookupCandidate(value: unknown): DictionaryLookupCandidate | null {
+  if (!isRecord(value)) return null;
+  const canonicalWord = stringValue(value.canonicalWord);
+  const normalizedCanonicalWord = stringValue(value.normalizedCanonicalWord);
+  return canonicalWord === null || normalizedCanonicalWord === null
+    ? null
+    : { canonicalWord, normalizedCanonicalWord };
+}
+
+function decodeParagraphExample(value: unknown): ParagraphExample | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) return null;
+  const exampleId = nonNegativeNumber(value.exampleId);
+  const sourceText = stringValue(value.sourceText);
+  const createdAt = stringValue(value.createdAt);
+  return exampleId === null || sourceText === null || createdAt === null
+    ? null
+    : { exampleId, sourceText, createdAt };
 }
 
 export function decodeDictionaryUpdateEvent(name: string, value: unknown): DictionaryUpdateEvent | null {

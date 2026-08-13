@@ -9,6 +9,8 @@ export interface AppSettings {
   cacheEnabled: boolean;
   cacheMaxBytes: number;
   cacheUsageBytes: number;
+  wordAiCacheEnabled: boolean;
+  paragraphExampleLookupEnabled: boolean;
 }
 
 export interface ProviderConfig {
@@ -116,6 +118,72 @@ export interface TranslationCommandResult {
   message: string | null;
 }
 
+export type WordExampleStatus = "idle" | "streaming" | "completed" | "cancelling" | "failed";
+
+export interface WordExampleState {
+  exampleId: number | null;
+  requestId: string | null;
+  translation: string;
+  partOfSpeech: string;
+  status: WordExampleStatus;
+  cacheHit: boolean;
+  error: string | null;
+}
+
+export interface WordExampleEventStarted {
+  type: "started";
+  requestId: string;
+}
+
+export interface WordExampleEventTranslationDelta {
+  type: "translationDelta";
+  requestId: string;
+  content: string;
+}
+
+export interface WordExampleEventPosDelta {
+  type: "posDelta";
+  requestId: string;
+  content: string;
+}
+
+export interface WordExampleEventCompleted {
+  type: "completed";
+  requestId: string;
+  translation: string;
+  partOfSpeech: string;
+  cacheHit: boolean;
+}
+
+export interface WordExampleEventCancelled {
+  type: "cancelled";
+  requestId: string;
+}
+
+export interface WordExampleEventFailed {
+  type: "failed";
+  requestId: string;
+  message: string;
+}
+
+export type WordExampleEvent =
+  | WordExampleEventStarted
+  | WordExampleEventTranslationDelta
+  | WordExampleEventPosDelta
+  | WordExampleEventCompleted
+  | WordExampleEventCancelled
+  | WordExampleEventFailed;
+
+export type WordExampleOutcome = "completed" | "cancelled" | "failed";
+
+export interface WordExampleCommandResult {
+  outcome: WordExampleOutcome;
+  translation: string | null;
+  partOfSpeech: string | null;
+  cacheHit: boolean;
+  message: string | null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -173,12 +241,69 @@ export function decodeTranslationCommandResult(value: unknown): TranslationComma
   return { outcome, content, cacheHit: value.cacheHit, message };
 }
 
+export function decodeWordExampleEvent(name: string, value: unknown): WordExampleEvent | null {
+  if (!isRecord(value)) return null;
+  const requestId = stringValue(value.requestId);
+  if (!requestId) return null;
+
+  if (name === "word_example_started") return { type: "started", requestId };
+  if (name === "word_example_translation_delta") {
+    const content = stringValue(value.content);
+    return content === null ? null : { type: "translationDelta", requestId, content };
+  }
+  if (name === "word_example_pos_delta") {
+    const content = stringValue(value.content);
+    return content === null ? null : { type: "posDelta", requestId, content };
+  }
+  if (name === "word_example_completed") {
+    const translation = stringValue(value.translation);
+    const partOfSpeech = stringValue(value.partOfSpeech);
+    return translation === null || partOfSpeech === null || typeof value.cacheHit !== "boolean"
+      ? null
+      : { type: "completed", requestId, translation, partOfSpeech, cacheHit: value.cacheHit };
+  }
+  if (name === "word_example_cancelled") return { type: "cancelled", requestId };
+  if (name === "word_example_failed") {
+    const message = stringValue(value.message);
+    return message === null ? null : { type: "failed", requestId, message };
+  }
+  return null;
+}
+
+export function decodeWordExampleCommandResult(value: unknown): WordExampleCommandResult | null {
+  if (!isRecord(value)) return null;
+  const outcome = value.outcome;
+  if (outcome !== "completed" && outcome !== "cancelled" && outcome !== "failed") return null;
+  if (typeof value.cacheHit !== "boolean") return null;
+  const translation = value.translation === null || value.translation === undefined
+    ? null
+    : stringValue(value.translation);
+  const partOfSpeech = value.partOfSpeech === null || value.partOfSpeech === undefined
+    ? null
+    : stringValue(value.partOfSpeech);
+  const message = value.message === null || value.message === undefined
+    ? null
+    : stringValue(value.message);
+  if (
+    (translation === null && value.translation !== null && value.translation !== undefined) ||
+    (partOfSpeech === null && value.partOfSpeech !== null && value.partOfSpeech !== undefined) ||
+    (message === null && value.message !== null && value.message !== undefined) ||
+    (outcome === "completed" && (translation === null || partOfSpeech === null)) ||
+    (outcome === "failed" && message === null)
+  ) {
+    return null;
+  }
+  return { outcome, translation, partOfSpeech, cacheHit: value.cacheHit, message };
+}
+
 export const DEFAULT_SNAPSHOT: AppSnapshot = {
   settings: {
     historyRetention: 50,
     cacheEnabled: true,
     cacheMaxBytes: 268_435_456,
     cacheUsageBytes: 0,
+    wordAiCacheEnabled: true,
+    paragraphExampleLookupEnabled: true,
   },
   provider: {
     id: "default",

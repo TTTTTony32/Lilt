@@ -129,6 +129,10 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-history-menu small { color: #a1a49a; font-size: 10px; }
 .dictionary-history-menu .dictionary-history-clear { justify-content: flex-start; color: #a4776f; border-bottom: 0; }
 .dictionary-message { margin: 12px 2px; font-size: 12px; }
+.dictionary-candidate-card { margin-bottom: 18px; padding: 15px 17px; border: 1px solid #deddd5; border-radius: 10px; color: #70796f; background: #fbfaf7; font-size: 12px; }
+.dictionary-candidate-card > div { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 7px; }
+.dictionary-candidate-button { padding: 6px 10px; border: 1px solid #d5ded4; border-radius: 6px; color: #58705c; background: #f5f8f2; font-size: 12px; }
+.dictionary-candidate-button:hover { border-color: #aebfae; background: #edf3ea; }
 .dictionary-install-card { margin-bottom: 18px; padding: 20px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #deddd5; border-radius: 10px; background: #f9f8f3; }
 .dictionary-install-card strong { color: #526456; font-size: 14px; }
 .dictionary-install-card p { max-width: 680px; margin: 7px 0 0; color: #8c9187; font-size: 12px; line-height: 1.6; }
@@ -141,6 +145,13 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-entry-header { padding: 25px 25px 21px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e7e5de; }
 .dictionary-entry-header h2 { margin: 0; color: #394b3e; font-family: Georgia, "Songti SC", serif; font-size: 28px; font-weight: 500; }
 .dictionary-entry-header p { max-width: 680px; margin: 9px 0 0; color: #70796f; font-size: 13px; line-height: 1.7; }
+.dictionary-entry-header .dictionary-form-source { margin-top: 5px; color: #8c978b; font-size: 11px; }
+.dictionary-source-example { margin-top: 14px; padding: 11px 13px; border-left: 2px solid #d4dfd3; background: #f3f5ef; }
+.dictionary-source-example > p { margin: 0; color: #657267; font-size: 12px; line-height: 1.65; }
+.dictionary-ai-example { margin-top: 7px; display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; color: #8c958a; font-size: 11px; }
+.dictionary-ai-example p { flex-basis: 100%; margin: 0; color: #556558; font-size: 12px; line-height: 1.6; }
+.dictionary-ai-example .error-message { flex-basis: 100%; }
+.dictionary-ai-status { color: #9ba399; }
 .dictionary-pronunciations { padding-top: 5px; color: #7a887c; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; white-space: nowrap; }
 .dictionary-pos-group { padding: 21px 25px 20px; border-bottom: 1px solid #e7e5de; }
 .dictionary-pos-group:last-child { border-bottom: 0; }

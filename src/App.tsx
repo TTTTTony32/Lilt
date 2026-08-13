@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
-import DictionaryView, { type DictionaryProgress } from "./DictionaryView";
+import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
 import {
   DEFAULT_SNAPSHOT,
   type AppSettings,
@@ -14,8 +14,13 @@ import {
   type TranslationCommandResult,
   type TranslationEvent,
   type TranslationStatus,
+  type WordExampleCommandResult,
+  type WordExampleEvent,
+  type WordExampleState,
   decodeTranslationCommandResult,
   decodeTranslationEvent,
+  decodeWordExampleCommandResult,
+  decodeWordExampleEvent,
 } from "./types/contracts";
 import {
   decodeDictionaryCommandResult,
@@ -32,6 +37,25 @@ const EVENT_NAMES = [
   "translation_cancelled",
   "translation_failed",
 ] as const;
+
+const WORD_EXAMPLE_EVENT_NAMES = [
+  "word_example_started",
+  "word_example_translation_delta",
+  "word_example_pos_delta",
+  "word_example_completed",
+  "word_example_cancelled",
+  "word_example_failed",
+] as const;
+
+const DEFAULT_WORD_EXAMPLE_STATE: WordExampleState = {
+  exampleId: null,
+  requestId: null,
+  translation: "",
+  partOfSpeech: "",
+  status: "idle",
+  cacheHit: false,
+  error: null,
+};
 
 const LANGUAGE_OPTIONS = [
   ["英语", "en"],
@@ -71,8 +95,10 @@ function App() {
   const [translationEventsError, setTranslationEventsError] = useState<string | null>(null);
   const [dictionaryProgress, setDictionaryProgress] = useState<DictionaryProgress | null>(null);
   const [dictionaryEventsError, setDictionaryEventsError] = useState<string | null>(null);
+  const [wordExample, setWordExample] = useState<WordExampleState>(DEFAULT_WORD_EXAMPLE_STATE);
   const activeRequestId = useRef<string | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
+  const activeWordExampleRequestId = useRef<string | null>(null);
 
   const refreshSnapshot = useCallback(async () => {
     try {
@@ -112,6 +138,77 @@ function App() {
         break;
     }
   }, [refreshSnapshot]);
+
+  const applyWordExampleResult = useCallback((requestId: string, result: WordExampleCommandResult) => {
+    if (requestId !== activeWordExampleRequestId.current) return;
+    activeWordExampleRequestId.current = null;
+    switch (result.outcome) {
+      case "completed":
+        setWordExample((current) => ({
+          ...current,
+          requestId: null,
+          translation: result.translation ?? current.translation,
+          partOfSpeech: result.partOfSpeech ?? current.partOfSpeech,
+          status: "completed",
+          cacheHit: result.cacheHit,
+          error: null,
+        }));
+        break;
+      case "cancelled":
+        setWordExample((current) => ({ ...current, requestId: null, status: "idle" }));
+        break;
+      case "failed":
+        setWordExample((current) => ({
+          ...current,
+          requestId: null,
+          status: "failed",
+          error: result.message ?? "单词例句生成失败",
+        }));
+        break;
+    }
+  }, []);
+
+  const handleWordExampleEvent = useCallback((event: WordExampleEvent) => {
+    if (event.requestId !== activeWordExampleRequestId.current) return;
+    switch (event.type) {
+      case "started":
+        setWordExample((current) => ({ ...current, status: "streaming", error: null }));
+        break;
+      case "translationDelta":
+        setWordExample((current) => ({ ...current, translation: current.translation + event.content }));
+        break;
+      case "posDelta":
+        setWordExample((current) => ({ ...current, partOfSpeech: current.partOfSpeech + event.content }));
+        break;
+      case "completed":
+        applyWordExampleResult(event.requestId, {
+          outcome: "completed",
+          translation: event.translation,
+          partOfSpeech: event.partOfSpeech,
+          cacheHit: event.cacheHit,
+          message: null,
+        });
+        break;
+      case "cancelled":
+        applyWordExampleResult(event.requestId, {
+          outcome: "cancelled",
+          translation: null,
+          partOfSpeech: null,
+          cacheHit: false,
+          message: null,
+        });
+        break;
+      case "failed":
+        applyWordExampleResult(event.requestId, {
+          outcome: "failed",
+          translation: null,
+          partOfSpeech: null,
+          cacheHit: false,
+          message: event.message,
+        });
+        break;
+    }
+  }, [applyWordExampleResult]);
 
   const handleEvent = useCallback((event: TranslationEvent) => {
     if (event.requestId !== activeRequestId.current) return;
@@ -186,6 +283,40 @@ function App() {
       unlisteners.splice(0).forEach((unlisten) => unlisten());
     };
   }, [handleEvent]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const initialiseWordExampleListeners = async () => {
+      const results = await Promise.allSettled(WORD_EXAMPLE_EVENT_NAMES.map(async (name) => {
+        return listenTo<unknown>(name, (payload) => {
+          if (disposed) return;
+          const event = decodeWordExampleEvent(name, payload);
+          if (event) handleWordExampleEvent(event);
+        });
+      }));
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        if (disposed) result.value();
+        else unlisteners.push(result.value);
+      }
+      if (disposed) return;
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") {
+        unlisteners.splice(0).forEach((unlisten) => unlisten());
+        setWordExample((current) => ({
+          ...current,
+          status: "failed",
+          error: describeError(failure.reason, "单词例句事件监听初始化失败"),
+        }));
+      }
+    };
+    void initialiseWordExampleListeners();
+    return () => {
+      disposed = true;
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
+    };
+  }, [handleWordExampleEvent]);
 
   const handleDictionaryEvent = useCallback((event: DictionaryUpdateEvent) => {
     if (event.type === "started") {
@@ -304,6 +435,70 @@ function App() {
       setDictionaryProgress(null);
     }
   }, [refreshSnapshot]);
+
+  const cancelWordExampleRequest = useCallback(async () => {
+    const requestId = activeWordExampleRequestId.current;
+    if (!requestId) {
+      setWordExample((current) => ({ ...current, requestId: null, status: "idle" }));
+      return;
+    }
+    activeWordExampleRequestId.current = null;
+    setWordExample((current) => ({ ...current, requestId: null, status: "idle" }));
+    try {
+      await invokeCommand("cancel_word_example", { requestId });
+    } catch {
+      // 取消只影响当前请求；请求已经从前端状态中移除。
+    }
+  }, []);
+
+  const handleWordExampleRequested = useCallback(async (request: WordExampleRequestInput | null) => {
+    if (!request) {
+      const requestId = activeWordExampleRequestId.current;
+      activeWordExampleRequestId.current = null;
+      if (requestId) void invokeCommand("cancel_word_example", { requestId });
+      setWordExample(DEFAULT_WORD_EXAMPLE_STATE);
+      return;
+    }
+    const previousRequestId = activeWordExampleRequestId.current;
+    if (previousRequestId) {
+      void invokeCommand("cancel_word_example", { requestId: previousRequestId });
+    }
+    const requestId = crypto.randomUUID();
+    activeWordExampleRequestId.current = requestId;
+    setWordExample({
+      exampleId: request.exampleId,
+      requestId,
+      translation: "",
+      partOfSpeech: "",
+      status: "streaming",
+      cacheHit: false,
+      error: null,
+    });
+    try {
+      const rawResult = await invokeCommand<unknown>("generate_word_example", {
+        request: {
+          requestId,
+          exampleId: request.exampleId,
+          word: request.word,
+          canonicalWord: request.canonicalWord,
+          targetLanguage: request.targetLanguage,
+        },
+      });
+      const result = decodeWordExampleCommandResult(rawResult);
+      if (result && activeWordExampleRequestId.current === requestId) {
+        applyWordExampleResult(requestId, result);
+      }
+    } catch (reason) {
+      if (activeWordExampleRequestId.current !== requestId) return;
+      activeWordExampleRequestId.current = null;
+      setWordExample((current) => ({
+        ...current,
+        requestId: null,
+        status: "failed",
+        error: describeError(reason, "单词例句生成失败"),
+      }));
+    }
+  }, [applyWordExampleResult]);
 
   const selectedModel = useMemo(() => {
     const known = snapshot.models.find((model) => model.id === snapshot.provider.modelId);
@@ -448,9 +643,13 @@ function App() {
               state={snapshot.dictionary}
               history={snapshot.dictionaryHistory}
               progress={dictionaryProgress}
+              targetLanguage={targetLanguage}
+              wordExample={wordExample}
               onUpdate={handleDictionaryUpdate}
               onHistoryChanged={handleDictionaryHistoryChanged}
               onSnapshotChanged={refreshSnapshot}
+              onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
+              onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
             />
           )}
           {tab === "glossary" && (
@@ -686,7 +885,13 @@ function SettingsView({
     setError(null);
     setMessage(null);
     try {
-      await invokeCommand("save_app_settings", { historyRetention: settings.historyRetention, cacheEnabled: settings.cacheEnabled, cacheMaxBytes: settings.cacheMaxBytes });
+      await invokeCommand("save_app_settings", {
+        historyRetention: settings.historyRetention,
+        cacheEnabled: settings.cacheEnabled,
+        cacheMaxBytes: settings.cacheMaxBytes,
+        wordAiCacheEnabled: settings.wordAiCacheEnabled,
+        paragraphExampleLookupEnabled: settings.paragraphExampleLookupEnabled,
+      });
       const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
       onSaved(next);
       setMessage("本地设置已保存");
@@ -760,6 +965,8 @@ function SettingsView({
           <div className="card-heading"><div><strong>本地数据</strong><span>数据只保存在当前设备</span></div></div>
           <label className="setting-line"><span><strong>翻译历史保留条数</strong><small>历史功能不可关闭，只控制保留数量。</small></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => setSettings({ ...settings, historyRetention: Number(event.target.value) })} /></label>
           <label className="setting-line"><span><strong>启用段落翻译缓存</strong><small>缓存命中后仍会写入一条历史记录。</small></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => setSettings({ ...settings, cacheEnabled: event.target.checked })} /></label>
+          <label className="setting-line"><span><strong>缓存单词 AI 见解</strong><small>关闭后，每次查询都会重新生成例句译文和词性。</small></span><input type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => setSettings({ ...settings, wordAiCacheEnabled: event.target.checked })} /></label>
+          <label className="setting-line"><span><strong>从段落缓存查找例句</strong><small>关闭后，词典查询不再读取段落翻译缓存中的例句。</small></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => setSettings({ ...settings, paragraphExampleLookupEnabled: event.target.checked })} /></label>
           <label className="setting-line slider-line"><span><strong>段落缓存上限</strong><small>已使用 {formatBytes(snapshot.cacheStats.usageBytes)}，上限 {formatBytes(settings.cacheMaxBytes)}。</small></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => setSettings({ ...settings, cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
           <div className="form-actions"><span className="muted-text">缓存不包含 API Key。</span><button className="primary-button small-button" type="button" onClick={() => void saveAppSettings()}>保存本地设置</button></div>
         </div>

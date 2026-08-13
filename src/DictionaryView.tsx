@@ -10,10 +10,14 @@ import {
   splitMeaningsByPriority,
   type DictionaryEntry,
   type DictionaryHistoryEntry,
+  type DictionaryLookupResult,
   type DictionaryMeaning,
   type DictionaryPosGroup,
   type DictionaryState,
+  type DictionaryLookupCandidate,
+  type ParagraphExample,
 } from "./types/dictionary";
+import type { WordExampleState } from "./types/contracts";
 
 export interface DictionaryProgress {
   operationId: string;
@@ -26,9 +30,20 @@ interface DictionaryViewProps {
   state: DictionaryState;
   history: DictionaryHistoryEntry[];
   progress: DictionaryProgress | null;
+  targetLanguage: string;
+  wordExample: WordExampleState;
   onUpdate: () => Promise<void>;
   onHistoryChanged: (history: DictionaryHistoryEntry[]) => void;
   onSnapshotChanged: () => Promise<void>;
+  onWordExampleRequested: (request: WordExampleRequestInput | null) => void;
+  onWordExampleCancelled: () => void;
+}
+
+export interface WordExampleRequestInput {
+  exampleId: number;
+  word: string;
+  canonicalWord: string;
+  targetLanguage: string;
 }
 
 function formatBytes(bytes: number): string {
@@ -54,18 +69,26 @@ export default function DictionaryView({
   state,
   history,
   progress,
+  targetLanguage,
+  wordExample,
   onUpdate,
   onHistoryChanged,
   onSnapshotChanged,
+  onWordExampleRequested,
+  onWordExampleCancelled,
 }: DictionaryViewProps) {
   const [word, setWord] = useState("");
   const [result, setResult] = useState<DictionaryEntry | null>(null);
+  const [lookupMeta, setLookupMeta] = useState<DictionaryLookupResult | null>(null);
+  const [example, setExample] = useState<ParagraphExample | null>(null);
+  const [candidates, setCandidates] = useState<DictionaryLookupCandidate[]>([]);
+  const [notFound, setNotFound] = useState(false);
   const [querying, setQuerying] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const updating = state.status === "updating" || progress !== null;
 
-  const query = async (candidate: string) => {
+  const query = async (candidate: string, selectedCanonicalWord?: string) => {
     const trimmed = candidate.trim();
     if (!trimmed) {
       setQueryError("请输入要查询的词形。");
@@ -77,19 +100,45 @@ export default function DictionaryView({
     }
     setQuerying(true);
     setQueryError(null);
+    setNotFound(false);
+    setCandidates([]);
+    setResult(null);
+    setLookupMeta(null);
+    setExample(null);
+    onWordExampleRequested(null);
     try {
-      const rawResult = await invokeCommand<unknown>("query_dictionary", { word: trimmed });
+      const rawResult = await invokeCommand<unknown>("query_dictionary", {
+        word: trimmed,
+        canonicalWord: selectedCanonicalWord ?? null,
+      });
       const decoded = decodeDictionaryLookupCommandResult(rawResult);
       if (!decoded) {
         setQueryError("词典命令返回了无法识别的结果。");
         return;
       }
-      setWord(decoded.lookup.word);
-      setResult(decoded.lookup.entry);
+      setWord(decoded.lookup?.word ?? trimmed);
+      setCandidates(decoded.candidates);
+      setNotFound(decoded.lookup === null && decoded.candidates.length === 0);
+      setResult(decoded.lookup?.entry ?? null);
+      setLookupMeta(decoded.lookup);
+      setExample(decoded.example);
+      if (decoded.lookup && decoded.example) {
+        onWordExampleRequested({
+          exampleId: decoded.example.exampleId,
+          word: decoded.lookup.word,
+          canonicalWord: decoded.lookup.canonicalWord,
+          targetLanguage,
+        });
+      }
       onHistoryChanged(decoded.history);
       setHistoryOpen(false);
     } catch (reason) {
       setResult(null);
+      setLookupMeta(null);
+      setExample(null);
+      setCandidates([]);
+      setNotFound(false);
+      onWordExampleRequested(null);
       setQueryError(describeError(reason, "词典查询失败"));
     } finally {
       setQuerying(false);
@@ -171,10 +220,38 @@ export default function DictionaryView({
       )}
 
       {queryError && <p className="error-message dictionary-message">{queryError}</p>}
-      {state.status === "ready" && !result && !queryError && (
+      {candidates.length > 0 && (
+        <div className="dictionary-candidate-card">
+          <strong>这个词形对应多个词头，请选择</strong>
+          <div>
+            {candidates.map((candidate) => (
+              <button
+                className="dictionary-candidate-button"
+                key={candidate.normalizedCanonicalWord}
+                type="button"
+                onClick={() => void query(word, candidate.canonicalWord)}
+              >
+                {candidate.canonicalWord}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {state.status === "ready" && notFound && !queryError && (
+        <div className="dictionary-empty-state">没有找到对应词条。</div>
+      )}
+      {state.status === "ready" && !result && !notFound && candidates.length === 0 && !queryError && (
         <div className="dictionary-empty-state">输入词形后，结果会显示在这里。</div>
       )}
-      {state.status === "ready" && result && <DictionaryEntryView entry={result} />}
+      {state.status === "ready" && result && (
+        <DictionaryEntryView
+          entry={result}
+          lookup={lookupMeta}
+          example={example}
+          wordExample={wordExample}
+          onCancelExample={onWordExampleCancelled}
+        />
+      )}
     </section>
   );
 }
@@ -213,7 +290,19 @@ function DictionaryInstallCard({
   );
 }
 
-function DictionaryEntryView({ entry }: { entry: DictionaryEntry }) {
+function DictionaryEntryView({
+  entry,
+  lookup,
+  example,
+  wordExample,
+  onCancelExample,
+}: {
+  entry: DictionaryEntry;
+  lookup: DictionaryLookupResult | null;
+  example: ParagraphExample | null;
+  wordExample: WordExampleState;
+  onCancelExample: () => void;
+}) {
   const pronunciations = collectPronunciations(entry).map(
     (pronunciation) => pronunciation.ipa ?? pronunciation.text,
   );
@@ -223,6 +312,27 @@ function DictionaryEntryView({ entry }: { entry: DictionaryEntry }) {
         <div>
           <h2>{entry.headword}</h2>
           {entry.headword_summary && <p>{entry.headword_summary}</p>}
+          {lookup?.matchType === "form" && (
+            <p className="dictionary-form-source">
+              词形 {lookup.word} → 规范词头 {lookup.canonicalWord}
+            </p>
+          )}
+          {example && (
+            <div className="dictionary-source-example">
+              <p>{example.sourceText}</p>
+              {wordExample.exampleId === example.exampleId && (
+                <div className="dictionary-ai-example">
+                  {wordExample.translation && <p>{wordExample.translation}</p>}
+                  {wordExample.partOfSpeech && <span>词性：{wordExample.partOfSpeech}</span>}
+                  {wordExample.status === "streaming" && <span className="dictionary-ai-status">正在生成</span>}
+                  {wordExample.status === "failed" && wordExample.error && <span className="error-message">{wordExample.error}</span>}
+                  {wordExample.status === "streaming" && (
+                    <button className="text-button" type="button" onClick={onCancelExample}>取消</button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         {pronunciations.length > 0 && <div className="dictionary-pronunciations">{pronunciations.join(" · ")}</div>}
       </header>

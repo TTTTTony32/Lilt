@@ -55,6 +55,17 @@ pub struct StreamRequest<'a> {
     pub cancel: &'a CancellationToken,
 }
 
+pub struct ChatStreamRequest<'a> {
+    pub request_id: &'a str,
+    pub base_url: &'a str,
+    pub api_key: &'a str,
+    pub model_id: &'a str,
+    pub system_prompt: &'a str,
+    pub user_text: &'a str,
+    pub cancel: &'a CancellationToken,
+    pub operation: &'a str,
+}
+
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>, ProviderError> {
     let endpoint = endpoint(base_url, "models")?;
     let started_at = Instant::now();
@@ -113,21 +124,57 @@ fn parse_model_payload(payload: &Value) -> Result<Vec<ModelInfo>, ProviderError>
 }
 
 pub async fn translate_stream(request: StreamRequest<'_>) -> Result<String, ProviderError> {
+    let app = request.app;
+    let request_id = request.request_id.to_string();
+    stream_chat_completion(
+        ChatStreamRequest {
+            request_id: &request_id,
+            base_url: request.base_url,
+            api_key: request.api_key,
+            model_id: request.model_id,
+            system_prompt: request.system_prompt,
+            user_text: request.user_text,
+            cancel: request.cancel,
+            operation: "translate",
+        },
+        |content| {
+            app.emit(
+                "translation_delta",
+                TranslationDelta {
+                    request_id: request_id.clone(),
+                    content,
+                },
+            )
+            .map_err(|error| ProviderError::Event(error.to_string()))
+        },
+    )
+    .await
+}
+
+pub async fn stream_chat_completion<F>(
+    request: ChatStreamRequest<'_>,
+    mut on_delta: F,
+) -> Result<String, ProviderError>
+where
+    F: FnMut(String) -> Result<(), ProviderError>,
+{
     let endpoint = endpoint(request.base_url, "chat/completions")?;
     let mut attempt = 0;
     loop {
         let mut started = false;
         diagnostics::info(format!(
-            "provider.translate.start request_id={} attempt={} origin={} route=/chat/completions model={}",
+            "provider.{}.start request_id={} attempt={} origin={} route=/chat/completions model={}",
+            request.operation,
             request.request_id,
             attempt,
             safe_endpoint_origin(&endpoint),
             request.model_id
         ));
-        match stream_once(&request, &endpoint, &mut started).await {
+        match stream_once(&request, &endpoint, &mut started, &mut on_delta).await {
             Ok(content) => {
                 diagnostics::info(format!(
-                    "provider.translate.completed request_id={} attempt={} output_chars={}",
+                    "provider.{}.completed request_id={} attempt={} output_chars={}",
+                    request.operation,
                     request.request_id,
                     attempt,
                     content.chars().count()
@@ -136,15 +183,15 @@ pub async fn translate_stream(request: StreamRequest<'_>) -> Result<String, Prov
             }
             Err(error) if !started && attempt == 0 && error.retryable() => {
                 diagnostics::warn(format!(
-                    "provider.translate.retry request_id={} reason={error}",
-                    request.request_id
+                    "provider.{}.retry request_id={} reason={error}",
+                    request.operation, request.request_id
                 ));
                 attempt += 1;
             }
             Err(error) => {
                 diagnostics::error(format!(
-                    "provider.translate.failed request_id={} started={} reason={error}",
-                    request.request_id, started
+                    "provider.{}.failed request_id={} started={} reason={error}",
+                    request.operation, request.request_id, started
                 ));
                 return Err(error);
             }
@@ -153,9 +200,10 @@ pub async fn translate_stream(request: StreamRequest<'_>) -> Result<String, Prov
 }
 
 async fn stream_once(
-    request: &StreamRequest<'_>,
+    request: &ChatStreamRequest<'_>,
     endpoint: &str,
     started: &mut bool,
+    on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
 ) -> Result<String, ProviderError> {
     if request.cancel.is_cancelled() {
         return Err(ProviderError::Cancelled);
@@ -178,7 +226,8 @@ async fn stream_once(
             .send() => result.map_err(|error| request_error("翻译", error))?,
     };
     diagnostics::info(format!(
-        "provider.translate.response request_id={} status={}",
+        "provider.{}.response request_id={} status={}",
+        request.operation,
         request.request_id,
         response.status()
     ));
@@ -206,16 +255,7 @@ async fn stream_once(
                 }
                 *started = true;
                 translated.push_str(&content);
-                request
-                    .app
-                    .emit(
-                        "translation_delta",
-                        TranslationDelta {
-                            request_id: request.request_id.to_string(),
-                            content,
-                        },
-                    )
-                    .map_err(|error| ProviderError::Event(error.to_string()))?;
+                on_delta(content)?;
             }
         }
     }
@@ -224,16 +264,7 @@ async fn stream_once(
             if !content.is_empty() {
                 *started = true;
                 translated.push_str(&content);
-                request
-                    .app
-                    .emit(
-                        "translation_delta",
-                        TranslationDelta {
-                            request_id: request.request_id.to_string(),
-                            content,
-                        },
-                    )
-                    .map_err(|error| ProviderError::Event(error.to_string()))?;
+                on_delta(content)?;
             }
         }
     }

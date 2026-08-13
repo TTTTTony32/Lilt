@@ -1,8 +1,9 @@
 use crate::contracts::{
     AppSettings, CacheStats, CachedTranslation, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
     ModelInfo, Prompt, ProviderRecord, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
-    DEFAULT_HISTORY_RETENTION, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
-    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
+    DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID,
+    DEFAULT_PROVIDER_ID, DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
+    DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -29,6 +30,36 @@ pub struct CacheRecord<'a> {
     pub provider: &'a ProviderRecord,
     pub prompt_id: &'a str,
     pub glossary_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParagraphExampleRecord {
+    pub example_id: i64,
+    pub source_text: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WordAiCacheRecord {
+    pub translated_text: String,
+    pub part_of_speech: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WordAiCacheWrite<'a> {
+    pub cache_key: &'a str,
+    pub example_id: i64,
+    pub normalized_word: &'a str,
+    pub word: &'a str,
+    pub canonical_word: &'a str,
+    pub source_language: &'a str,
+    pub target_language: &'a str,
+    pub provider: &'a ProviderRecord,
+    pub prompt_id: &'a str,
+    pub glossary_version: i64,
+    pub protocol_version: &'a str,
+    pub translated_text: &'a str,
+    pub part_of_speech: &'a str,
 }
 
 pub struct DictionaryInstallationRecord<'a> {
@@ -136,6 +167,65 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 glossary_version INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS translation_cache_examples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT NOT NULL,
+                sentence_index INTEGER NOT NULL,
+                source_text TEXT NOT NULL,
+                word_count INTEGER NOT NULL,
+                source_created_at TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                UNIQUE (cache_key, sentence_index),
+                FOREIGN KEY (cache_key) REFERENCES translation_cache(cache_key) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS translation_cache_example_terms (
+                example_id INTEGER NOT NULL,
+                normalized_word TEXT NOT NULL,
+                PRIMARY KEY (example_id, normalized_word),
+                FOREIGN KEY (example_id) REFERENCES translation_cache_examples(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_example_terms_word
+                ON translation_cache_example_terms(normalized_word, example_id);
+            CREATE INDEX IF NOT EXISTS idx_example_terms_example
+                ON translation_cache_example_terms(example_id, normalized_word);
+            CREATE INDEX IF NOT EXISTS idx_examples_cache
+                ON translation_cache_examples(cache_key);
+
+            CREATE TABLE IF NOT EXISTS translation_cache_example_index_state (
+                cache_key TEXT PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                indexed_at TEXT,
+                last_error TEXT,
+                FOREIGN KEY (cache_key) REFERENCES translation_cache(cache_key) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS word_ai_cache (
+                cache_key TEXT PRIMARY KEY NOT NULL,
+                example_id INTEGER NOT NULL,
+                normalized_word TEXT NOT NULL,
+                word TEXT NOT NULL,
+                canonical_word TEXT NOT NULL,
+                source_language TEXT NOT NULL,
+                target_language TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                prompt_id TEXT NOT NULL,
+                glossary_version INTEGER NOT NULL,
+                protocol_version TEXT NOT NULL,
+                translated_text TEXT NOT NULL,
+                part_of_speech TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                FOREIGN KEY (example_id) REFERENCES translation_cache_examples(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_word_ai_cache_last_used_at
+                ON word_ai_cache(last_used_at ASC);
+
             CREATE INDEX IF NOT EXISTS idx_history_created_at ON translation_history(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_cache_last_used_at ON translation_cache(last_used_at ASC);
 
@@ -179,6 +269,15 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
 
     connection
         .execute(
+            "INSERT OR IGNORE INTO translation_cache_example_index_state
+                (cache_key, status, attempts, indexed_at, last_error)
+             SELECT cache_key, 'pending', 0, NULL, NULL FROM translation_cache",
+            [],
+        )
+        .map_err(|error| format!("初始化例句索引任务失败：{error}"))?;
+
+    connection
+        .execute(
             "INSERT OR IGNORE INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
             params![
                 DEFAULT_PROMPT_ID,
@@ -210,12 +309,21 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(DEFAULT_CACHE_MAX_BYTES)
         .clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+    let word_ai_cache_enabled = get_setting(connection, "word_ai_cache_enabled")?
+        .map(|value| value != "0")
+        .unwrap_or(DEFAULT_WORD_AI_CACHE_ENABLED);
+    let paragraph_example_lookup_enabled =
+        get_setting(connection, "paragraph_example_lookup_enabled")?
+            .map(|value| value != "0")
+            .unwrap_or(DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED);
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
         history_retention,
         cache_enabled,
         cache_max_bytes,
         cache_usage_bytes: stats.usage_bytes,
+        word_ai_cache_enabled,
+        paragraph_example_lookup_enabled,
     })
 }
 
@@ -224,6 +332,8 @@ pub fn save_settings(
     history_retention: i64,
     cache_enabled: bool,
     cache_max_bytes: i64,
+    word_ai_cache_enabled: bool,
+    paragraph_example_lookup_enabled: bool,
 ) -> Result<(), String> {
     set_setting(
         connection,
@@ -241,6 +351,20 @@ pub fn save_settings(
         &cache_max_bytes
             .clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024)
             .to_string(),
+    )?;
+    set_setting(
+        connection,
+        "word_ai_cache_enabled",
+        if word_ai_cache_enabled { "1" } else { "0" },
+    )?;
+    set_setting(
+        connection,
+        "paragraph_example_lookup_enabled",
+        if paragraph_example_lookup_enabled {
+            "1"
+        } else {
+            "0"
+        },
     )?;
     prune_history(connection, history_retention.clamp(1, 1000))?;
     prune_cache(
@@ -523,13 +647,17 @@ pub fn save_cache(connection: &Connection, record: &CacheRecord<'_>) -> Result<(
             ],
         )
         .map_err(|error| format!("写入翻译缓存失败：{error}"))?;
-    Ok(())
+    mark_example_index_pending(connection, record.cache_key)
 }
 
 pub fn get_cache_stats(connection: &Connection, max_bytes: i64) -> Result<CacheStats, String> {
     let (usage_bytes, entry_count) = connection
         .query_row(
-            "SELECT COALESCE(SUM(byte_size), 0), COUNT(*) FROM translation_cache",
+            "SELECT
+                COALESCE((SELECT SUM(byte_size) FROM translation_cache), 0)
+                    + COALESCE((SELECT SUM(byte_size) FROM translation_cache_examples), 0)
+                    + COALESCE((SELECT SUM(byte_size) FROM word_ai_cache), 0),
+                (SELECT COUNT(*) FROM translation_cache) + (SELECT COUNT(*) FROM word_ai_cache)",
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
@@ -545,7 +673,10 @@ pub fn prune_cache(connection: &Connection, max_bytes: i64) -> Result<(), String
     loop {
         let usage = connection
             .query_row(
-                "SELECT COALESCE(SUM(byte_size), 0) FROM translation_cache",
+                "SELECT
+                    COALESCE((SELECT SUM(byte_size) FROM translation_cache), 0)
+                        + COALESCE((SELECT SUM(byte_size) FROM translation_cache_examples), 0)
+                        + COALESCE((SELECT SUM(byte_size) FROM word_ai_cache), 0)",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -553,16 +684,329 @@ pub fn prune_cache(connection: &Connection, max_bytes: i64) -> Result<(), String
         if usage <= max_bytes {
             return Ok(());
         }
-        let deleted = connection
-            .execute(
-                "DELETE FROM translation_cache WHERE cache_key = (SELECT cache_key FROM translation_cache ORDER BY last_used_at ASC LIMIT 1)",
+        let oldest = connection
+            .query_row(
+                "SELECT cache_key, cache_kind FROM (
+                    SELECT cache_key, last_used_at, 0 AS cache_kind FROM translation_cache
+                    UNION ALL
+                    SELECT cache_key, last_used_at, 1 AS cache_kind FROM word_ai_cache
+                )
+                ORDER BY last_used_at ASC, cache_kind ASC, cache_key ASC
+                LIMIT 1",
                 [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
-            .map_err(|error| format!("清理翻译缓存失败：{error}"))?;
+            .optional()
+            .map_err(|error| format!("读取缓存清理候选失败：{error}"))?;
+        let Some((cache_key, cache_kind)) = oldest else {
+            return Ok(());
+        };
+        let deleted = if cache_kind == 0 {
+            connection
+                .execute(
+                    "DELETE FROM translation_cache WHERE cache_key = ?1",
+                    params![cache_key],
+                )
+                .map_err(|error| format!("清理翻译缓存失败：{error}"))?
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM word_ai_cache WHERE cache_key = ?1",
+                    params![cache_key],
+                )
+                .map_err(|error| format!("清理单词 AI 缓存失败：{error}"))?
+        };
         if deleted == 0 {
             return Ok(());
         }
     }
+}
+
+pub fn mark_example_index_pending(connection: &Connection, cache_key: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO translation_cache_example_index_state
+                (cache_key, status, attempts, indexed_at, last_error)
+             VALUES (?1, 'pending', 0, NULL, NULL)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                status = 'pending', indexed_at = NULL, last_error = NULL",
+            params![cache_key],
+        )
+        .map_err(|error| format!("标记例句索引任务失败：{error}"))?;
+    Ok(())
+}
+
+pub fn list_pending_example_indexes(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT cache_key FROM translation_cache_example_index_state
+             WHERE status IN ('pending', 'running', 'failed')
+             ORDER BY cache_key LIMIT ?1",
+        )
+        .map_err(|error| format!("读取例句索引任务失败：{error}"))?;
+    let rows = statement
+        .query_map(params![limit.clamp(1, 1000)], |row| row.get(0))
+        .map_err(|error| format!("读取例句索引任务失败：{error}"))?;
+    rows.collect::<Result<Vec<String>, _>>()
+        .map_err(|error| format!("读取例句索引任务失败：{error}"))
+}
+
+pub fn index_translation_cache(connection: &Connection, cache_key: &str) -> Result<(), String> {
+    let cache = connection
+        .query_row(
+            "SELECT source_text, source_language, created_at
+             FROM translation_cache WHERE cache_key = ?1",
+            params![cache_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("读取待索引翻译缓存失败：{error}"))?;
+    let Some((source_text, source_language, source_created_at)) = cache else {
+        return Ok(());
+    };
+
+    connection
+        .execute(
+            "INSERT INTO translation_cache_example_index_state
+                (cache_key, status, attempts, indexed_at, last_error)
+             VALUES (?1, 'running', 1, NULL, NULL)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                status = 'running', attempts = attempts + 1, last_error = NULL",
+            params![cache_key],
+        )
+        .map_err(|error| format!("更新例句索引状态失败：{error}"))?;
+
+    let result = (|| -> Result<(), String> {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("开启例句索引事务失败：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM translation_cache_examples WHERE cache_key = ?1",
+                params![cache_key],
+            )
+            .map_err(|error| format!("清理旧例句索引失败：{error}"))?;
+
+        let sentences = if source_language.eq_ignore_ascii_case("en") {
+            crate::examples::split_english_example_sentences(&source_text)
+        } else {
+            Vec::new()
+        };
+        let mut affected_words = std::collections::HashSet::new();
+        for sentence in sentences {
+            let byte_size = sentence.source_text.len() as i64;
+            transaction
+                .execute(
+                    "INSERT INTO translation_cache_examples
+                        (cache_key, sentence_index, source_text, word_count, source_created_at, byte_size)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        cache_key,
+                        sentence.sentence_index,
+                        sentence.source_text,
+                        sentence.words.len() as i64,
+                        source_created_at,
+                        byte_size,
+                    ],
+                )
+                .map_err(|error| format!("写入例句索引失败：{error}"))?;
+            let example_id = transaction.last_insert_rowid();
+            for normalized_word in sentence.words {
+                affected_words.insert(normalized_word.clone());
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO translation_cache_example_terms
+                            (example_id, normalized_word) VALUES (?1, ?2)",
+                        params![example_id, normalized_word],
+                    )
+                    .map_err(|error| format!("写入例句词项索引失败：{error}"))?;
+            }
+        }
+
+        for normalized_word in affected_words {
+            transaction
+                .execute(
+                    "DELETE FROM translation_cache_example_terms
+                     WHERE normalized_word = ?1
+                       AND example_id NOT IN (
+                           SELECT terms.example_id
+                           FROM translation_cache_example_terms AS terms
+                           JOIN translation_cache_examples AS examples
+                             ON examples.id = terms.example_id
+                           WHERE terms.normalized_word = ?1
+                           ORDER BY examples.source_created_at DESC, examples.id DESC
+                           LIMIT 5
+                       )",
+                    params![normalized_word],
+                )
+                .map_err(|error| format!("清理旧例句词项索引失败：{error}"))?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM translation_cache_examples
+                 WHERE cache_key = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM translation_cache_example_terms AS terms
+                       WHERE terms.example_id = translation_cache_examples.id
+                   )",
+                params![cache_key],
+            )
+            .map_err(|error| format!("清理无效例句索引失败：{error}"))?;
+        transaction
+            .execute(
+                "UPDATE translation_cache_example_index_state
+                 SET status = 'completed', indexed_at = ?1, last_error = NULL
+                 WHERE cache_key = ?2",
+                params![Utc::now().to_rfc3339(), cache_key],
+            )
+            .map_err(|error| format!("完成例句索引失败：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("提交例句索引事务失败：{error}"))?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = connection.execute(
+            "UPDATE translation_cache_example_index_state
+             SET status = 'failed', last_error = ?1 WHERE cache_key = ?2",
+            params![error, cache_key],
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn find_latest_example(
+    connection: &Connection,
+    normalized_word: &str,
+) -> Result<Option<ParagraphExampleRecord>, String> {
+    connection
+        .query_row(
+            "SELECT examples.id, examples.source_text, examples.source_created_at
+             FROM translation_cache_example_terms AS terms
+             JOIN translation_cache_examples AS examples
+               ON examples.id = terms.example_id
+             WHERE terms.normalized_word = ?1
+             ORDER BY examples.source_created_at DESC, examples.id DESC
+             LIMIT 1",
+            params![normalized_word],
+            |row| {
+                Ok(ParagraphExampleRecord {
+                    example_id: row.get(0)?,
+                    source_text: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("读取段落例句失败：{error}"))
+}
+
+pub fn find_example_by_id_for_word(
+    connection: &Connection,
+    example_id: i64,
+    normalized_word: &str,
+) -> Result<Option<ParagraphExampleRecord>, String> {
+    connection
+        .query_row(
+            "SELECT examples.id, examples.source_text, examples.source_created_at
+             FROM translation_cache_examples AS examples
+             JOIN translation_cache_example_terms AS terms
+               ON terms.example_id = examples.id
+             WHERE examples.id = ?1 AND terms.normalized_word = ?2",
+            params![example_id, normalized_word],
+            |row| {
+                Ok(ParagraphExampleRecord {
+                    example_id: row.get(0)?,
+                    source_text: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("校验例句词项关联失败：{error}"))
+}
+
+pub fn find_word_ai_cache(
+    connection: &Connection,
+    cache_key: &str,
+) -> Result<Option<WordAiCacheRecord>, String> {
+    let cached = connection
+        .query_row(
+            "SELECT translated_text, part_of_speech
+             FROM word_ai_cache WHERE cache_key = ?1",
+            params![cache_key],
+            |row| {
+                Ok(WordAiCacheRecord {
+                    translated_text: row.get(0)?,
+                    part_of_speech: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("读取单词 AI 缓存失败：{error}"))?;
+    if cached.is_some() {
+        connection
+            .execute(
+                "UPDATE word_ai_cache SET last_used_at = ?1 WHERE cache_key = ?2",
+                params![Utc::now().to_rfc3339(), cache_key],
+            )
+            .map_err(|error| format!("更新单词 AI 缓存访问时间失败：{error}"))?;
+    }
+    Ok(cached)
+}
+
+pub fn save_word_ai_cache(
+    connection: &Connection,
+    record: &WordAiCacheWrite<'_>,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let byte_size = (record.translated_text.len() + record.part_of_speech.len()) as i64;
+    connection
+        .execute(
+            "INSERT INTO word_ai_cache
+                (cache_key, example_id, normalized_word, word, canonical_word,
+                 source_language, target_language, provider_id, model_id, prompt_id,
+                 glossary_version, protocol_version, translated_text, part_of_speech,
+                 created_at, last_used_at, byte_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                example_id = excluded.example_id,
+                translated_text = excluded.translated_text,
+                part_of_speech = excluded.part_of_speech,
+                last_used_at = excluded.last_used_at,
+                byte_size = excluded.byte_size",
+            params![
+                record.cache_key,
+                record.example_id,
+                record.normalized_word,
+                record.word,
+                record.canonical_word,
+                record.source_language,
+                record.target_language,
+                &record.provider.id,
+                &record.provider.model_id,
+                record.prompt_id,
+                record.glossary_version,
+                record.protocol_version,
+                record.translated_text,
+                record.part_of_speech,
+                &now,
+                byte_size,
+            ],
+        )
+        .map_err(|error| format!("写入单词 AI 缓存失败：{error}"))?;
+    Ok(())
 }
 
 pub fn prune_history(connection: &Connection, retention: i64) -> Result<(), String> {
@@ -784,6 +1228,125 @@ mod tests {
 
         prune_cache(&connection, 1).expect("cache pruning should succeed");
         assert_eq!(get_cache_stats(&connection, 1).unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn example_index_keeps_the_latest_five_and_returns_the_newest() {
+        let connection = test_connection();
+        let provider = test_provider();
+        for index in 0..6 {
+            let cache_key = format!("cache-{index}");
+            let source_text = format!("The target word appears in example {index}.");
+            let record = CacheRecord {
+                cache_key: &cache_key,
+                source_text: &source_text,
+                translated_text: "译文",
+                source_language: "en",
+                target_language: "zh-CN",
+                provider: &provider,
+                prompt_id: DEFAULT_PROMPT_ID,
+                glossary_version: 1,
+            };
+            save_cache(&connection, &record).expect("cache write should succeed");
+            connection
+                .execute(
+                    "UPDATE translation_cache SET created_at = ?1, last_used_at = ?1 WHERE cache_key = ?2",
+                    params![format!("2024-01-{:02}T00:00:00Z", index + 1), cache_key],
+                )
+                .expect("fixture timestamp should update");
+            index_translation_cache(&connection, &cache_key)
+                .expect("example indexing should succeed");
+        }
+
+        let indexed_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM translation_cache_example_terms WHERE normalized_word = 'target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed_count, 5);
+
+        let latest = find_latest_example(&connection, "target")
+            .expect("latest example lookup should succeed")
+            .expect("latest example should exist");
+        assert!(latest.source_text.contains("example 5"));
+    }
+
+    #[test]
+    fn word_ai_cache_is_counted_and_cascades_with_its_example() {
+        let connection = test_connection();
+        let provider = test_provider();
+        let record = CacheRecord {
+            cache_key: "paragraph-cache",
+            source_text: "A target example.",
+            translated_text: "一个例句。",
+            source_language: "en",
+            target_language: "zh-CN",
+            provider: &provider,
+            prompt_id: DEFAULT_PROMPT_ID,
+            glossary_version: 1,
+        };
+        save_cache(&connection, &record).expect("cache write should succeed");
+        index_translation_cache(&connection, record.cache_key)
+            .expect("example indexing should succeed");
+        let example_id = find_latest_example(&connection, "target")
+            .unwrap()
+            .unwrap()
+            .example_id;
+        assert!(
+            find_example_by_id_for_word(&connection, example_id, "other")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_example_by_id_for_word(&connection, example_id, "target")
+                .unwrap()
+                .is_some()
+        );
+        let word_cache = WordAiCacheWrite {
+            cache_key: "word-cache",
+            example_id,
+            normalized_word: "target",
+            word: "target",
+            canonical_word: "target",
+            source_language: "en",
+            target_language: "zh-CN",
+            provider: &provider,
+            prompt_id: DEFAULT_PROMPT_ID,
+            glossary_version: 1,
+            protocol_version: crate::contracts::WORD_EXAMPLE_PROTOCOL_VERSION,
+            translated_text: "目标例句。",
+            part_of_speech: "noun",
+        };
+        save_word_ai_cache(&connection, &word_cache).expect("word cache write should succeed");
+        assert!(find_word_ai_cache(&connection, "word-cache")
+            .unwrap()
+            .is_some());
+        assert_eq!(get_cache_stats(&connection, 1024).unwrap().entry_count, 2);
+        connection
+            .execute(
+                "DELETE FROM translation_cache WHERE cache_key = 'paragraph-cache'",
+                [],
+            )
+            .expect("paragraph cache should delete");
+        assert!(find_word_ai_cache(&connection, "word-cache")
+            .unwrap()
+            .is_none());
+        assert!(find_latest_example(&connection, "target")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn settings_round_trip_includes_word_example_switches() {
+        let connection = test_connection();
+        save_settings(&connection, 12, true, 32 * 1024 * 1024, false, false)
+            .expect("settings write should succeed");
+        let settings = get_settings(&connection).expect("settings read should succeed");
+        assert_eq!(settings.history_retention, 12);
+        assert!(!settings.word_ai_cache_enabled);
+        assert!(!settings.paragraph_example_lookup_enabled);
     }
 
     #[test]

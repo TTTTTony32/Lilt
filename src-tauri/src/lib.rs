@@ -2,14 +2,18 @@ mod contracts;
 mod db;
 mod diagnostics;
 mod dictionary;
+mod examples;
 mod provider;
 mod secrets;
 
 use contracts::{
-    AppSnapshot, DictionaryCommandResult, DictionaryLookupCommandResult, DictionaryState,
-    GlossaryTerm, ModelInfo, Prompt, ProviderConfig, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
-    TranslationStarted, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
+    AppSnapshot, DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
+    DictionaryState, GlossaryTerm, ModelInfo, ParagraphExample, Prompt, ProviderConfig,
+    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationFailed,
+    TranslationRequest, TranslationStarted, WordExampleCancelled, WordExampleCommandResult,
+    WordExampleCompleted, WordExampleFailed, WordExamplePosDelta, WordExampleRequest,
+    WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
+    WORD_EXAMPLE_PROTOCOL_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -17,6 +21,7 @@ use std::{
     collections::HashMap,
     fs,
     path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -31,30 +36,20 @@ pub struct AppState {
     pub(crate) data_dir: Arc<PathBuf>,
     pub(crate) dictionary_update: Arc<Mutex<Option<String>>>,
     pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
+    pub(crate) dictionary_initialising: Arc<AtomicBool>,
 }
 
 impl AppState {
     fn new(connection: Connection, data_dir: PathBuf) -> Self {
-        let mut dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
-        match dictionary_store.open_and_validate() {
-            Ok(metadata) => diagnostics::info(format!(
-                "dictionary.store.ready entry_count={} source=startup",
-                metadata.entry_count
-            )),
-            Err(dictionary::DictionaryError::NotInstalled) => {
-                diagnostics::info("dictionary.store.not_installed source=startup");
-            }
-            Err(error) => diagnostics::error(format!(
-                "dictionary.store.failed source=startup error_kind={} reason={error}",
-                error.kind()
-            )),
-        }
+        let dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
+        diagnostics::info("dictionary.store.deferred source=startup");
         Self {
             database: Arc::new(Mutex::new(connection)),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             data_dir: Arc::new(data_dir),
             dictionary_update: Arc::new(Mutex::new(None)),
             dictionary_store: Arc::new(Mutex::new(dictionary_store)),
+            dictionary_initialising: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -74,7 +69,10 @@ pub fn run() {
             let connection = Connection::open(data_dir.join("app.sqlite"))
                 .map_err(|error| std::io::Error::other(format!("打开应用数据库失败：{error}")))?;
             db::migrate(&connection).map_err(std::io::Error::other)?;
-            app.manage(AppState::new(connection, data_dir));
+            let state = AppState::new(connection, data_dir);
+            app.manage(state.clone());
+            schedule_dictionary_initialisation(state.clone());
+            schedule_pending_example_indexes(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -87,6 +85,8 @@ pub fn run() {
             upsert_glossary_term,
             delete_glossary_term,
             query_dictionary,
+            generate_word_example,
+            cancel_word_example,
             get_dictionary_state,
             update_dictionary,
             clear_dictionary_history
@@ -113,11 +113,18 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         .lock()
         .map_err(|_| "词典更新状态锁已损坏".to_string())?
         .is_some();
-    let mut dictionary = state
-        .dictionary_store
-        .lock()
-        .map_err(|_| "词典存储锁已损坏".to_string())?
-        .state(snapshot_data.dictionary_installation.as_ref());
+    let mut dictionary = if state.dictionary_initialising.load(Ordering::Acquire) {
+        dictionary::deferred_state(
+            &state.dictionary_dir(),
+            snapshot_data.dictionary_installation.as_ref(),
+        )
+    } else {
+        state
+            .dictionary_store
+            .lock()
+            .map_err(|_| "词典存储锁已损坏".to_string())?
+            .state(snapshot_data.dictionary_installation.as_ref())
+    };
     if updating {
         dictionary.status = contracts::DictionaryStatus::Updating;
         dictionary.error = None;
@@ -291,6 +298,8 @@ fn save_app_settings(
     history_retention: i64,
     cache_enabled: bool,
     cache_max_bytes: i64,
+    word_ai_cache_enabled: bool,
+    paragraph_example_lookup_enabled: bool,
 ) -> Result<(), String> {
     let connection = state
         .database
@@ -301,6 +310,8 @@ fn save_app_settings(
         history_retention,
         cache_enabled,
         cache_max_bytes,
+        word_ai_cache_enabled,
+        paragraph_example_lookup_enabled,
     )
 }
 
@@ -419,6 +430,7 @@ async fn translate_impl(
                 return emit_failed(&app, &request_id, &error);
             }
             let content = cached.translated_text;
+            schedule_example_index(&state, &prepared.cache_key);
             app.emit(
                 "translation_completed",
                 TranslationCompleted {
@@ -543,6 +555,9 @@ async fn translate_impl(
             request_id
         ));
         return emit_failed(&app, &request_id, &error);
+    }
+    if prepared.cache_enabled {
+        schedule_example_index(&state, &prepared.cache_key);
     }
     let content = translated;
     let output_chars = content.chars().count();
@@ -686,6 +701,21 @@ fn cancel_translation(state: State<'_, AppState>, request_id: String) -> Result<
     Ok(still_active)
 }
 
+#[tauri::command]
+fn cancel_word_example(state: State<'_, AppState>, request_id: String) -> Result<bool, String> {
+    let still_active = cancel_request(state.inner(), &request_id)?;
+    if still_active {
+        diagnostics::info(format!(
+            "command.word_example.cancel_requested request_id={request_id}"
+        ));
+    } else {
+        diagnostics::warn(format!(
+            "command.word_example.cancel_missing request_id={request_id}"
+        ));
+    }
+    Ok(still_active)
+}
+
 fn cancel_request(state: &AppState, request_id: &str) -> Result<bool, String> {
     let cancellation = state
         .cancellations
@@ -698,6 +728,104 @@ fn cancel_request(state: &AppState, request_id: &str) -> Result<bool, String> {
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+fn schedule_dictionary_initialisation(state: AppState) {
+    state.dictionary_initialising.store(true, Ordering::Release);
+    tauri::async_runtime::spawn(async move {
+        let worker_state = state.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let mut store = worker_state
+                .dictionary_store
+                .lock()
+                .map_err(|_| "词典存储锁已损坏".to_string())?;
+            if store.is_runtime_ready() {
+                return Ok(());
+            }
+            store
+                .open_runtime("startup")
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        state
+            .dictionary_initialising
+            .store(false, Ordering::Release);
+        match result {
+            Ok(Ok(())) => diagnostics::info("dictionary.store.ready source=startup"),
+            Ok(Err(error)) if error == "词典未安装，请在设置中下载词典" => {
+                diagnostics::info("dictionary.store.not_installed source=startup");
+            }
+            Ok(Err(error)) => diagnostics::error(format!(
+                "dictionary.store.failed source=startup error={error}"
+            )),
+            Err(error) => diagnostics::error(format!(
+                "dictionary.store.worker_failed source=startup error={error}"
+            )),
+        }
+    });
+}
+
+fn schedule_pending_example_indexes(state: AppState) {
+    tauri::async_runtime::spawn(async move {
+        let keys = match tauri::async_runtime::spawn_blocking({
+            let state = state.clone();
+            move || {
+                let connection = state
+                    .database
+                    .lock()
+                    .map_err(|_| "应用数据库锁已损坏".to_string())?;
+                db::list_pending_example_indexes(&connection, 1000)
+            }
+        })
+        .await
+        {
+            Ok(Ok(keys)) => keys,
+            Ok(Err(error)) => {
+                diagnostics::error(format!(
+                    "examples.index_backfill.list_failed reason={error}"
+                ));
+                return;
+            }
+            Err(error) => {
+                diagnostics::error(format!(
+                    "examples.index_backfill.worker_failed reason={error}"
+                ));
+                return;
+            }
+        };
+        for cache_key in keys {
+            index_example_cache(state.clone(), cache_key).await;
+        }
+    });
+}
+
+fn schedule_example_index(state: &AppState, cache_key: &str) {
+    let state = state.clone();
+    let cache_key = cache_key.to_string();
+    tauri::async_runtime::spawn(async move {
+        index_example_cache(state, cache_key).await;
+    });
+}
+
+async fn index_example_cache(state: AppState, cache_key: String) {
+    let log_key = cache_key.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::index_translation_cache(&connection, &cache_key)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => diagnostics::info(format!("examples.index.completed cache_key={log_key}")),
+        Ok(Err(error)) => diagnostics::error(format!(
+            "examples.index.failed cache_key={log_key} reason={error}"
+        )),
+        Err(error) => diagnostics::error(format!(
+            "examples.index.worker_failed cache_key={log_key} reason={error}"
+        )),
     }
 }
 
@@ -733,6 +861,7 @@ fn delete_glossary_term(state: State<'_, AppState>, id: String) -> Result<(), St
 fn query_dictionary(
     state: State<'_, AppState>,
     word: String,
+    canonical_word: Option<String>,
 ) -> Result<DictionaryLookupCommandResult, String> {
     let request_id = Uuid::new_v4().to_string();
     let started = Instant::now();
@@ -765,13 +894,18 @@ fn query_dictionary(
         return Err(error.to_string());
     }
 
-    let lookup = {
-        let store = state
+    let resolution = {
+        let mut store = state
             .dictionary_store
             .lock()
             .map_err(|_| "词典存储锁已损坏".to_string())?;
-        match store.lookup(&display_word) {
-            Ok(measurement) => measurement,
+        if !store.is_runtime_ready() {
+            store
+                .open_runtime("first_query")
+                .map_err(|error| error.to_string())?;
+        }
+        match store.resolve(&display_word, canonical_word.as_deref()) {
+            Ok(resolution) => resolution,
             Err(error) => {
                 diagnostics::error(format!(
                     "command.dictionary.query.failed request_id={request_id} stage=lookup elapsed_ms={} error_kind={}",
@@ -783,8 +917,58 @@ fn query_dictionary(
         }
     };
 
+    let list_history = || -> Result<Vec<contracts::DictionaryHistoryEntry>, String> {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::list_dictionary_history(&connection, DICTIONARY_HISTORY_LIMIT)
+    };
+
+    let (measurement, candidates) = match resolution {
+        dictionary::DictionaryLookupResolution::Found(measurement) => {
+            (Some(measurement), Vec::new())
+        }
+        dictionary::DictionaryLookupResolution::Ambiguous(candidates) => {
+            let history = list_history()?;
+            diagnostics::info(format!(
+                "command.dictionary.query.ambiguous request_id={request_id} candidate_count={} total_ms={}",
+                candidates.len(),
+                started.elapsed().as_millis()
+            ));
+            return Ok(DictionaryLookupCommandResult {
+                lookup: None,
+                candidates: candidates
+                    .into_iter()
+                    .map(
+                        |(canonical_word, normalized_canonical_word)| DictionaryLookupCandidate {
+                            canonical_word,
+                            normalized_canonical_word,
+                        },
+                    )
+                    .collect(),
+                example: None,
+                history,
+            });
+        }
+        dictionary::DictionaryLookupResolution::NotFound => {
+            let history = list_history()?;
+            diagnostics::info(format!(
+                "command.dictionary.query.not_found request_id={request_id} total_ms={}",
+                started.elapsed().as_millis()
+            ));
+            return Ok(DictionaryLookupCommandResult {
+                lookup: None,
+                candidates: Vec::new(),
+                example: None,
+                history,
+            });
+        }
+    };
+    let lookup = measurement.expect("dictionary resolution must contain a measurement");
+
     let history_started = Instant::now();
-    let history_result = (|| -> Result<Vec<contracts::DictionaryHistoryEntry>, String> {
+    let (history, example) = {
         let connection = state
             .database
             .lock()
@@ -794,17 +978,20 @@ fn query_dictionary(
             &lookup.result.normalized_word,
             &lookup.result.word,
         )?;
-        db::list_dictionary_history(&connection, DICTIONARY_HISTORY_LIMIT)
-    })();
-    let history = match history_result {
-        Ok(history) => history,
-        Err(error) => {
-            diagnostics::error(format!(
-                "command.dictionary.query.failed request_id={request_id} stage=history elapsed_ms={} error_kind=database_persistence",
-                started.elapsed().as_millis()
-            ));
-            return Err(error);
-        }
+        let history = db::list_dictionary_history(&connection, DICTIONARY_HISTORY_LIMIT)?;
+        let settings = db::get_settings(&connection)?;
+        let example = if settings.paragraph_example_lookup_enabled {
+            db::find_latest_example(&connection, &lookup.result.normalized_word)?.map(|record| {
+                ParagraphExample {
+                    example_id: record.example_id,
+                    source_text: record.source_text,
+                    created_at: record.created_at,
+                }
+            })
+        } else {
+            None
+        };
+        (history, example)
     };
     let history_elapsed = history_started.elapsed();
     diagnostics::info(format!(
@@ -815,9 +1002,608 @@ fn query_dictionary(
         started.elapsed().as_millis()
     ));
     Ok(DictionaryLookupCommandResult {
-        lookup: lookup.result,
+        lookup: Some(lookup.result),
+        candidates,
+        example,
         history,
     })
+}
+
+#[tauri::command]
+async fn generate_word_example(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: WordExampleRequest,
+) -> Result<WordExampleCommandResult, String> {
+    generate_word_example_impl(app, state.inner().clone(), request).await
+}
+
+async fn generate_word_example_impl(
+    app: AppHandle,
+    state: AppState,
+    request: WordExampleRequest,
+) -> Result<WordExampleCommandResult, String> {
+    let request_id = if request.request_id.trim().is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        request.request_id.clone()
+    };
+    let word = request.word.trim().to_string();
+    let canonical_word = request.canonical_word.trim().to_string();
+    let target_language = request.target_language.trim().to_string();
+    if word.is_empty() {
+        return emit_word_failed(&app, &request_id, "查询词形不能为空");
+    }
+    if canonical_word.is_empty() {
+        return emit_word_failed(&app, &request_id, "规范词头不能为空");
+    }
+    if target_language.is_empty() || request.example_id <= 0 {
+        return emit_word_failed(&app, &request_id, "例句请求参数无效");
+    }
+
+    diagnostics::info(format!(
+        "command.word_example.start request_id={} example_id={} target_language={}",
+        request_id, request.example_id, target_language
+    ));
+    let cancellation = CancellationToken::new();
+    {
+        let mut cancellations = state
+            .cancellations
+            .lock()
+            .map_err(|_| "取消状态锁已损坏".to_string())?;
+        cancellations.insert(request_id.clone(), cancellation.clone());
+    }
+    if let Err(error) = app.emit(
+        "word_example_started",
+        WordExampleStarted {
+            request_id: request_id.clone(),
+        },
+    ) {
+        unregister_request(&state, &request_id);
+        return Err(format!("发送单词例句状态失败：{error}"));
+    }
+
+    let prepared = match prepare_word_example(
+        &state,
+        request.example_id,
+        &word,
+        &canonical_word,
+        &target_language,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            unregister_request(&state, &request_id);
+            return emit_word_failed(&app, &request_id, &error);
+        }
+    };
+
+    if prepared.cache_enabled {
+        let cached = {
+            let connection = state
+                .database
+                .lock()
+                .map_err(|_| "应用数据库锁已损坏".to_string())?;
+            match db::find_word_ai_cache(&connection, &prepared.cache_key) {
+                Ok(value) => value,
+                Err(error) => {
+                    diagnostics::error(format!(
+                        "command.word_example.cache_lookup_failed request_id={} reason={error}",
+                        request_id
+                    ));
+                    drop(connection);
+                    unregister_request(&state, &request_id);
+                    return emit_word_failed(&app, &request_id, &error);
+                }
+            }
+        };
+        if let Some(cached) = cached {
+            unregister_request(&state, &request_id);
+            app.emit(
+                "word_example_completed",
+                WordExampleCompleted {
+                    request_id: request_id.clone(),
+                    translation: cached.translated_text.clone(),
+                    part_of_speech: cached.part_of_speech.clone(),
+                    cache_hit: true,
+                },
+            )
+            .map_err(|error| format!("发送单词例句结果失败：{error}"))?;
+            diagnostics::info(format!(
+                "command.word_example.completed request_id={} cache_hit=true output_chars={}",
+                request_id,
+                cached.translated_text.chars().count()
+            ));
+            return Ok(WordExampleCommandResult::completed(
+                cached.translated_text,
+                cached.part_of_speech,
+                true,
+            ));
+        }
+    }
+
+    let api_key = match secrets::load_api_key(&prepared.provider.id) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            unregister_request(&state, &request_id);
+            return emit_word_failed(
+                &app,
+                &request_id,
+                "尚未配置 API Key，请在设置中保存 Provider",
+            );
+        }
+        Err(error) => {
+            unregister_request(&state, &request_id);
+            return emit_word_failed(&app, &request_id, &error);
+        }
+    };
+
+    let system_prompt = build_word_example_prompt(
+        &prepared.target_language,
+        &prepared.glossary_terms,
+        &prepared.example.source_text,
+    );
+    let user_text = format!(
+        "规范词头：{}\n查询词形：{}\n英语例句：{}",
+        prepared.canonical_word, prepared.word, prepared.example.source_text
+    );
+    let mut parser = WordExampleProtocolParser::default();
+    let streamed = provider::stream_chat_completion(
+        provider::ChatStreamRequest {
+            request_id: &request_id,
+            base_url: &prepared.provider.base_url,
+            api_key: &api_key,
+            model_id: &prepared.provider.model_id,
+            system_prompt: &system_prompt,
+            user_text: &user_text,
+            cancel: &cancellation,
+            operation: "word_example",
+        },
+        |content| {
+            for delta in parser.push(&content)? {
+                match delta {
+                    WordExampleDelta::Translation(content) => app
+                        .emit(
+                            "word_example_translation_delta",
+                            WordExampleTranslationDelta {
+                                request_id: request_id.clone(),
+                                content,
+                            },
+                        )
+                        .map_err(|error| provider::ProviderError::Event(error.to_string()))?,
+                    WordExampleDelta::Pos(content) => app
+                        .emit(
+                            "word_example_pos_delta",
+                            WordExamplePosDelta {
+                                request_id: request_id.clone(),
+                                content,
+                            },
+                        )
+                        .map_err(|error| provider::ProviderError::Event(error.to_string()))?,
+                }
+            }
+            Ok(())
+        },
+    )
+    .await;
+    let streamed = match streamed {
+        Ok(value) => value,
+        Err(provider::ProviderError::Cancelled) => {
+            unregister_request(&state, &request_id);
+            app.emit(
+                "word_example_cancelled",
+                WordExampleCancelled {
+                    request_id: request_id.clone(),
+                },
+            )
+            .map_err(|error| format!("发送单词例句取消状态失败：{error}"))?;
+            return Ok(WordExampleCommandResult::cancelled());
+        }
+        Err(error) => {
+            unregister_request(&state, &request_id);
+            return emit_word_failed(&app, &request_id, &error.to_string());
+        }
+    };
+    let parsed = match parser.finish() {
+        Ok(value) => value,
+        Err(error) => {
+            diagnostics::error(format!(
+                "command.word_example.protocol_failed request_id={} raw_chars={} reason={error}",
+                request_id,
+                streamed.chars().count()
+            ));
+            unregister_request(&state, &request_id);
+            return emit_word_failed(&app, &request_id, &error.to_string());
+        }
+    };
+
+    let persistence = if prepared.cache_enabled {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        let cache = db::WordAiCacheWrite {
+            cache_key: &prepared.cache_key,
+            example_id: prepared.example.example_id,
+            normalized_word: &prepared.normalized_word,
+            word: &prepared.word,
+            canonical_word: &prepared.canonical_word,
+            source_language: "en",
+            target_language: &prepared.target_language,
+            provider: &prepared.provider,
+            prompt_id: &prepared.prompt.id,
+            glossary_version: prepared.glossary_version,
+            protocol_version: WORD_EXAMPLE_PROTOCOL_VERSION,
+            translated_text: &parsed.translation,
+            part_of_speech: &parsed.part_of_speech,
+        };
+        db::save_word_ai_cache(&connection, &cache)
+            .and_then(|_| db::prune_cache(&connection, prepared.cache_max_bytes))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = persistence {
+        unregister_request(&state, &request_id);
+        return emit_word_failed(&app, &request_id, &error);
+    }
+
+    unregister_request(&state, &request_id);
+    app.emit(
+        "word_example_completed",
+        WordExampleCompleted {
+            request_id: request_id.clone(),
+            translation: parsed.translation.clone(),
+            part_of_speech: parsed.part_of_speech.clone(),
+            cache_hit: false,
+        },
+    )
+    .map_err(|error| format!("发送单词例句结果失败：{error}"))?;
+    diagnostics::info(format!(
+        "command.word_example.completed request_id={} cache_hit=false output_chars={}",
+        request_id,
+        parsed.translation.chars().count()
+    ));
+    Ok(WordExampleCommandResult::completed(
+        parsed.translation,
+        parsed.part_of_speech,
+        false,
+    ))
+}
+
+struct PreparedWordExample {
+    provider: contracts::ProviderRecord,
+    prompt: Prompt,
+    example: db::ParagraphExampleRecord,
+    word: String,
+    normalized_word: String,
+    canonical_word: String,
+    target_language: String,
+    cache_key: String,
+    cache_enabled: bool,
+    cache_max_bytes: i64,
+    glossary_version: i64,
+    glossary_terms: Vec<GlossaryTerm>,
+}
+
+fn prepare_word_example(
+    state: &AppState,
+    example_id: i64,
+    word: &str,
+    canonical_word: &str,
+    target_language: &str,
+) -> Result<PreparedWordExample, String> {
+    let normalized_word = word.to_lowercase();
+    let (settings, provider, prompt, glossary_terms, glossary_version, example) = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        let settings = db::get_settings(&connection)?;
+        let provider = db::get_provider(&connection)?;
+        let prompt = db::get_prompt(&connection, &provider.prompt_id)?;
+        let glossary_terms = db::list_glossary_terms(&connection)?;
+        let glossary_version = db::glossary_version(&connection)?;
+        let example = db::find_example_by_id_for_word(&connection, example_id, &normalized_word)?
+            .ok_or_else(|| "例句索引已经失效，请重新查询词典".to_string())?;
+        (
+            settings,
+            provider,
+            prompt,
+            glossary_terms,
+            glossary_version,
+            example,
+        )
+    };
+    {
+        let mut store = state
+            .dictionary_store
+            .lock()
+            .map_err(|_| "词典存储锁已损坏".to_string())?;
+        if !store.is_runtime_ready() {
+            store
+                .open_runtime("word_example")
+                .map_err(|error| error.to_string())?;
+        }
+        let resolution = store
+            .resolve(word, Some(canonical_word))
+            .map_err(|error| error.to_string())?;
+        let resolved_canonical = match resolution {
+            dictionary::DictionaryLookupResolution::Found(measurement) => {
+                measurement.result.canonical_word.to_lowercase()
+            }
+            dictionary::DictionaryLookupResolution::Ambiguous(_) => {
+                return Err("规范词头选择不明确，请重新查询词典".to_string());
+            }
+            dictionary::DictionaryLookupResolution::NotFound => {
+                return Err("查询词形已经不再存在，请重新查询词典".to_string());
+            }
+        };
+        if resolved_canonical != canonical_word.to_lowercase() {
+            return Err("规范词头与查询词形不匹配".to_string());
+        }
+    }
+    let cache_key = make_word_ai_cache_key(&WordAiCacheKeyInput {
+        base_url: &provider.base_url,
+        provider_id: &provider.id,
+        model_id: &provider.model_id,
+        prompt_id: &prompt.id,
+        prompt_version: prompt.version,
+        glossary_version,
+        example_id,
+        source_text: &example.source_text,
+        normalized_word: &normalized_word,
+        canonical_word,
+        target_language,
+        protocol_version: WORD_EXAMPLE_PROTOCOL_VERSION,
+    });
+    Ok(PreparedWordExample {
+        provider,
+        prompt,
+        example,
+        word: word.to_string(),
+        normalized_word,
+        canonical_word: canonical_word.to_string(),
+        target_language: target_language.to_string(),
+        cache_key,
+        cache_enabled: settings.word_ai_cache_enabled,
+        cache_max_bytes: settings.cache_max_bytes,
+        glossary_version,
+        glossary_terms,
+    })
+}
+
+fn build_word_example_prompt(
+    target_language: &str,
+    terms: &[GlossaryTerm],
+    source_text: &str,
+) -> String {
+    let mut prompt = format!(
+        "你是一名英语词典辅助工具。请处理用户提供的英语例句，只输出以下协议内容，不要输出解释、Markdown 或其他文字：<translation>例句译文</translation><pos>查询词在该句中的英文词性</pos>。目标语言代码是 {target_language}。词性使用简短英文标签，例如 noun、verb、adjective、adverb。"
+    );
+    let source_lower = source_text.to_lowercase();
+    let glossary = terms
+        .iter()
+        .filter(|term| source_lower.contains(&term.source.to_lowercase()))
+        .map(|term| format!("- {}：{}", term.source, term.target))
+        .collect::<Vec<_>>();
+    if !glossary.is_empty() {
+        prompt.push_str(&format!(
+            "\n翻译例句时遵循以下已命中的术语译法：\n{}",
+            glossary.join("\n")
+        ));
+    }
+    prompt
+}
+
+#[derive(Clone, Copy)]
+struct WordAiCacheKeyInput<'a> {
+    base_url: &'a str,
+    provider_id: &'a str,
+    model_id: &'a str,
+    prompt_id: &'a str,
+    prompt_version: i64,
+    glossary_version: i64,
+    example_id: i64,
+    source_text: &'a str,
+    normalized_word: &'a str,
+    canonical_word: &'a str,
+    target_language: &'a str,
+    protocol_version: &'a str,
+}
+
+fn make_word_ai_cache_key(input: &WordAiCacheKeyInput<'_>) -> String {
+    let canonical = format!(
+        "base={}\nprovider={}\nmodel={}\nprompt={}@{}\nglossary={}\nexample={}\nsource={}\nword={}\ncanonical={}\ntarget_language={}\nprotocol={}",
+        input.base_url,
+        input.provider_id,
+        input.model_id,
+        input.prompt_id,
+        input.prompt_version,
+        input.glossary_version,
+        input.example_id,
+        input.source_text,
+        input.normalized_word,
+        input.canonical_word,
+        input.target_language,
+        input.protocol_version,
+    );
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{digest:x}")
+}
+
+#[derive(Default)]
+struct WordExampleProtocolParser {
+    buffer: String,
+    section: WordExampleSection,
+    translation: String,
+    part_of_speech: String,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum WordExampleSection {
+    #[default]
+    Waiting,
+    Translation,
+    Pos,
+    Done,
+}
+
+enum WordExampleDelta {
+    Translation(String),
+    Pos(String),
+}
+
+impl WordExampleProtocolParser {
+    fn push(&mut self, content: &str) -> Result<Vec<WordExampleDelta>, provider::ProviderError> {
+        self.buffer.push_str(content);
+        let mut deltas = Vec::new();
+        loop {
+            match self.section {
+                WordExampleSection::Waiting => {
+                    let translation_start = self.buffer.find("<translation>");
+                    let pos_start = self.buffer.find("<pos>");
+                    let next = match (translation_start, pos_start) {
+                        (Some(left), Some(right)) if left <= right => Some((left, true)),
+                        (Some(left), _) => Some((left, true)),
+                        (_, Some(right)) => Some((right, false)),
+                        (None, None) => None,
+                    };
+                    let Some((position, is_translation)) = next else {
+                        let keep =
+                            longest_tag_prefix_suffix(&self.buffer, &["<translation>", "<pos>"]);
+                        let discard = self.buffer.len().saturating_sub(keep);
+                        if !self.buffer[..discard].trim().is_empty() {
+                            return Err(provider::ProviderError::Protocol(
+                                "单词例句协议包含未标记内容".to_string(),
+                            ));
+                        }
+                        discard_prefix(&mut self.buffer, discard);
+                        break;
+                    };
+                    if !self.buffer[..position].trim().is_empty() {
+                        return Err(provider::ProviderError::Protocol(
+                            "单词例句协议包含未标记内容".to_string(),
+                        ));
+                    }
+                    discard_prefix(&mut self.buffer, position);
+                    if is_translation {
+                        discard_prefix(&mut self.buffer, "<translation>".len());
+                        self.section = WordExampleSection::Translation;
+                    } else {
+                        discard_prefix(&mut self.buffer, "<pos>".len());
+                        self.section = WordExampleSection::Pos;
+                    }
+                }
+                WordExampleSection::Translation => {
+                    if let Some(position) = self.buffer.find("</translation>") {
+                        let piece = self.buffer[..position].to_string();
+                        discard_prefix(&mut self.buffer, position + "</translation>".len());
+                        append_word_example_piece(&mut self.translation, piece, &mut deltas, true);
+                        self.section = WordExampleSection::Waiting;
+                        continue;
+                    }
+                    let flush_length = flushable_protocol_length(&self.buffer, "</translation>");
+                    if flush_length == 0 {
+                        break;
+                    }
+                    let piece = self.buffer[..flush_length].to_string();
+                    discard_prefix(&mut self.buffer, flush_length);
+                    append_word_example_piece(&mut self.translation, piece, &mut deltas, true);
+                }
+                WordExampleSection::Pos => {
+                    if let Some(position) = self.buffer.find("</pos>") {
+                        let piece = self.buffer[..position].to_string();
+                        discard_prefix(&mut self.buffer, position + "</pos>".len());
+                        append_word_example_piece(
+                            &mut self.part_of_speech,
+                            piece,
+                            &mut deltas,
+                            false,
+                        );
+                        self.section = WordExampleSection::Done;
+                        continue;
+                    }
+                    let flush_length = flushable_protocol_length(&self.buffer, "</pos>");
+                    if flush_length == 0 {
+                        break;
+                    }
+                    let piece = self.buffer[..flush_length].to_string();
+                    discard_prefix(&mut self.buffer, flush_length);
+                    append_word_example_piece(&mut self.part_of_speech, piece, &mut deltas, false);
+                }
+                WordExampleSection::Done => {
+                    if !self.buffer.trim().is_empty() {
+                        return Err(provider::ProviderError::Protocol(
+                            "单词例句协议包含结束标签后的多余内容".to_string(),
+                        ));
+                    }
+                    self.buffer.clear();
+                    break;
+                }
+            }
+        }
+        Ok(deltas)
+    }
+
+    fn finish(mut self) -> Result<ParsedWordExample, provider::ProviderError> {
+        self.push("")?;
+        if !matches!(self.section, WordExampleSection::Done) {
+            return Err(provider::ProviderError::Protocol(
+                "单词例句协议缺少完整标签".to_string(),
+            ));
+        }
+        let translation = self.translation.trim().to_string();
+        let part_of_speech = self.part_of_speech.trim().to_string();
+        if translation.is_empty() || part_of_speech.is_empty() {
+            return Err(provider::ProviderError::Protocol(
+                "单词例句协议返回了空字段".to_string(),
+            ));
+        }
+        Ok(ParsedWordExample {
+            translation,
+            part_of_speech,
+        })
+    }
+}
+
+struct ParsedWordExample {
+    translation: String,
+    part_of_speech: String,
+}
+
+fn append_word_example_piece(
+    target: &mut String,
+    piece: String,
+    deltas: &mut Vec<WordExampleDelta>,
+    translation: bool,
+) {
+    if piece.is_empty() {
+        return;
+    }
+    target.push_str(&piece);
+    if translation {
+        deltas.push(WordExampleDelta::Translation(piece));
+    } else {
+        deltas.push(WordExampleDelta::Pos(piece));
+    }
+}
+
+fn discard_prefix(value: &mut String, length: usize) {
+    value.drain(..length.min(value.len()));
+}
+
+fn longest_tag_prefix_suffix(value: &str, tags: &[&str]) -> usize {
+    tags.iter()
+        .flat_map(|tag| (1..=tag.len().min(value.len())).map(move |length| (*tag, length)))
+        .filter(|(tag, length)| value.ends_with(&tag[..*length]))
+        .map(|(_, length)| length)
+        .max()
+        .unwrap_or(0)
+}
+
+fn flushable_protocol_length(value: &str, closing_tag: &str) -> usize {
+    value
+        .len()
+        .saturating_sub(longest_tag_prefix_suffix(value, &[closing_tag]))
 }
 
 #[tauri::command]
@@ -829,11 +1615,15 @@ fn get_dictionary_state(state: State<'_, AppState>) -> Result<DictionaryState, S
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
         db::get_dictionary_installation(&connection)?
     };
-    let mut dictionary = state
-        .dictionary_store
-        .lock()
-        .map_err(|_| "词典存储锁已损坏".to_string())?
-        .state(installation.as_ref());
+    let mut dictionary = if state.dictionary_initialising.load(Ordering::Acquire) {
+        dictionary::deferred_state(&state.dictionary_dir(), installation.as_ref())
+    } else {
+        state
+            .dictionary_store
+            .lock()
+            .map_err(|_| "词典存储锁已损坏".to_string())?
+            .state(installation.as_ref())
+    };
     if state
         .dictionary_update
         .lock()
@@ -907,11 +1697,32 @@ fn emit_failed(
     Ok(TranslationCommandResult::failed(message))
 }
 
+fn emit_word_failed(
+    app: &AppHandle,
+    request_id: &str,
+    message: &str,
+) -> Result<WordExampleCommandResult, String> {
+    diagnostics::error(format!(
+        "command.word_example.failed request_id={} reason={message}",
+        request_id
+    ));
+    app.emit(
+        "word_example_failed",
+        WordExampleFailed {
+            request_id: request_id.to_string(),
+            message: message.to_string(),
+        },
+    )
+    .map_err(|error| format!("发送单词例句错误失败：{error}"))?;
+    Ok(WordExampleCommandResult::failed(message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_system_prompt, cancel_request, make_cache_key, unregister_request, AppState,
-        CacheKeyInput,
+        build_system_prompt, cancel_request, make_cache_key, make_word_ai_cache_key,
+        unregister_request, AppState, CacheKeyInput, WordAiCacheKeyInput, WordExampleDelta,
+        WordExampleProtocolParser, WORD_EXAMPLE_PROTOCOL_VERSION,
     };
     use crate::contracts::GlossaryTerm;
     use rusqlite::Connection;
@@ -942,6 +1753,38 @@ mod tests {
     fn cache_key_does_not_include_api_key() {
         let first = test_cache_key("hello");
         assert!(!first.contains("api"));
+    }
+
+    #[test]
+    fn word_example_cache_key_changes_with_example_content_and_target() {
+        let first_input = WordAiCacheKeyInput {
+            base_url: "https://example.com/v1",
+            provider_id: "default",
+            model_id: "model-a",
+            prompt_id: "prompt",
+            prompt_version: 1,
+            glossary_version: 1,
+            example_id: 7,
+            source_text: "A target example.",
+            normalized_word: "target",
+            canonical_word: "target",
+            target_language: "zh-CN",
+            protocol_version: WORD_EXAMPLE_PROTOCOL_VERSION,
+        };
+        let changed_source_input = WordAiCacheKeyInput {
+            source_text: "Another target example.",
+            ..first_input
+        };
+        let changed_target_input = WordAiCacheKeyInput {
+            target_language: "ja",
+            ..first_input
+        };
+        let first = make_word_ai_cache_key(&first_input);
+        let changed_source = make_word_ai_cache_key(&changed_source_input);
+        let changed_target = make_word_ai_cache_key(&changed_target_input);
+        assert_ne!(first, changed_source);
+        assert_ne!(first, changed_target);
+        assert!(!first.contains("secret"));
     }
 
     #[test]
@@ -980,5 +1823,37 @@ mod tests {
 
         unregister_request(&state, "active");
         assert!(!cancel_request(&state, "active").unwrap());
+    }
+
+    #[test]
+    fn word_example_protocol_parser_handles_split_tags_and_emits_sections() {
+        let mut parser = WordExampleProtocolParser::default();
+        let mut translation = String::new();
+        let mut part_of_speech = String::new();
+        for chunk in [
+            "<trans",
+            "lation>译",
+            "文</trans",
+            "lation><pos>ver",
+            "b</pos>",
+        ] {
+            for delta in parser.push(chunk).unwrap() {
+                match delta {
+                    WordExampleDelta::Translation(value) => translation.push_str(&value),
+                    WordExampleDelta::Pos(value) => part_of_speech.push_str(&value),
+                }
+            }
+        }
+        let parsed = parser.finish().unwrap();
+        assert_eq!(translation, "译文");
+        assert_eq!(part_of_speech, "verb");
+        assert_eq!(parsed.translation, "译文");
+        assert_eq!(parsed.part_of_speech, "verb");
+    }
+
+    #[test]
+    fn word_example_protocol_parser_rejects_unstructured_output() {
+        let mut parser = WordExampleProtocolParser::default();
+        assert!(parser.push("普通文本").is_err());
     }
 }
