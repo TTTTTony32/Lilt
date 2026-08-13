@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  decodeSelectionTriggerNotice,
   decodeSelectionNotice,
   decodeSelectionRequest,
   decodeSelectionStatus,
@@ -10,12 +11,23 @@ import {
 
 describe("selection contract", () => {
   it("decodes notices, requests, and runtime status", () => {
+    expect(decodeSelectionTriggerNotice({
+      triggerId: "trigger-1",
+      trigger: "shortcut",
+      anchor: null,
+    })).toEqual({
+      triggerId: "trigger-1",
+      trigger: "shortcut",
+      anchor: null,
+    });
     expect(decodeSelectionNotice({
       requestId: "selection-1",
+      triggerId: "trigger-1",
       trigger: "shortcut",
       anchor: { x: 10, y: 20, width: 30, height: 12 },
     })).toEqual({
       requestId: "selection-1",
+      triggerId: "trigger-1",
       trigger: "shortcut",
       anchor: { x: 10, y: 20, width: 30, height: 12 },
     });
@@ -37,19 +49,29 @@ describe("selection contract", () => {
   });
 
   it("rejects malformed selection payloads and preserves unavailable errors", () => {
+    expect(decodeSelectionTriggerNotice({ triggerId: "trigger-1", trigger: "shortcut", anchor: { x: 1 } })).toBeNull();
     expect(decodeSelectionNotice({ requestId: "selection-1", trigger: "shortcut", anchor: { x: "10" } })).toBeNull();
+    expect(decodeSelectionNotice({ requestId: "selection-1", trigger: "shortcut", anchor: null })).toBeNull();
     expect(decodeSelectionRequest({ requestId: "selection-1", sourceText: "hello" })).toBeNull();
     expect(decodeSelectionUnavailable({
       requestId: null,
+      triggerId: "trigger-1",
       trigger: "automatic",
       code: "unsupported_control",
       message: "不支持读取",
     })).toEqual({
       requestId: null,
+      triggerId: "trigger-1",
       trigger: "automatic",
       code: "unsupported_control",
       message: "不支持读取",
     });
+    expect(decodeSelectionUnavailable({
+      requestId: null,
+      trigger: "automatic",
+      code: "unsupported_control",
+      message: "不支持读取",
+    })).toBeNull();
     expect(decodeSelectionStatus({ mode: "automatic", shortcut: "Ctrl+Shift+L" })).toBeNull();
   });
 });

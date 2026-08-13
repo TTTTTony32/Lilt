@@ -10,8 +10,8 @@ mod selection;
 use contracts::{
     AppSnapshot, DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
     DictionaryState, GlossaryTerm, ModelInfo, ParagraphExample, Prompt, ProviderConfig,
-    SelectionMode, SelectionNotice, SelectionRequestPayload, SelectionRuntimeStatus,
-    SelectionSettingsResult, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
+    SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
+    SelectionTriggerNotice, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
     TranslationFailed, TranslationRequest, TranslationStarted, WordExampleCancelled,
     WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
     WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID,
@@ -69,6 +69,7 @@ impl StartupGate {
 struct StartupRuntime {
     started_at: Instant,
     gate: StartupGate,
+    main_visible: AtomicBool,
 }
 
 impl StartupRuntime {
@@ -76,6 +77,7 @@ impl StartupRuntime {
         Self {
             started_at: Instant::now(),
             gate: StartupGate::new(),
+            main_visible: AtomicBool::new(false),
         }
     }
 
@@ -91,10 +93,19 @@ impl StartupRuntime {
             return Err("无效的启动阶段".to_string());
         }
         self.log(stage, window);
-        if stage == "first_paint" {
-            self.gate.open();
-        }
         Ok(())
+    }
+
+    fn ensure_main_visible(&self, window: &WebviewWindow) -> Result<(), String> {
+        if !self.gate.first_paint.load(Ordering::Acquire) {
+            return Err("主窗口尚未完成首屏绘制".to_string());
+        }
+        window
+            .show()
+            .map_err(|error| format!("显示主窗口失败：{error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("聚焦主窗口失败：{error}"))
     }
 }
 
@@ -139,7 +150,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "selection" && matches!(event, WindowEvent::Focused(false)) {
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
-                    state.selection.hide_window();
+                    state.selection.handle_focus_lost();
                 }
             }
         })
@@ -191,6 +202,9 @@ pub fn run() {
             get_selection_status,
             set_selection_language,
             selection_window_ready,
+            activate_selection,
+            begin_selection_drag,
+            end_selection_drag,
             get_selection_request,
             open_selection_in_main,
             dismiss_selection,
@@ -229,7 +243,25 @@ fn report_startup_stage(
     if window.label() != "main" {
         return Err("启动阶段只允许主窗口上报".to_string());
     }
-    state.startup.report_frontend_stage(&stage, window.label())
+    state
+        .startup
+        .report_frontend_stage(&stage, window.label())?;
+    if stage == "first_paint"
+        && state
+            .startup
+            .main_visible
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        if let Err(error) = window.show() {
+            state.startup.main_visible.store(false, Ordering::Release);
+            diagnostics::error(format!("startup.main.visible_failed reason={error}"));
+            return Err(format!("显示主窗口失败：{error}"));
+        }
+        state.startup.log("main.visible", window.label());
+        state.startup.gate.open();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -495,8 +527,27 @@ fn set_selection_language(
 }
 
 #[tauri::command]
-fn selection_window_ready(state: State<'_, AppState>) -> Result<Option<SelectionNotice>, String> {
+fn selection_window_ready(
+    state: State<'_, AppState>,
+) -> Result<Option<SelectionTriggerNotice>, String> {
     Ok(state.selection.window_ready())
+}
+
+#[tauri::command]
+fn activate_selection(state: State<'_, AppState>, trigger_id: String) -> Result<(), String> {
+    state.selection.activate_trigger(&trigger_id)
+}
+
+#[tauri::command]
+fn begin_selection_drag(state: State<'_, AppState>) -> Result<(), String> {
+    state.selection.begin_drag();
+    Ok(())
+}
+
+#[tauri::command]
+fn end_selection_drag(state: State<'_, AppState>) -> Result<(), String> {
+    state.selection.end_drag();
+    Ok(())
 }
 
 #[tauri::command]
@@ -508,7 +559,16 @@ fn get_selection_request(
 }
 
 #[tauri::command]
-fn open_selection_in_main(state: State<'_, AppState>, request_id: String) -> Result<(), String> {
+fn open_selection_in_main(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    state.selection.get_request(&request_id)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口尚未创建".to_string())?;
+    state.startup.ensure_main_visible(&main)?;
     state.selection.open_in_main(&request_id)
 }
 
@@ -2097,12 +2157,13 @@ mod tests {
     }
 
     #[test]
-    fn startup_stage_report_accepts_only_known_stages_and_opens_gate_at_first_paint() {
+    fn startup_stage_report_accepts_only_known_stages_without_showing_the_window() {
         let startup = StartupRuntime::new();
         assert!(startup.report_frontend_stage("dom_mounted", "main").is_ok());
         assert!(!startup.gate.first_paint.load(Ordering::Acquire));
         assert!(startup.report_frontend_stage("first_paint", "main").is_ok());
-        assert!(startup.gate.first_paint.load(Ordering::Acquire));
+        assert!(!startup.gate.first_paint.load(Ordering::Acquire));
+        assert!(!startup.main_visible.load(Ordering::Acquire));
         assert!(startup.report_frontend_stage("unexpected", "main").is_err());
     }
 

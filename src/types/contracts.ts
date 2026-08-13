@@ -25,14 +25,22 @@ export interface SelectionAnchor {
   height: number;
 }
 
+export interface SelectionTriggerNotice {
+  triggerId: string;
+  trigger: SelectionTrigger;
+  anchor: SelectionAnchor | null;
+}
+
 export interface SelectionNotice {
   requestId: string;
+  triggerId: string;
   trigger: SelectionTrigger;
   anchor: SelectionAnchor | null;
 }
 
 export interface SelectionUnavailable {
   requestId: string | null;
+  triggerId: string;
   trigger: SelectionTrigger;
   code: string;
   message: string;
@@ -251,25 +259,37 @@ function selectionTrigger(value: unknown): SelectionTrigger | null {
   return value === "shortcut" || value === "automatic" ? value : null;
 }
 
+export function decodeSelectionTriggerNotice(value: unknown): SelectionTriggerNotice | null {
+  if (!isRecord(value)) return null;
+  const triggerId = stringValue(value.triggerId);
+  const trigger = selectionTrigger(value.trigger);
+  const anchor = selectionAnchor(value.anchor);
+  return triggerId === null || trigger === null || anchor === undefined
+    ? null
+    : { triggerId, trigger, anchor };
+}
+
 export function decodeSelectionNotice(value: unknown): SelectionNotice | null {
   if (!isRecord(value)) return null;
   const requestId = stringValue(value.requestId);
+  const triggerId = stringValue(value.triggerId);
   const trigger = selectionTrigger(value.trigger);
   const anchor = selectionAnchor(value.anchor);
-  return requestId === null || trigger === null || anchor === undefined
+  return requestId === null || triggerId === null || trigger === null || anchor === undefined
     ? null
-    : { requestId, trigger, anchor };
+    : { requestId, triggerId, trigger, anchor };
 }
 
 export function decodeSelectionUnavailable(value: unknown): SelectionUnavailable | null {
   if (!isRecord(value)) return null;
   const requestId = value.requestId === null || value.requestId === undefined ? null : stringValue(value.requestId);
+  const triggerId = stringValue(value.triggerId);
   const trigger = selectionTrigger(value.trigger);
   const code = stringValue(value.code);
   const message = stringValue(value.message);
-  return trigger === null || code === null || message === null || (requestId === null && value.requestId !== null && value.requestId !== undefined)
+  return triggerId === null || trigger === null || code === null || message === null || (requestId === null && value.requestId !== null && value.requestId !== undefined)
     ? null
-    : { requestId, trigger, code, message };
+    : { requestId, triggerId, trigger, code, message };
 }
 
 export function decodeSelectionStatus(value: unknown): SelectionRuntimeStatus | null {

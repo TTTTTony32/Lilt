@@ -186,9 +186,16 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .selection-settings-grid { margin-top: 2px; }
 .settings-hint { margin: 14px 0 0; color: #92978e; font-size: 11px; line-height: 1.65; }
 
-.selection-body { height: 100%; min-width: 300px; min-height: 0; overflow: hidden; background: #fbfaf7; }
+.selection-body { height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: transparent; }
 .selection-body #root { height: 100%; min-height: 0; }
-.selection-window { width: 100%; height: 100%; min-height: 0; padding: 14px 16px 12px; display: flex; flex-direction: column; overflow: hidden; color: #394b3e; background: #fbfaf7; box-shadow: 0 12px 34px rgba(48, 61, 50, .16); }
+.selection-trigger-window { width: 100%; min-width: 48px; height: 100%; display: grid; place-items: center; background: transparent; }
+.selection-trigger-window.is-reading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border-radius: 10px; color: #657267; background: #fbfaf7; box-shadow: 0 8px 22px rgba(48, 61, 50, .14); font-size: 11px; }
+.selection-trigger-button { width: 38px; height: 38px; padding: 0; border: 0; border-radius: 50%; background: #4b6354; box-shadow: 0 3px 12px rgba(48, 61, 50, .28); cursor: pointer; }
+.selection-trigger-button:hover { background: #5e7966; }
+.selection-trigger-button:disabled { cursor: wait; opacity: .65; }
+.selection-trigger-reading { white-space: nowrap; }
+.selection-trigger-error { position: fixed; top: 52px; left: 0; max-width: 260px; padding: 6px 8px; color: #a25e53; background: #fbfaf7; box-shadow: 0 4px 14px rgba(48, 61, 50, .16); font-size: 11px; }
+.selection-window { width: 100%; min-width: 300px; height: 100%; min-height: 0; padding: 14px 16px 12px; display: flex; flex-direction: column; overflow: hidden; color: #394b3e; background: #fbfaf7; box-shadow: 0 12px 34px rgba(48, 61, 50, .16); }
 .selection-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; color: #4b6354; cursor: move; user-select: none; }
 .selection-header > div { display: flex; align-items: center; gap: 7px; font-family: Georgia, "Songti SC", serif; font-size: 16px; }
 .selection-mark { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: #fffdf8; background: #4b6354; font-size: 14px; }

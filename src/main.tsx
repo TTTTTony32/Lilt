@@ -7,7 +7,12 @@ import { invokeCommand } from "./lib/tauri";
 import "./styles.css";
 
 const isSelectionWindow = getCurrentWindow().label === "selection";
-if (isSelectionWindow) document.body.classList.add("selection-body");
+if (isSelectionWindow) {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+  document.getElementById("root")?.style.setProperty("background", "transparent");
+  document.body.classList.add("selection-body");
+}
 if (!isSelectionWindow) {
   void invokeCommand("report_startup_stage", { stage: "webview_script" }).catch(() => undefined);
 }

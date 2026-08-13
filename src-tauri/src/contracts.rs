@@ -53,8 +53,17 @@ pub struct SelectionAnchor {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct SelectionTriggerNotice {
+    pub trigger_id: String,
+    pub trigger: SelectionTrigger,
+    pub anchor: Option<SelectionAnchor>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SelectionNotice {
     pub request_id: String,
+    pub trigger_id: String,
     pub trigger: SelectionTrigger,
     pub anchor: Option<SelectionAnchor>,
 }
@@ -63,6 +72,7 @@ pub struct SelectionNotice {
 #[serde(rename_all = "camelCase")]
 pub struct SelectionUnavailable {
     pub request_id: Option<String>,
+    pub trigger_id: String,
     pub trigger: SelectionTrigger,
     pub code: String,
     pub message: String,

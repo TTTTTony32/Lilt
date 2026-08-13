@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Copy, ExternalLink, LoaderCircle, Square, X } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, PhysicalSize } from "@tauri-apps/api/window";
 import { describeError } from "./lib/errors";
 import { isDictionarySelection } from "./lib/selection";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import {
   decodeSelectionNotice,
   decodeSelectionRequest,
+  decodeSelectionTriggerNotice,
   decodeSelectionUnavailable,
   decodeTranslationCommandResult,
   decodeTranslationEvent,
@@ -14,6 +15,7 @@ import {
   decodeWordExampleEvent,
   type SelectionNotice,
   type SelectionRequestPayload,
+  type SelectionTriggerNotice,
   type TranslationCommandResult,
   type TranslationEvent,
   type WordExampleEvent,
@@ -53,8 +55,12 @@ const EMPTY_WORD_EXAMPLE: WordExampleState = {
 };
 
 type ViewStatus = "idle" | "loading" | "streaming" | "cancelling" | "completed" | "failed";
+type TriggerStatus = "hidden" | "available" | "reading" | "failed";
 
 export default function SelectionView() {
+  const [triggerNotice, setTriggerNotice] = useState<SelectionTriggerNotice | null>(null);
+  const [triggerStatus, setTriggerStatus] = useState<TriggerStatus>("hidden");
+  const [triggerError, setTriggerError] = useState<string | null>(null);
   const [selection, setSelection] = useState<SelectionRequestPayload | null>(null);
   const [route, setRoute] = useState<"dictionary" | "paragraph" | null>(null);
   const [translation, setTranslation] = useState("");
@@ -65,18 +71,46 @@ export default function SelectionView() {
   const [wordExample, setWordExample] = useState<WordExampleState>(EMPTY_WORD_EXAMPLE);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const activeTriggerId = useRef<string | null>(null);
   const activeSelectionId = useRef<string | null>(null);
   const activeTranslationId = useRef<string | null>(null);
   const activeWordExampleId = useRef<string | null>(null);
   const selectionScrollRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    if (!triggerNotice || selection) return;
+    const window = getCurrentWindow();
+    const size = triggerStatus === "failed"
+      ? new PhysicalSize(280, 80)
+      : triggerStatus === "reading"
+        ? new PhysicalSize(440, 320)
+        : new PhysicalSize(48, 48);
+    void window.setSize(size).catch(() => undefined);
+  }, [triggerNotice, triggerStatus, selection]);
+
+  useEffect(() => {
+    if (!selection) return;
+    const window = getCurrentWindow();
+    void window.setSize(new PhysicalSize(440, 320)).catch(() => undefined);
+  }, [selection]);
+
   const handleHeaderMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     if (event.button !== 0) return;
     if (event.target instanceof Element && event.target.closest("[data-no-drag], button, a, input, select, textarea")) return;
-    void getCurrentWindow().startDragging();
+    event.preventDefault();
+    void (async () => {
+      try {
+        await invokeCommand("begin_selection_drag");
+        await getCurrentWindow().startDragging();
+      } catch (reason) {
+        setError(describeError(reason, "无法拖动划词浮窗"));
+      } finally {
+        await invokeCommand("end_selection_drag").catch(() => undefined);
+      }
+    })();
   }, []);
 
-  const cancelCurrent = useCallback(async () => {
+  const cancelCurrent = useCallback(() => {
     const translationId = activeTranslationId.current;
     const wordExampleId = activeWordExampleId.current;
     activeTranslationId.current = null;
@@ -299,8 +333,14 @@ export default function SelectionView() {
   }, [applyTranslationResult]);
 
   const handleNotice = useCallback(async (notice: SelectionNotice) => {
-    await cancelCurrent();
+    if (activeTriggerId.current !== notice.triggerId) return;
+    cancelCurrent();
+    if (activeTriggerId.current !== notice.triggerId) return;
     activeSelectionId.current = notice.requestId;
+    activeTriggerId.current = null;
+    setTriggerNotice(null);
+    setTriggerStatus("hidden");
+    setTriggerError(null);
     setSelection(null);
     setRoute(null);
     setDictionary(null);
@@ -329,21 +369,64 @@ export default function SelectionView() {
     }
   }, [cancelCurrent, lookupWord, startTranslation]);
 
+  const handleTrigger = useCallback((notice: SelectionTriggerNotice) => {
+    if (activeTriggerId.current === notice.triggerId) return;
+    cancelCurrent();
+    activeTriggerId.current = notice.triggerId;
+    activeSelectionId.current = null;
+    setTriggerNotice(notice);
+    setTriggerStatus("available");
+    setTriggerError(null);
+    setSelection(null);
+    setRoute(null);
+    setDictionary(null);
+    setTranslation("");
+    setTranslationStatus("idle");
+    setTranslationCacheHit(false);
+    setWordExample(EMPTY_WORD_EXAMPLE);
+    setError(null);
+    setNotice(null);
+  }, [cancelCurrent]);
+
+  const activateTrigger = useCallback(async () => {
+    const notice = triggerNotice;
+    if (!notice || triggerStatus !== "available") return;
+    activeTriggerId.current = notice.triggerId;
+    setTriggerStatus("reading");
+    setTriggerError(null);
+    try {
+      await invokeCommand("activate_selection", { triggerId: notice.triggerId });
+    } catch (reason) {
+      if (activeTriggerId.current !== notice.triggerId) return;
+      setTriggerStatus("failed");
+      setTriggerError(describeError(reason, "无法读取选中文本"));
+    }
+  }, [triggerNotice, triggerStatus]);
+
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     const setup = async () => {
-      const eventNames = ["selection_available", "selection_unavailable", ...TRANSLATION_EVENTS, ...WORD_EXAMPLE_EVENTS];
+      const eventNames = ["selection_trigger_available", "selection_available", "selection_unavailable", ...TRANSLATION_EVENTS, ...WORD_EXAMPLE_EVENTS];
       const results = await Promise.allSettled(eventNames.map(async (name) => listenTo<unknown>(name, (payload) => {
         if (disposed) return;
-        if (name === "selection_available") {
+        if (name === "selection_trigger_available") {
+          const notice = decodeSelectionTriggerNotice(payload);
+          if (notice) handleTrigger(notice);
+        } else if (name === "selection_available") {
           const notice = decodeSelectionNotice(payload);
           if (notice) void handleNotice(notice);
         } else if (name === "selection_unavailable") {
           const value = decodeSelectionUnavailable(payload);
           if (value) {
-            setTranslationStatus("failed");
-            setError(value.message);
+            if (activeTriggerId.current) {
+              if (value.triggerId !== activeTriggerId.current) return;
+              setTriggerStatus("failed");
+              setTriggerError(value.message);
+            } else if (!activeSelectionId.current) {
+              setTranslationStatus("failed");
+              setError(value.message);
+            }
           }
         } else if (name.startsWith("translation_")) {
           const event = decodeTranslationEvent(name, payload);
@@ -362,8 +445,8 @@ export default function SelectionView() {
       if (disposed) return;
       try {
         const pendingRaw = await invokeCommand<unknown>("selection_window_ready");
-        const pending = pendingRaw === null ? null : decodeSelectionNotice(pendingRaw);
-        if (pending) void handleNotice(pending);
+        const pending = pendingRaw === null ? null : decodeSelectionTriggerNotice(pendingRaw);
+        if (pending) handleTrigger(pending);
       } catch (reason) {
         if (!disposed) setError(describeError(reason, "划词浮窗初始化失败"));
       }
@@ -374,27 +457,38 @@ export default function SelectionView() {
       unlisteners.splice(0).forEach((unlisten) => unlisten());
       void cancelCurrent();
     };
-  }, [cancelCurrent, handleNotice, handleTranslationEvent, handleWordExampleEvent]);
+  }, [cancelCurrent, handleNotice, handleTrigger, handleTranslationEvent, handleWordExampleEvent]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        void invokeCommand("dismiss_selection", { requestId: activeSelectionId.current });
+        const requestId = activeSelectionId.current;
+        activeTriggerId.current = null;
+        activeSelectionId.current = null;
+        cancelCurrent();
+        setTriggerNotice(null);
+        setTriggerStatus("hidden");
+        void invokeCommand("dismiss_selection", { requestId });
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [cancelCurrent]);
 
   useEffect(() => {
     if (selectionScrollRef.current) selectionScrollRef.current.scrollTop = 0;
   }, [selection?.requestId]);
 
   const cancel = async () => {
+    const requestId = activeSelectionId.current;
     setTranslationStatus("cancelling");
-    await cancelCurrent();
-    await invokeCommand("dismiss_selection", { requestId: activeSelectionId.current });
+    activeTriggerId.current = null;
+    activeSelectionId.current = null;
+    setTriggerNotice(null);
+    setTriggerStatus("hidden");
+    cancelCurrent();
+    await invokeCommand("dismiss_selection", { requestId });
   };
 
   const copy = async () => {
@@ -417,18 +511,43 @@ export default function SelectionView() {
     }
   };
 
+  const closeSelection = () => {
+    const requestId = activeSelectionId.current;
+    activeTriggerId.current = null;
+    activeSelectionId.current = null;
+    cancelCurrent();
+    setTriggerNotice(null);
+    setTriggerStatus("hidden");
+    void invokeCommand("dismiss_selection", { requestId });
+  };
+
   const dictionaryGroup = dictionary?.lookup?.entry.pos_groups[0];
   const isBusy = dictionaryLoading || translationStatus === "loading" || translationStatus === "streaming" || translationStatus === "cancelling" || wordExample.status === "streaming";
   const resultText = route === "paragraph" ? translation : wordExample.translation;
+
+  if (triggerNotice && !selection && triggerStatus !== "hidden" && triggerStatus !== "reading") {
+    return (
+      <main className="selection-trigger-window" role="dialog" aria-label="Lilt 划词操作">
+        <button
+          className="selection-trigger-button"
+          type="button"
+          aria-label="读取选中文本"
+          disabled={triggerStatus !== "available"}
+          onClick={() => void activateTrigger()}
+        />
+        {triggerStatus === "failed" && triggerError && <span className="selection-trigger-error">{triggerError}</span>}
+      </main>
+    );
+  }
 
   return (
     <main className="selection-window" role="dialog" aria-label="Lilt 划词翻译">
       <header className="selection-header" onMouseDown={handleHeaderMouseDown}>
         <div><span className="selection-mark">L</span><strong>Lilt</strong></div>
-        <button className="selection-close" type="button" data-no-drag onClick={() => void invokeCommand("dismiss_selection", { requestId: activeSelectionId.current })} aria-label="关闭"><X size={16} /></button>
+        <button className="selection-close" type="button" data-no-drag onClick={closeSelection} aria-label="关闭"><X size={16} /></button>
       </header>
       <div className="selection-scroll" ref={selectionScrollRef}>
-        {selection ? <p className="selection-source">{selection.sourceText}</p> : <p className="selection-placeholder">读取选区中……</p>}
+        {selection ? <p className="selection-source">{selection.sourceText}</p> : <p className="selection-placeholder">{triggerStatus === "reading" ? "正在读取选中文本……" : "读取选区中……"}</p>}
         {route === "dictionary" && (
           <section className="selection-result">
             {dictionaryLoading && <div className="selection-loading"><LoaderCircle className="spin" size={16} />正在查询词典</div>}
