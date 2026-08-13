@@ -152,9 +152,13 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
-            if window.label() == "selection" && matches!(event, WindowEvent::Focused(false)) {
+            if window.label() == "selection" {
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
-                    state.selection.handle_focus_lost();
+                    match event {
+                        WindowEvent::Focused(false) => state.selection.handle_focus_lost(),
+                        WindowEvent::Resized(_) => state.selection.handle_window_resized(),
+                        _ => {}
+                    }
                 }
             }
             if window.label() == "main" {

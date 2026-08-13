@@ -226,13 +226,13 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .selection-body #root { height: 100%; min-height: 0; }
 .selection-trigger-window { width: 100%; min-width: 48px; height: 100%; display: grid; place-items: center; background: transparent; }
 .selection-trigger-window.is-reading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border-radius: 10px; color: #657267; background: #fbfaf7; box-shadow: 0 8px 22px rgba(48, 61, 50, .14); font-size: 11px; }
-.selection-trigger-button { width: 40px; height: 40px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; box-shadow: 0 3px 12px rgba(48, 61, 50, .28); cursor: pointer; }
+.selection-trigger-button { width: 40px; height: 40px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
 .selection-trigger-button img { width: 40px; height: 40px; display: block; border-radius: 11px; }
 .selection-trigger-button:hover { filter: brightness(1.08); }
 .selection-trigger-button:disabled { cursor: wait; opacity: .65; }
 .selection-trigger-reading { white-space: nowrap; }
 .selection-trigger-error { position: fixed; top: 52px; left: 0; max-width: 260px; padding: 6px 8px; color: #a25e53; background: #fbfaf7; box-shadow: 0 4px 14px rgba(48, 61, 50, .16); font-size: 11px; }
-.selection-window { width: 100%; min-width: 300px; height: 100%; min-height: 0; padding: 14px 16px 12px; display: flex; flex-direction: column; overflow: hidden; color: #394b3e; background: #fbfaf7; box-shadow: 0 12px 34px rgba(48, 61, 50, .16); }
+.selection-window { width: 100%; min-width: 300px; height: 100%; min-height: 0; padding: 14px 16px 12px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgba(91, 111, 96, .22); border-radius: 12px; color: #394b3e; background: #fbfaf7; box-shadow: 0 10px 28px rgba(48, 61, 50, .11); }
 .selection-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; color: #4b6354; cursor: move; user-select: none; }
 .selection-header > div { display: flex; align-items: center; gap: 7px; font-family: Georgia, "Songti SC", serif; font-size: 16px; }
 .selection-mark { width: 22px; height: 22px; display: block; border-radius: 6px; }

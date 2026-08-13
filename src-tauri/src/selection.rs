@@ -27,6 +27,7 @@ const SELECTION_OPEN_MAIN_EVENT: &str = "selection_open_main";
 const SELECTION_TTL: Duration = Duration::from_secs(120);
 const AUTOMATIC_DEBOUNCE: Duration = Duration::from_millis(500);
 const DRAG_FOCUS_GRACE: Duration = Duration::from_millis(250);
+const RESIZE_FOCUS_GRACE: Duration = Duration::from_millis(750);
 
 #[derive(Clone)]
 pub struct SelectionService {
@@ -52,6 +53,7 @@ struct SelectionInner {
     last_signature: Option<SelectionSignature>,
     dragging: bool,
     drag_finished_at: Option<Instant>,
+    last_resized_at: Option<Instant>,
     content_width: i64,
     content_height: i64,
 }
@@ -121,6 +123,7 @@ impl SelectionService {
                 last_signature: None,
                 dragging: false,
                 drag_finished_at: None,
+                last_resized_at: None,
                 content_width: DEFAULT_SELECTION_WINDOW_WIDTH,
                 content_height: DEFAULT_SELECTION_WINDOW_HEIGHT,
             })),
@@ -448,6 +451,12 @@ impl SelectionService {
         }
     }
 
+    pub fn handle_window_resized(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.last_resized_at = Some(Instant::now());
+        }
+    }
+
     pub fn handle_focus_lost(&self) {
         let should_hide = self
             .inner
@@ -458,6 +467,7 @@ impl SelectionService {
                         .drag_finished_at
                         .map(|finished_at| finished_at.elapsed() >= DRAG_FOCUS_GRACE)
                         .unwrap_or(true)
+                    && !recently_resized(inner.last_resized_at)
                     && inner.current_trigger.is_none()
             })
             .unwrap_or(false);
@@ -797,6 +807,12 @@ impl SelectionService {
         }
         let _ = window.show();
     }
+}
+
+fn recently_resized(last_resized_at: Option<Instant>) -> bool {
+    last_resized_at
+        .map(|resized_at| resized_at.elapsed() < RESIZE_FOCUS_GRACE)
+        .unwrap_or(false)
 }
 
 fn normalize_shortcut(shortcut: &str) -> String {
@@ -1162,7 +1178,14 @@ fn read_prepared_selection(prepared: &PreparedSelection) -> Option<SelectionCand
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_shortcut;
+    use super::{normalize_shortcut, recently_resized};
+    use std::time::Instant;
+
+    #[test]
+    fn resize_grace_only_applies_after_a_resize_event() {
+        assert!(!recently_resized(None));
+        assert!(recently_resized(Some(Instant::now())));
+    }
 
     #[test]
     fn normalize_shortcut_accepts_common_modifier_aliases() {
