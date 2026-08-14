@@ -18,6 +18,7 @@ import {
   type ModelInfo,
   type PersonalDictionaryEntry,
   type Prompt,
+  type ThinkingEffort,
   type TranslationCommandResult,
   type TranslationEvent,
   type TranslationStatus,
@@ -1804,7 +1805,8 @@ function SettingsView({
 }) {
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
-  const [promptId, setPromptId] = useState(snapshot.provider.promptId);
+  const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
+  const [availableModels, setAvailableModels] = useState<ModelInfo[] | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [settings, setSettings] = useState<AppSettings>(snapshot.settings);
   const [selectionMode, setSelectionMode] = useState(snapshot.settings.selectionMode);
@@ -1812,11 +1814,14 @@ function SettingsView({
   const [selectionStatus, setSelectionStatus] = useState<SelectionRuntimeStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [providerMessage, setProviderMessage] = useState<string | null>(null);
+  const [providerError, setProviderError] = useState<string | null>(null);
 
   useEffect(() => {
     setBaseUrl(snapshot.provider.baseUrl);
     setModelId(snapshot.provider.modelId);
-    setPromptId(snapshot.provider.promptId);
+    setThinkingEffort(snapshot.provider.thinkingEffort ?? "none");
+    setAvailableModels(null);
     setSettings(snapshot.settings);
     setSelectionMode(snapshot.settings.selectionMode);
     setSelectionShortcut(snapshot.settings.selectionShortcut);
@@ -1849,17 +1854,22 @@ function SettingsView({
   }, [snapshot.settings.selectionMode, snapshot.settings.selectionShortcut]);
 
   const saveProvider = async () => {
-    setError(null);
-    setMessage(null);
+    setProviderError(null);
+    setProviderMessage(null);
     try {
-      await invokeCommand("save_provider_config", { baseUrl, modelId, promptId, apiKey: apiKey || null });
+      await invokeCommand("save_provider_config", {
+        baseUrl,
+        modelId,
+        thinkingEffort,
+        apiKey: apiKey || null,
+      });
       setApiKey("");
       const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
       onSaved(next);
-      setMessage("Provider 设置已保存");
+      setProviderMessage("Provider 设置已保存");
     } catch (reason) {
-      setError(describeError(reason, "Provider 设置保存失败"));
-      setMessage(null);
+      setProviderError(describeError(reason, "Provider 设置保存失败"));
+      setProviderMessage(null);
     }
   };
 
@@ -1907,17 +1917,22 @@ function SettingsView({
   };
 
   const fetchModels = async () => {
-    setError(null);
-    setMessage(null);
+    setProviderError(null);
+    setProviderMessage(null);
     try {
       const models = await invokeCommand<ModelInfo[]>("fetch_models", {
         baseUrl: baseUrl.trim() || null,
         apiKey: apiKey.trim() || null,
       });
-      setMessage(`模型列表已更新，共 ${models.length} 个模型`);
+      setAvailableModels(models.length > 0 ? models : null);
+      if (models.length > 0 && !models.some((model) => model.id === modelId)) {
+        setModelId(models[0]?.id ?? modelId);
+      }
+      setProviderMessage(`模型列表已更新，共 ${models.length} 个模型`);
     } catch (reason) {
-      setError(describeError(reason, "模型列表读取失败，可手动填写 Model ID"));
-      setMessage(null);
+      setAvailableModels(null);
+      setProviderError(describeError(reason, "模型列表读取失败，可手动填写 Model ID"));
+      setProviderMessage(null);
     }
   };
 
@@ -1957,13 +1972,15 @@ function SettingsView({
       <PageTitle eyebrow="SETTINGS" title="设置" description="配置模型连接，并管理本地历史与段落缓存。" />
       <div className="settings-stack">
         <div className="simple-card">
-          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>首版仅支持这一种协议</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
+          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>即将支持其他协议。</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" /></label>
-            <label>Model ID<input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" /></label>
-            <label>Prompt<select value={promptId} onChange={(event) => setPromptId(event.target.value)}>{snapshot.prompts.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.name} · v{prompt.version}</option>)}</select></label>
+            <label>Model ID{availableModels ? <select value={modelId} onChange={(event) => setModelId(event.target.value)}>{!availableModels.some((model) => model.id === modelId) && <option value={modelId}>当前：{modelId}</option>}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select> : <input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" />}</label>
+            <label>思考强度<select value={thinkingEffort} onChange={(event) => setThinkingEffort(event.target.value as ThinkingEffort)}><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
             <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
           </div>
+          {providerMessage && <p className="notice-message settings-message">{providerMessage}</p>}
+          {providerError && <p className="error-message settings-message">{providerError}</p>}
           <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。</span><div className="button-group"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button><button className="primary-button small-button" type="button" onClick={() => void saveProvider()}>保存 Provider</button></div></div>
         </div>
 

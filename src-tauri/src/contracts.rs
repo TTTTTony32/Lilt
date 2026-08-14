@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub const DEFAULT_PROVIDER_ID: &str = "default";
 pub const DEFAULT_PROMPT_ID: &str = "builtin-general";
+pub const DEFAULT_THINKING_EFFORT: ThinkingEffort = ThinkingEffort::None;
 pub const DEFAULT_GLOSSARY_ID: &str = "global";
 pub const DEFAULT_HISTORY_RETENTION: i64 = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: i64 = 256 * 1024 * 1024;
@@ -74,6 +75,41 @@ pub enum CloseBehavior {
     Ask,
     Exit,
     Tray,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingEffort {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for ThinkingEffort {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ThinkingEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub(crate) fn from_storage(value: &str) -> Self {
+        match value {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            _ => Self::None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,6 +201,7 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub model_id: String,
     pub prompt_id: String,
+    pub thinking_effort: ThinkingEffort,
     pub has_api_key: bool,
 }
 
@@ -573,6 +610,7 @@ pub struct ProviderRecord {
     pub base_url: String,
     pub model_id: String,
     pub prompt_id: String,
+    pub thinking_effort: ThinkingEffort,
 }
 
 #[derive(Debug, Clone)]
@@ -602,7 +640,7 @@ impl DictionaryState {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_selection_window_dimension, parse_selection_window_dimension,
+        clamp_selection_window_dimension, parse_selection_window_dimension, ThinkingEffort,
         TranslationCommandResult, TranslationOutcome, DEFAULT_SELECTION_WINDOW_HEIGHT,
         DEFAULT_SELECTION_WINDOW_WIDTH, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
         MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
@@ -705,5 +743,18 @@ mod tests {
         assert_eq!(value["content"], "译文");
         assert_eq!(value["cacheHit"], true);
         assert_eq!(value["message"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn thinking_effort_serializes_to_the_provider_wire_values() {
+        for (effort, expected) in [
+            (ThinkingEffort::None, "none"),
+            (ThinkingEffort::Low, "low"),
+            (ThinkingEffort::Medium, "medium"),
+            (ThinkingEffort::High, "high"),
+        ] {
+            assert_eq!(serde_json::to_value(effort).unwrap(), expected);
+            assert_eq!(effort.as_str(), expected);
+        }
     }
 }

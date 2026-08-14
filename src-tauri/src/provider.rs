@@ -1,5 +1,5 @@
 use crate::{
-    contracts::{ModelInfo, TranslationDelta},
+    contracts::{ModelInfo, ThinkingEffort, TranslationDelta},
     diagnostics,
 };
 use futures_util::StreamExt;
@@ -53,6 +53,7 @@ pub struct StreamRequest<'a> {
     pub system_prompt: &'a str,
     pub user_text: &'a str,
     pub cancel: &'a CancellationToken,
+    pub thinking_effort: &'a ThinkingEffort,
 }
 
 pub struct ChatStreamRequest<'a> {
@@ -64,6 +65,7 @@ pub struct ChatStreamRequest<'a> {
     pub user_text: &'a str,
     pub cancel: &'a CancellationToken,
     pub operation: &'a str,
+    pub thinking_effort: &'a ThinkingEffort,
 }
 
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -136,6 +138,7 @@ pub async fn translate_stream(request: StreamRequest<'_>) -> Result<String, Prov
             user_text: request.user_text,
             cancel: request.cancel,
             operation: "translate",
+            thinking_effort: request.thinking_effort,
         },
         |content| {
             app.emit(
@@ -215,14 +218,7 @@ async fn stream_once(
             .bearer_auth(request.api_key)
             .header("Accept", "text/event-stream")
             .timeout(TRANSLATION_REQUEST_TIMEOUT)
-            .json(&json!({
-                "model": request.model_id,
-                "stream": true,
-                "messages": [
-                    { "role": "system", "content": request.system_prompt },
-                    { "role": "user", "content": request.user_text }
-                ]
-            }))
+            .json(&chat_completion_payload(request))
             .send() => result.map_err(|error| request_error("翻译", error))?,
     };
     diagnostics::info(format!(
@@ -272,6 +268,18 @@ async fn stream_once(
         return Err(ProviderError::Protocol("流式响应没有返回译文".to_string()));
     }
     Ok(translated)
+}
+
+fn chat_completion_payload(request: &ChatStreamRequest<'_>) -> Value {
+    json!({
+        "model": request.model_id,
+        "stream": true,
+        "reasoning_effort": request.thinking_effort.as_str(),
+        "messages": [
+            { "role": "system", "content": request.system_prompt },
+            { "role": "user", "content": request.user_text }
+        ]
+    })
 }
 
 fn parse_sse_line(line: &str) -> Result<Option<String>, ProviderError> {
@@ -376,6 +384,7 @@ fn ensure_success(response: &reqwest::Response) -> Result<(), ProviderError> {
 #[cfg(test)]
 mod tests {
     use super::{normalize_base_url, parse_model_payload, parse_sse_line, ProviderError};
+    use crate::contracts::ThinkingEffort;
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -469,5 +478,30 @@ mod tests {
     #[test]
     fn parses_done_marker_as_no_content() {
         assert_eq!(parse_sse_line("data: [DONE]").unwrap(), None);
+    }
+
+    #[test]
+    fn chat_completion_request_serializes_every_reasoning_effort() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+        ] {
+            let request = super::ChatStreamRequest {
+                request_id: "request",
+                base_url: "https://example.com/v1",
+                api_key: "key",
+                model_id: "model",
+                system_prompt: "system",
+                user_text: "user",
+                cancel: &cancellation,
+                operation: "test",
+                thinking_effort: &effort,
+            };
+            let payload = super::chat_completion_payload(&request);
+            assert_eq!(payload["reasoning_effort"], effort.as_str());
+        }
     }
 }

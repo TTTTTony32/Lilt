@@ -14,12 +14,13 @@ use contracts::{
     DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryState, GlossaryTerm,
     ModelInfo, ParagraphExample, PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode,
     SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
-    SelectionTriggerNotice, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
-    TranslationFailed, TranslationRequest, TranslationStarted, WordExampleCancelled,
-    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
-    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID,
-    DICTIONARY_HISTORY_LIMIT, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, WORD_EXAMPLE_PROTOCOL_VERSION,
+    SelectionTriggerNotice, ThinkingEffort, TranslationCancelled, TranslationCommandResult,
+    TranslationCompleted, TranslationFailed, TranslationRequest, TranslationStarted,
+    WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted, WordExampleFailed,
+    WordExamplePosDelta, WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
+    DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT, MAX_SELECTION_WINDOW_HEIGHT,
+    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
+    WORD_EXAMPLE_PROTOCOL_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -422,6 +423,7 @@ fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
             base_url: provider.base_url,
             model_id: provider.model_id,
             prompt_id: provider.prompt_id,
+            thinking_effort: provider.thinking_effort,
             has_api_key,
         },
         models,
@@ -440,15 +442,14 @@ fn save_provider_config(
     state: State<'_, AppState>,
     base_url: String,
     model_id: String,
-    prompt_id: String,
+    thinking_effort: ThinkingEffort,
     api_key: Option<String>,
 ) -> Result<(), String> {
     let normalized_url =
         provider::normalize_base_url(&base_url).map_err(|error| error.to_string())?;
     let model_id = model_id.trim();
-    let prompt_id = prompt_id.trim();
-    if model_id.is_empty() || prompt_id.is_empty() {
-        return Err("Model ID 和 Prompt 不能为空".to_string());
+    if model_id.is_empty() {
+        return Err("Model ID 不能为空".to_string());
     }
     if api_key.is_some() {
         secrets::save_api_key(DEFAULT_PROVIDER_ID, api_key.as_deref())?;
@@ -463,7 +464,7 @@ fn save_provider_config(
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::save_provider(&connection, &normalized_url, model_id, prompt_id)
+    db::save_provider(&connection, &normalized_url, model_id, thinking_effort)
 }
 
 #[tauri::command]
@@ -863,6 +864,7 @@ async fn translate_impl(
         system_prompt: &prepared.system_prompt,
         user_text: &source_text,
         cancel: &cancellation,
+        thinking_effort: &prepared.provider.thinking_effort,
     })
     .await;
     unregister_request(&state, &request_id);
@@ -1754,6 +1756,7 @@ async fn generate_word_example_impl(
             user_text: &user_text,
             cancel: &cancellation,
             operation: "word_example",
+            thinking_effort: &prepared.provider.thinking_effort,
         },
         |content| {
             for delta in parser.push(&content)? {

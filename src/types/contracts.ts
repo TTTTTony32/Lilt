@@ -73,8 +73,11 @@ export interface ProviderConfig {
   baseUrl: string;
   modelId: string;
   promptId: string;
+  thinkingEffort: ThinkingEffort;
   hasApiKey: boolean;
 }
+
+export type ThinkingEffort = "none" | "low" | "medium" | "high";
 
 export interface ModelInfo {
   id: string;
@@ -465,6 +468,7 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     baseUrl: "https://api.openai.com/v1",
     modelId: "gpt-4o-mini",
     promptId: "builtin-general",
+    thinkingEffort: "none",
     hasApiKey: false,
   },
   models: [],

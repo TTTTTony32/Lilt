@@ -1,13 +1,13 @@
 use crate::contracts::{
     parse_selection_window_dimension, AppSettings, CacheStats, CachedTranslation, CloseBehavior,
     DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, ModelInfo, PersonalDictionaryEntry, Prompt,
-    ProviderRecord, SelectionMode, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
+    ProviderRecord, SelectionMode, ThinkingEffort, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
     DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID,
     DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
-    DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_WORD_AI_CACHE_ENABLED,
-    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
-    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-    MIN_SELECTION_WINDOW_WIDTH,
+    DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT,
+    DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
+    DICTIONARY_SQLITE_SCHEMA_VERSION, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -105,7 +105,8 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 name TEXT NOT NULL,
                 base_url TEXT NOT NULL,
                 model_id TEXT NOT NULL,
-                prompt_id TEXT NOT NULL
+                prompt_id TEXT NOT NULL,
+                thinking_effort TEXT NOT NULL DEFAULT 'none'
             );
 
             CREATE TABLE IF NOT EXISTS models (
@@ -268,15 +269,20 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("数据库迁移失败：{error}"))?;
 
+    ensure_provider_thinking_effort_column(connection)?;
+
     connection
         .execute(
-            "INSERT OR IGNORE INTO providers (id, name, base_url, model_id, prompt_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO providers
+                (id, name, base_url, model_id, prompt_id, thinking_effort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 DEFAULT_PROVIDER_ID,
                 "OpenAI-compatible",
                 "https://api.openai.com/v1",
                 DEFAULT_MODEL_ID,
-                DEFAULT_PROMPT_ID
+                DEFAULT_PROMPT_ID,
+                DEFAULT_THINKING_EFFORT.as_str(),
             ],
         )
         .map_err(|error| format!("默认 Provider 初始化失败：{error}"))?;
@@ -329,6 +335,27 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("默认术语表初始化失败：{error}"))?;
 
+    Ok(())
+}
+
+fn ensure_provider_thinking_effort_column(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(providers)")
+        .map_err(|error| format!("检查 Provider 数据库结构失败：{error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("读取 Provider 数据库结构失败：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取 Provider 数据库结构失败：{error}"))?;
+    if columns.iter().any(|column| column == "thinking_effort") {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "ALTER TABLE providers ADD COLUMN thinking_effort TEXT NOT NULL DEFAULT 'none'",
+            [],
+        )
+        .map_err(|error| format!("升级 Provider 数据库结构失败：{error}"))?;
     Ok(())
 }
 
@@ -482,7 +509,8 @@ pub fn save_selection_window_size(
 pub fn get_provider(connection: &Connection) -> Result<ProviderRecord, String> {
     connection
         .query_row(
-            "SELECT id, name, base_url, model_id, prompt_id FROM providers WHERE id = ?1",
+            "SELECT id, name, base_url, model_id, prompt_id, thinking_effort
+             FROM providers WHERE id = ?1",
             params![DEFAULT_PROVIDER_ID],
             |row| {
                 Ok(ProviderRecord {
@@ -491,6 +519,7 @@ pub fn get_provider(connection: &Connection) -> Result<ProviderRecord, String> {
                     base_url: row.get(2)?,
                     model_id: row.get(3)?,
                     prompt_id: row.get(4)?,
+                    thinking_effort: ThinkingEffort::from_storage(&row.get::<_, String>(5)?),
                 })
             },
         )
@@ -501,12 +530,19 @@ pub fn save_provider(
     connection: &Connection,
     base_url: &str,
     model_id: &str,
-    prompt_id: &str,
+    thinking_effort: ThinkingEffort,
 ) -> Result<(), String> {
     connection
         .execute(
-            "UPDATE providers SET base_url = ?1, model_id = ?2, prompt_id = ?3 WHERE id = ?4",
-            params![base_url, model_id, prompt_id, DEFAULT_PROVIDER_ID],
+            "UPDATE providers
+             SET base_url = ?1, model_id = ?2, thinking_effort = ?3
+             WHERE id = ?4",
+            params![
+                base_url,
+                model_id,
+                thinking_effort.as_str(),
+                DEFAULT_PROVIDER_ID
+            ],
         )
         .map_err(|error| format!("保存 Provider 失败：{error}"))?;
     Ok(())
@@ -1517,7 +1553,57 @@ mod tests {
             base_url: "https://example.com/v1".to_string(),
             model_id: DEFAULT_MODEL_ID.to_string(),
             prompt_id: DEFAULT_PROMPT_ID.to_string(),
+            thinking_effort: DEFAULT_THINKING_EFFORT,
         }
+    }
+
+    #[test]
+    fn legacy_provider_table_gets_thinking_effort_column_with_none_default() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE providers (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    prompt_id TEXT NOT NULL
+                );
+                INSERT INTO providers (id, name, base_url, model_id, prompt_id)
+                VALUES ('default', 'OpenAI-compatible', 'https://example.com/v1', 'legacy-model', 'builtin-general');",
+            )
+            .expect("legacy provider schema should be created");
+
+        migrate(&connection).expect("legacy provider schema should migrate");
+
+        let provider = get_provider(&connection).expect("migrated provider should be readable");
+        assert_eq!(provider.thinking_effort, ThinkingEffort::None);
+        assert_eq!(provider.model_id, "legacy-model");
+        assert!(connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name = 'thinking_effort'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1);
+    }
+
+    #[test]
+    fn provider_save_round_trips_thinking_effort_without_overwriting_prompt() {
+        let connection = test_connection();
+        save_provider(
+            &connection,
+            "https://example.com/v1",
+            "reasoning-model",
+            ThinkingEffort::High,
+        )
+        .expect("provider save should succeed");
+
+        let provider = get_provider(&connection).expect("provider should be readable");
+        assert_eq!(provider.model_id, "reasoning-model");
+        assert_eq!(provider.thinking_effort, ThinkingEffort::High);
+        assert_eq!(provider.prompt_id, DEFAULT_PROMPT_ID);
     }
 
     #[test]
