@@ -20,7 +20,7 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("Lilt");
-    builder = builder.icon(icons::high_resolution_icon()?);
+    builder = builder.icon(icons::tray_icon()?);
     let _tray = builder.build(&handle)?;
     Ok(())
 }
