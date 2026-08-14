@@ -244,6 +244,14 @@ pub fn run() {
                 .selection
                 .set_window_size(selection_window_width, selection_window_height);
             app.manage(state.clone());
+            #[cfg(windows)]
+            if let Some(main_window) = app.get_webview_window("main") {
+                if let Err(error) = set_main_taskbar_icon(&main_window) {
+                    diagnostics::warn(format!("window.icon.taskbar_failed reason={error}"));
+                } else {
+                    diagnostics::info("window.icon.taskbar_ready source=256px_png");
+                }
+            }
             #[cfg(desktop)]
             {
                 tray::init_tray(app.handle()).map_err(|error| {
@@ -310,6 +318,79 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(windows)]
+fn set_main_taskbar_icon(window: &WebviewWindow) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::{LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{CreateIcon, SendMessageW, ICON_BIG, WM_SETICON},
+    };
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
+        "../icons/128x128@2x.png"
+    )));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|error| format!("读取任务栏图标失败：{error}"))?;
+    let mut rgba = vec![
+        0;
+        reader.output_buffer_size().ok_or_else(|| {
+            "任务栏图标尺寸超出可处理范围".to_string()
+        })?
+    ];
+    let output = reader
+        .next_frame(&mut rgba)
+        .map_err(|error| format!("解码任务栏图标失败：{error}"))?;
+    if output.color_type != png::ColorType::Rgba {
+        return Err("任务栏图标不是 RGBA 格式".to_string());
+    }
+    rgba.truncate(output.buffer_size());
+    let image = tauri::image::Image::new_owned(rgba, output.width, output.height);
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+        return Err(format!("默认窗口图标尺寸无效：{width}x{height}"));
+    }
+
+    let mut bgra = image.rgba().to_vec();
+    if bgra.len() != (width as usize) * (height as usize) * 4 {
+        return Err("默认窗口图标像素数据长度无效".to_string());
+    }
+    let mut and_mask = Vec::with_capacity((width as usize) * (height as usize));
+    for pixel in bgra.chunks_exact_mut(4) {
+        and_mask.push(pixel[3].wrapping_sub(u8::MAX));
+        pixel.swap(0, 2);
+    }
+
+    let icon = unsafe {
+        CreateIcon(
+            None,
+            width as i32,
+            height as i32,
+            1,
+            32,
+            and_mask.as_ptr(),
+            bgra.as_ptr(),
+        )
+    }
+    .map_err(|error| format!("创建任务栏图标失败：{error}"))?;
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("获取主窗口句柄失败：{error}"))?;
+
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(icon.0 as isize)),
+        );
+    }
+
+    // WM_SETICON 不会复制 HICON。Windows 句柄需保持到进程结束，避免任务栏重绘时失效。
+    let _ = icon;
+    Ok(())
 }
 
 fn initialise_database(data_dir: &PathBuf) -> Result<(), String> {

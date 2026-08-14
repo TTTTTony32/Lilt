@@ -1885,6 +1885,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "keyring",
+ "png 0.18.1",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
