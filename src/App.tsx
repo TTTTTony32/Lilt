@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Bookmark, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
+import { Bookmark, Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
 import liltLogo from "../lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -83,6 +83,10 @@ interface TranslationSummary {
 
 function formatTranslationSummary(summary: TranslationSummary): string {
   return `${(summary.durationMs / 1000).toFixed(2)}秒·${summary.cacheHit ? "缓存命中" : "未命中缓存"}`;
+}
+
+function languageLabel(value: string): string {
+  return LANGUAGE_OPTIONS.find(([, code]) => code === value)?.[0] ?? value;
 }
 
 function formatBytes(bytes: number): string {
@@ -1310,6 +1314,139 @@ interface TranslateViewProps {
   onCopy: () => void;
 }
 
+function LanguageSelect({
+  id,
+  ariaLabel,
+  value,
+  onChange,
+}: {
+  id: string;
+  ariaLabel: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [open, setOpen] = useState(false);
+  const selectedIndex = Math.max(0, LANGUAGE_OPTIONS.findIndex(([, code]) => code === value));
+  const [highlightedIndex, setHighlightedIndex] = useState(selectedIndex);
+
+  useEffect(() => {
+    if (!open) return;
+    setHighlightedIndex(selectedIndex);
+    const frame = window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && containerRef.current?.contains(event.target)) return;
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [open, selectedIndex]);
+
+  const focusOption = (index: number) => {
+    setHighlightedIndex(index);
+    window.requestAnimationFrame(() => optionRefs.current[index]?.focus());
+  };
+
+  const selectValue = (nextValue: string) => {
+    onChange(nextValue);
+    setOpen(false);
+    buttonRef.current?.focus();
+  };
+
+  const handleButtonKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      setOpen(false);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = open
+        ? (highlightedIndex + direction + LANGUAGE_OPTIONS.length) % LANGUAGE_OPTIONS.length
+        : selectedIndex;
+      setOpen(true);
+      focusOption(nextIndex);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen((current) => !current);
+    }
+  };
+
+  const handleOptionKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number, optionValue: string) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      focusOption((index + direction + LANGUAGE_OPTIONS.length) % LANGUAGE_OPTIONS.length);
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      focusOption(event.key === "Home" ? 0 : LANGUAGE_OPTIONS.length - 1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectValue(optionValue);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      buttonRef.current?.focus();
+      return;
+    }
+    if (event.key === "Tab") setOpen(false);
+  };
+
+  return (
+    <div className="translation-language-control" ref={containerRef}>
+      <button
+        className="translation-language-button"
+        ref={buttonRef}
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={`${id}-menu`}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={handleButtonKeyDown}
+      >
+        <span>{languageLabel(value)}</span>
+        <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="translation-language-menu" id={`${id}-menu`} role="listbox" aria-label={ariaLabel}>
+          {LANGUAGE_OPTIONS.map(([label, optionValue], index) => (
+            <button
+              className={`translation-language-option ${index === selectedIndex ? "is-selected" : ""} ${index === highlightedIndex ? "is-highlighted" : ""}`}
+              key={optionValue}
+              ref={(element) => { optionRefs.current[index] = element; }}
+              type="button"
+              role="option"
+              aria-selected={index === selectedIndex}
+              onMouseEnter={() => setHighlightedIndex(index)}
+              onClick={() => selectValue(optionValue)}
+              onKeyDown={(event) => handleOptionKeyDown(event, index, optionValue)}
+            >
+              <span>{label}</span>
+              {index === selectedIndex && <Check size={14} strokeWidth={2} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TranslateView(props: TranslateViewProps) {
   const isBusy = props.status === "streaming" || props.status === "cancelling";
   return (
@@ -1324,15 +1461,10 @@ function TranslateView(props: TranslateViewProps) {
 
       <div className="translation-grid">
         <div className="translation-column">
-          <label className="translation-language" htmlFor="source-language">
+          <div className="translation-language">
             <span>原文</span>
-            <span className="translation-language-control">
-              <select id="source-language" aria-label="原文语言" value={props.sourceLanguage} onChange={(event) => props.onSourceLanguageChange(event.target.value)}>
-                {LANGUAGE_OPTIONS.map(([label, value]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-              <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
-            </span>
-          </label>
+            <LanguageSelect id="source-language" ariaLabel="原文语言" value={props.sourceLanguage} onChange={props.onSourceLanguageChange} />
+          </div>
           <div className="translation-panel">
             <div className="translation-scroll-region">
               <textarea
@@ -1347,15 +1479,10 @@ function TranslateView(props: TranslateViewProps) {
         </div>
 
         <div className="translation-column">
-          <label className="translation-language" htmlFor="target-language">
+          <div className="translation-language">
             <span>译文</span>
-            <span className="translation-language-control">
-              <select id="target-language" aria-label="译文语言" value={props.targetLanguage} onChange={(event) => props.onTargetLanguageChange(event.target.value)}>
-                {LANGUAGE_OPTIONS.map(([label, value]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-              <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
-            </span>
-          </label>
+            <LanguageSelect id="target-language" ariaLabel="译文语言" value={props.targetLanguage} onChange={props.onTargetLanguageChange} />
+          </div>
           <div className="translation-panel result-panel">
             <div className="translation-scroll-region">
               <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
