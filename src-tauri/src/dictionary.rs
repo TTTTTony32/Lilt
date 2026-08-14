@@ -1179,7 +1179,7 @@ async fn update_impl(
     let _ = fs::remove_file(&part_path);
 
     let client = Client::builder()
-        .user_agent("Lilt/0.1.0")
+        .user_agent(concat!("Lilt/", env!("CARGO_PKG_VERSION")))
         .timeout(DOWNLOAD_TIMEOUT)
         .build()
         .map_err(|error| format!("创建词典网络客户端失败：{error}"))?;
