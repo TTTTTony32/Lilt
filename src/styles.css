@@ -60,6 +60,10 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .main-content { position: relative; z-index: 1; flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 68px 56px 70px; scrollbar-width: none; }
 .main-content::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .main-content.translate-main-content { overflow-y: hidden; overscroll-behavior: none; }
+.main-content.bounded-list-main-content { overflow-y: hidden; overscroll-behavior: none; }
+.bounded-list-main-content .page-transition-stack,
+.bounded-list-main-content .page-transition-layer-incoming,
+.bounded-list-main-content .page-view { height: 100%; min-height: 0; }
 .page-transition-stack { position: relative; min-width: 0; }
 .page-transition-layer { min-width: 0; }
 .page-transition-layer-incoming { position: relative; z-index: 1; animation: page-enter var(--motion-standard-duration) var(--motion-ease) both; }
@@ -165,6 +169,16 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .text-button { padding: 5px; border: 0; color: #809383; background: transparent; font-size: 11px; }
 .text-button:hover { text-decoration: underline; }
 .danger-text { color: #a4776f; }
+.bounded-list-page { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.bounded-list-page > .page-heading,
+.bounded-list-page > .simple-card { flex: 0 0 auto; }
+.bounded-list-page > .bounded-list-card { flex: 1 1 auto; min-height: 0; margin-bottom: 0; display: flex; flex-direction: column; }
+.bounded-list-card-scroll { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; scrollbar-width: none; }
+.bounded-list-card-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.list-load-more { width: 100%; min-height: 34px; margin-top: 8px; padding: 0; border: 0; border-radius: 6px; color: #809383; background: transparent; font-size: 11px; transition: color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease); }
+.list-load-more:hover { color: #38513f; background: #edf0ea; }
+.danger-icon-button { color: #a4776f; }
+.danger-icon-button:hover:not(:disabled) { color: #a25e53; background: #f5e9e6; }
 .history-row { padding: 15px 2px; border-bottom: 1px solid #eeece6; }
 .history-row:last-child { border-bottom: 0; }
 .history-meta { display: flex; align-items: center; gap: 11px; color: #a0a39a; font-size: 10px; }

@@ -1093,6 +1093,7 @@ function App() {
   const openPersonalDictionary = useCallback(() => {
     setTab("personal");
   }, []);
+  const usesBoundedListLayout = tab === "personal" || tab === "glossary";
 
   return (
     <div className="app-shell">
@@ -1113,7 +1114,7 @@ function App() {
         </div>
       </header>
 
-      <main className={`main-content ${tab === "translate" ? "translate-main-content" : ""}`}>
+      <main className={`main-content ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""}`}>
         <PageTransition activeKey={tab}>
           <div className="page-view" key={tab}>
             {tab === "translate" && (
@@ -1595,6 +1596,8 @@ function GlossaryView({ terms, onChanged }: { terms: GlossaryTerm[]; onChanged: 
   const [target, setTarget] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(10);
+  const visibleTerms = terms.slice(0, visibleCount);
   const addTerm = async () => {
     if (!source.trim() || !target.trim()) {
       setError("原文术语和译文都不能为空。");
@@ -1608,19 +1611,26 @@ function GlossaryView({ terms, onChanged }: { terms: GlossaryTerm[]; onChanged: 
     }
   };
   return (
-    <section className="page-section narrow-page">
-      <PageTitle eyebrow="GLOSSARY" title="术语表" description="全局术语会在段落翻译时按命中情况加入提示。" />
+    <section className="page-section narrow-page bounded-list-page glossary-page">
+      <PageTitle eyebrow="GLOSSARY" title="术语表" />
       <div className="simple-card">
         <div className="form-grid glossary-form">
-          <label>原文<input value={source} onChange={(event) => setSource(event.target.value)} placeholder="例如：embedding" /></label>
-          <label>译文<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="例如：嵌入" /></label>
+          <label>原文<input value={source} onChange={(event) => setSource(event.target.value)} /></label>
+          <label>译文<input value={target} onChange={(event) => setTarget(event.target.value)} /></label>
           <label className="wide-field">备注<input value={note} onChange={(event) => setNote(event.target.value)} placeholder="可选" /></label>
         </div>
         <div className="form-actions"><span className="error-message">{error}</span><button className="secondary-button" type="button" onClick={() => void addTerm()}>添加术语</button></div>
       </div>
-      <div className="list-card">
+      <div className="list-card bounded-list-card glossary-terms-card">
         <div className="list-card-heading"><strong>已添加术语</strong><span>{terms.length} 条</span></div>
-        {terms.length === 0 ? <div className="empty-list">还没有术语。</div> : terms.map((term) => <GlossaryRow key={term.id} term={term} onChanged={onChanged} />)}
+        <div className="bounded-list-card-scroll">
+          {terms.length === 0 ? <div className="empty-list">还没有术语。</div> : (
+            <>
+              {visibleTerms.map((term) => <GlossaryRow key={term.id} term={term} onChanged={onChanged} />)}
+              {visibleTerms.length < terms.length && <button className="list-load-more" type="button" onClick={() => setVisibleCount((current) => Math.min(current + 10, terms.length))}>更多</button>}
+            </>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -1638,7 +1648,6 @@ function HistoryContent({ history }: { history: HistoryEntry[] }) {
   return (
     <div className="history-dialog-content">
       <div className="list-card history-card">
-        <div className="list-card-heading"><strong>最近翻译</strong><span>{history.length} 条</span></div>
         {history.length === 0 ? <div className="empty-list">完成一次段落翻译后，记录会出现在这里。</div> : history.map((item) => <HistoryRow key={item.id} item={item} />)}
       </div>
     </div>
@@ -2017,8 +2026,8 @@ function SettingsView({
   );
 }
 
-function PageTitle({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
-  return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="page-description">{description}</p></div></div>;
+function PageTitle({ eyebrow, title, description }: { eyebrow: string; title: string; description?: string }) {
+  return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1>{description && <p className="page-description">{description}</p>}</div></div>;
 }
 
 export default App;
