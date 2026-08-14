@@ -1073,7 +1073,7 @@ function App() {
         </div>
       </header>
 
-      <main className="main-content">
+      <main className={`main-content ${tab === "translate" ? "translate-main-content" : ""}`}>
         <PageTransition activeKey={tab}>
           <div className="page-view" key={tab}>
             {tab === "translate" && (
