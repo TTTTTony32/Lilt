@@ -248,59 +248,61 @@ export default function DictionaryView({
         )}
       </div>
 
-      <div className={`dictionary-search-card ${showSuggestionMenu ? "has-suggestions" : ""}`}>
-        <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
-          <div
-            className="dictionary-input-wrap"
-            onBlur={(event) => {
-              const nextTarget = event.relatedTarget;
-              if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
-                suggestionRequestId.current += 1;
-                setSuggestionsOpen(false);
-                setSuggestions([]);
-              }
-            }}
-          >
-            <Search size={17} aria-hidden="true" />
-            <input
-              value={word}
-              onChange={(event) => {
-                const nextWord = event.target.value;
-                setWord(nextWord);
-                suggestionRequestId.current += 1;
-                setSuggestions([]);
-                setSuggestionsOpen(nextWord.trim().length > 0);
-              }}
-              onFocus={() => setSuggestionsOpen(word.trim().length > 0)}
-              placeholder="输入单词、词组或短语"
-              aria-label="词典查询"
-              aria-controls="dictionary-suggestion-menu"
-              aria-expanded={showSuggestionMenu}
-              aria-autocomplete="list"
-              autoComplete="off"
-              disabled={updating}
-            />
-            {showSuggestionMenu && (
-              <div className="dictionary-suggestion-menu" id="dictionary-suggestion-menu" role="listbox" aria-label="词典候选">
-                {suggestions.map((suggestion) => (
-                  <button
-                    key={suggestion.normalizedWord}
-                    type="button"
-                    role="option"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => { setWord(suggestion.word); void query(suggestion.word); }}
-                  >
-                    <span>{suggestion.word}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+      <div
+        className={`dictionary-search-shell ${showSuggestionMenu ? "has-suggestions" : ""}`}
+        onBlur={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+            suggestionRequestId.current += 1;
+            setSuggestionsOpen(false);
+            setSuggestions([]);
+          }
+        }}
+      >
+        <div className="dictionary-search-card">
+          <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
+            <div className="dictionary-input-wrap">
+              <Search size={17} aria-hidden="true" />
+              <input
+                value={word}
+                onChange={(event) => {
+                  const nextWord = event.target.value;
+                  setWord(nextWord);
+                  suggestionRequestId.current += 1;
+                  setSuggestions([]);
+                  setSuggestionsOpen(nextWord.trim().length > 0);
+                }}
+                onFocus={() => setSuggestionsOpen(word.trim().length > 0)}
+                placeholder="输入单词、词组或短语"
+                aria-label="词典查询"
+                aria-controls="dictionary-suggestion-menu"
+                aria-expanded={showSuggestionMenu}
+                aria-autocomplete="list"
+                autoComplete="off"
+                disabled={updating}
+              />
+            </div>
+            <button className="primary-button" type="submit" disabled={querying || updating || state.status !== "ready"}>
+              {querying ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
+              查询
+            </button>
+          </form>
+        </div>
+        {showSuggestionMenu && (
+          <div className="dictionary-suggestion-menu" id="dictionary-suggestion-menu" role="listbox" aria-label="词典候选">
+            {suggestions.map((suggestion) => (
+              <button
+                key={suggestion.normalizedWord}
+                type="button"
+                role="option"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => { setWord(suggestion.word); void query(suggestion.word); }}
+              >
+                <span>{suggestion.word}</span>
+              </button>
+            ))}
           </div>
-          <button className="primary-button" type="submit" disabled={querying || updating || state.status !== "ready"}>
-            {querying ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
-            查询
-          </button>
-        </form>
+        )}
       </div>
 
       {state.status !== "ready" && (
