@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Bookmark, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
+import { Bookmark, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
 import liltLogo from "../lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -338,7 +338,6 @@ function App() {
   const [status, setStatus] = useState<TranslationStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [lastCacheHit, setLastCacheHit] = useState(false);
   const [translationEventsReady, setTranslationEventsReady] = useState(false);
   const [translationEventsError, setTranslationEventsError] = useState<string | null>(null);
   const [dictionaryProgress, setDictionaryProgress] = useState<DictionaryProgress | null>(null);
@@ -564,7 +563,6 @@ function App() {
     switch (result.outcome) {
       case "completed":
         setTranslatedText(result.content ?? "");
-        setLastCacheHit(result.cacheHit);
         setError(null);
         setStatus("completed");
         void refreshSnapshot();
@@ -961,7 +959,6 @@ function App() {
     setError(null);
     setNotice(null);
     setTranslatedText("");
-    setLastCacheHit(false);
     setStatus("streaming");
     try {
       const rawResult = await invokeCommand<unknown>("translate", {
@@ -1059,7 +1056,6 @@ function App() {
                 status={status}
                 error={error ?? translationEventsError}
                 notice={notice}
-                cacheHit={lastCacheHit}
                 eventsReady={translationEventsReady}
                 onSourceTextChange={setSourceText}
                 onSourceLanguageChange={setSourceLanguage}
@@ -1277,7 +1273,6 @@ interface TranslateViewProps {
   status: TranslationStatus;
   error: string | null;
   notice: string | null;
-  cacheHit: boolean;
   eventsReady: boolean;
   onSourceTextChange: (value: string) => void;
   onSourceLanguageChange: (value: string) => void;
@@ -1295,42 +1290,59 @@ function TranslateView(props: TranslateViewProps) {
         <div>
           <p className="eyebrow">TRANSLATE</p>
           <h1>段落翻译</h1>
-          <p className="page-description">保留上下文，把一段文字译成适合阅读的中文。</p>
         </div>
         <div className="model-pill">{props.selectedModel || "未配置模型"}</div>
       </div>
 
       <div className="translation-grid">
-        <div className="translation-panel">
-          <div className="panel-toolbar">
-            <label htmlFor="source-language">原文</label>
-            <select id="source-language" value={props.sourceLanguage} onChange={(event) => props.onSourceLanguageChange(event.target.value)}>
-              {LANGUAGE_OPTIONS.map(([label, value]) => <option key={value} value={value}>{label}</option>)}
-            </select>
+        <div className="translation-column">
+          <label className="translation-language" htmlFor="source-language">
+            <span>原文</span>
+            <span className="translation-language-control">
+              <select id="source-language" aria-label="原文语言" value={props.sourceLanguage} onChange={(event) => props.onSourceLanguageChange(event.target.value)}>
+                {LANGUAGE_OPTIONS.map(([label, value]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+          </label>
+          <div className="translation-panel">
+            <div className="translation-scroll-region">
+              <textarea
+                value={props.sourceText}
+                onChange={(event) => props.onSourceTextChange(event.target.value)}
+                placeholder="粘贴需要翻译的英文段落……"
+                spellCheck={false}
+              />
+              <span className="translation-edge-fade translation-edge-fade-top" aria-hidden="true" />
+              <span className="translation-edge-fade translation-edge-fade-bottom" aria-hidden="true" />
+            </div>
+            <div className="panel-footer"><span>{props.sourceText.length} 字符</span></div>
           </div>
-          <textarea
-            value={props.sourceText}
-            onChange={(event) => props.onSourceTextChange(event.target.value)}
-            placeholder="粘贴需要翻译的英文段落……"
-            spellCheck={false}
-          />
-          <div className="panel-footer"><span>{props.sourceText.length} 字符</span></div>
         </div>
 
-        <div className="translation-panel result-panel">
-          <div className="panel-toolbar">
-            <label htmlFor="target-language">译文</label>
-            <select id="target-language" value={props.targetLanguage} onChange={(event) => props.onTargetLanguageChange(event.target.value)}>
-              {LANGUAGE_OPTIONS.map(([label, value]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </div>
-          <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
-            {props.translatedText || <span className="empty-result">译文会显示在这里</span>}
-            {props.status === "streaming" && <span className="stream-caret" />}
-          </div>
-          <div className="panel-footer result-footer">
-            <span>{props.cacheHit ? "来自段落缓存" : props.status === "completed" ? "已完成" : ""}</span>
-            <button className="icon-button" title="复制译文" aria-label="复制译文" onClick={props.onCopy} disabled={!props.translatedText} type="button"><Copy size={16} /></button>
+        <div className="translation-column">
+          <label className="translation-language" htmlFor="target-language">
+            <span>译文</span>
+            <span className="translation-language-control">
+              <select id="target-language" aria-label="译文语言" value={props.targetLanguage} onChange={(event) => props.onTargetLanguageChange(event.target.value)}>
+                {LANGUAGE_OPTIONS.map(([label, value]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+          </label>
+          <div className="translation-panel result-panel">
+            <div className="translation-scroll-region">
+              <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
+                {props.translatedText || <span className="empty-result">译文会显示在这里</span>}
+                {props.status === "streaming" && <span className="stream-caret" />}
+              </div>
+              <span className="translation-edge-fade translation-edge-fade-top" aria-hidden="true" />
+              <span className="translation-edge-fade translation-edge-fade-bottom" aria-hidden="true" />
+            </div>
+            <div className="panel-footer result-footer">
+              <span>{props.status === "completed" ? "已完成" : ""}</span>
+              <button className="icon-button" title="复制译文" aria-label="复制译文" onClick={props.onCopy} disabled={!props.translatedText} type="button"><Copy size={16} /></button>
+            </div>
           </div>
         </div>
       </div>
@@ -1355,17 +1367,8 @@ function TranslateView(props: TranslateViewProps) {
         )}
       </div>
 
-      <div className="quick-facts">
-        <div><span className="fact-label">当前方向</span><strong>{languageName(props.sourceLanguage)} → {languageName(props.targetLanguage)}</strong></div>
-        <div><span className="fact-label">段落缓存</span><strong>默认开启</strong></div>
-        <div><span className="fact-label">历史记录</span><strong>始终保留</strong></div>
-      </div>
     </section>
   );
-}
-
-function languageName(value: string): string {
-  return LANGUAGE_OPTIONS.find(([, code]) => code === value)?.[0] ?? value;
 }
 
 function GlossaryView({ terms, onChanged }: { terms: GlossaryTerm[]; onChanged: () => void }) {
