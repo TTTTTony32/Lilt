@@ -1338,6 +1338,7 @@ function TranslateView(props: TranslateViewProps) {
               <textarea
                 value={props.sourceText}
                 onChange={(event) => props.onSourceTextChange(event.target.value)}
+                placeholder="粘贴需要翻译的英文段落……"
                 spellCheck={false}
               />
             </div>
@@ -1358,7 +1359,7 @@ function TranslateView(props: TranslateViewProps) {
           <div className="translation-panel result-panel">
             <div className="translation-scroll-region">
               <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
-                {props.translatedText}
+                {props.translatedText || <span className="empty-result">译文会显示在这里</span>}
                 {props.status === "streaming" && <span className="stream-caret" />}
               </div>
             </div>
