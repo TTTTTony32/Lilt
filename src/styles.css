@@ -83,6 +83,9 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .eyebrow { margin: 0 0 8px; color: #82907e; font-size: 10px; font-weight: 700; letter-spacing: .18em; }
 h1 { margin: 0; color: #303a32; font-family: Georgia, "Songti SC", serif; font-size: 31px; font-weight: 500; letter-spacing: -.02em; }
 .page-description { margin: 9px 0 0; color: #8a8c83; font-size: 13px; }
+.dictionary-title-block { min-width: 0; }
+.dictionary-title-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.dictionary-title-meta { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 9px; color: #9b9d94; font-size: 11px; line-height: 1.4; }
 .model-pill { padding: 8px 11px; border: 1px solid #deded5; border-radius: 7px; color: #788178; background: #f9f8f4; font-size: 11px; }
 
 .translation-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 19px; align-items: start; }

@@ -31,6 +31,7 @@ interface DictionaryViewProps {
   history: DictionaryHistoryEntry[];
   progress: DictionaryProgress | null;
   targetLanguage: string;
+  selectedModel: string;
   wordExample: WordExampleState;
   onUpdate: () => Promise<void>;
   onHistoryChanged: (history: DictionaryHistoryEntry[]) => void;
@@ -81,6 +82,7 @@ export default function DictionaryView({
   history,
   progress,
   targetLanguage,
+  selectedModel,
   wordExample,
   onUpdate,
   onHistoryChanged,
@@ -203,15 +205,18 @@ export default function DictionaryView({
 
   return (
     <section className="page-section dictionary-page">
-      <div className="page-heading">
-        <div>
+      <div className="page-heading dictionary-page-heading">
+        <div className="dictionary-title-block">
           <p className="eyebrow">DICTIONARY</p>
-          <h1>词典</h1>
+          <div className="dictionary-title-line">
+            <h1>词典</h1>
+            <div className="dictionary-title-meta" aria-label="词典版本与当前翻译模型">
+              <span>版本 {state.installedRelease ?? "未安装"}</span>
+              <span>翻译模型 {selectedModel || "未配置模型"}</span>
+            </div>
+          </div>
         </div>
         <div className="dictionary-heading-actions">
-          {state.status === "ready" && state.installedRelease && (
-            <div className="model-pill">{state.installedRelease}</div>
-          )}
           <button className="secondary-button small-button" type="button" onClick={onOpenPersonalDictionary}>
             <Bookmark size={15} />
             收藏

@@ -203,7 +203,6 @@ function AnimatedOverlay({
   const reducedMotion = usePrefersReducedMotion();
   const [phase, setPhase] = useState<OverlayPhase>(open ? "opening" : "closing");
   const closeNotifiedRef = useRef(false);
-  const frameRef = useRef<number | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
 
   const notifyClosed = useCallback(() => {
@@ -213,11 +212,6 @@ function AnimatedOverlay({
   }, [onClosed]);
 
   useEffect(() => {
-    if (frameRef.current !== null) {
-      window.cancelAnimationFrame(frameRef.current);
-      frameRef.current = null;
-    }
-
     if (open) {
       closeNotifiedRef.current = false;
       setPhase("opening");
@@ -225,16 +219,7 @@ function AnimatedOverlay({
         setPhase("open");
         return;
       }
-      frameRef.current = window.requestAnimationFrame(() => {
-        frameRef.current = null;
-        setPhase("open");
-      });
-      return () => {
-        if (frameRef.current !== null) {
-          window.cancelAnimationFrame(frameRef.current);
-          frameRef.current = null;
-        }
-      };
+      return undefined;
     }
 
     setPhase("closing");
@@ -247,8 +232,12 @@ function AnimatedOverlay({
   }, [notifyClosed, open, reducedMotion]);
 
   const handleAnimationEnd = useCallback((event: ReactAnimationEvent<HTMLDivElement>) => {
-    if (event.target !== event.currentTarget || open || phase !== "closing") return;
-    notifyClosed();
+    if (event.target !== event.currentTarget) return;
+    if (open && phase === "opening") {
+      setPhase("open");
+      return;
+    }
+    if (!open && phase === "closing") notifyClosed();
   }, [notifyClosed, open, phase]);
 
   return (
@@ -1145,6 +1134,7 @@ function App() {
                 history={snapshot.dictionaryHistory}
                 progress={dictionaryProgress}
                 targetLanguage={targetLanguage}
+                selectedModel={selectedModel}
                 wordExample={wordExample}
                 onUpdate={handleDictionaryUpdate}
                 onHistoryChanged={handleDictionaryHistoryChanged}
