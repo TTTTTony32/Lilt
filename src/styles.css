@@ -109,6 +109,7 @@ textarea::placeholder { color: #b5b6ad; }
 .stream-caret { width: 2px; height: 16px; margin-left: 3px; display: inline-block; vertical-align: -2px; background: #79937d; animation: blink 1s steps(2, start) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .result-footer { justify-content: space-between; }
+.result-footer-actions { display: flex; align-items: center; gap: 3px; }
 .icon-button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 6px; color: #899188; background: transparent; transition: color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
 .icon-button:hover:not(:disabled) { color: #38513f; background: #edf0ea; }
 
@@ -182,6 +183,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-message { margin: 12px 0 0; font-size: 12px; }
 
 .dictionary-search-card { position: relative; z-index: 1; margin-bottom: 18px; padding: 12px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
+.dictionary-heading-actions { display: flex; align-items: center; gap: 9px; }
 .dictionary-search-form { display: flex; align-items: center; gap: 10px; }
 .dictionary-input-wrap { position: relative; flex: 1; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: #8b958b; }
 .dictionary-input-wrap input { height: 42px; padding: 0; border: 0; background: transparent; font-size: 14px; }
@@ -305,6 +307,9 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-dialog-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .settings-dialog-scroll > .page-section { padding-top: 26px; }
 .settings-dialog-scroll > .page-section > .page-heading { display: none; }
+.history-dialog { width: min(720px, calc(100vw - 64px)); height: min(680px, calc(100vh - 64px)); }
+.history-dialog-scroll { padding-top: 22px; }
+.history-dialog-content .list-card { margin-bottom: 0; }
 
 @keyframes overlay-backdrop-in {
   from { opacity: 0; }

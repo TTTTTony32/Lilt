@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Bookmark, Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
+import { Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
 import liltLogo from "../lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -362,6 +362,8 @@ function App() {
   const [closeDialogMounted, setCloseDialogMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsOverlayMounted, setSettingsOverlayMounted] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyOverlayMounted, setHistoryOverlayMounted] = useState(false);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const activeRequestId = useRef<string | null>(null);
   const translationStartedAt = useRef<number | null>(null);
@@ -369,6 +371,8 @@ function App() {
   const activeWordExampleRequestId = useRef<string | null>(null);
   const settingsDialogRef = useRef<HTMLDivElement | null>(null);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const historyDialogRef = useRef<HTMLDivElement | null>(null);
+  const historyReturnFocusRef = useRef<HTMLElement | null>(null);
   const closeDialogReturnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -413,6 +417,23 @@ function App() {
     previouslyFocused?.focus();
   }, []);
 
+  const openHistory = useCallback(() => {
+    historyReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setHistoryOverlayMounted(true);
+    setHistoryOpen(true);
+  }, []);
+
+  const requestHistoryClose = useCallback(() => {
+    setHistoryOpen(false);
+  }, []);
+
+  const handleHistoryClosed = useCallback(() => {
+    setHistoryOverlayMounted(false);
+    const previouslyFocused = historyReturnFocusRef.current;
+    historyReturnFocusRef.current = null;
+    previouslyFocused?.focus();
+  }, []);
+
   useEffect(() => {
     if (!settingsOpen) return;
     const frame = window.requestAnimationFrame(() => settingsDialogRef.current?.focus());
@@ -427,6 +448,21 @@ function App() {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [requestSettingsClose, settingsOpen]);
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    const frame = window.requestAnimationFrame(() => historyDialogRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      requestHistoryClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [historyOpen, requestHistoryClose]);
 
   const handleTitlebarMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -1054,6 +1090,10 @@ function App() {
     window.setTimeout(() => setNotice(null), 1800);
   };
 
+  const openPersonalDictionary = useCallback(() => {
+    setTab("personal");
+  }, []);
+
   return (
     <div className="app-shell">
       <div className="main-surface">
@@ -1062,7 +1102,7 @@ function App() {
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
         </div>
-        <ModeSwitcher activeTab={tab} onChange={setTab} />
+        <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />
         <div className="chrome-actions" data-no-drag>
           <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={openSettings} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
           <div className="window-controls" data-no-drag>
@@ -1094,6 +1134,8 @@ function App() {
                 onTranslate={() => void handleTranslate()}
                 onCancel={() => void handleCancel()}
                 onCopy={() => void handleCopy()}
+                history={snapshot.history}
+                onOpenHistory={openHistory}
               />
             )}
             {tab === "dictionary" && (
@@ -1112,6 +1154,7 @@ function App() {
                 openRequest={dictionaryOpenRequest}
                 onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
                 onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
+                onOpenPersonalDictionary={openPersonalDictionary}
               />
             )}
             {tab === "personal" && (
@@ -1124,11 +1167,33 @@ function App() {
             {tab === "glossary" && (
               <GlossaryView terms={snapshot.glossaryTerms} onChanged={() => void refreshSnapshot()} />
             )}
-            {tab === "history" && <HistoryView history={snapshot.history} />}
           </div>
         </PageTransition>
       </main>
       </div>
+      {historyOverlayMounted && (
+        <AnimatedOverlay
+          className="settings-overlay history-overlay"
+          open={historyOpen}
+          onClosed={handleHistoryClosed}
+          onBackdropClick={(event) => {
+            if (event.target === event.currentTarget) requestHistoryClose();
+          }}
+        >
+          <div className="settings-dialog history-dialog" ref={historyDialogRef} role="dialog" aria-modal="true" aria-labelledby="history-dialog-title" tabIndex={-1}>
+            <div className="settings-dialog-heading">
+              <div>
+                <span className="settings-dialog-eyebrow">HISTORY</span>
+                <strong id="history-dialog-title">翻译历史</strong>
+              </div>
+              <button className="icon-button" type="button" onClick={requestHistoryClose} aria-label="关闭翻译历史" title="关闭翻译历史"><X size={17} /></button>
+            </div>
+            <div className="settings-dialog-scroll history-dialog-scroll">
+              <HistoryContent history={snapshot.history} />
+            </div>
+          </div>
+        </AnimatedOverlay>
+      )}
       {settingsOverlayMounted && (
         <AnimatedOverlay
           className="settings-overlay"
@@ -1279,9 +1344,7 @@ function ModeSwitcher({ activeTab, onChange }: { activeTab: AppTab; onChange: (t
       />
       <ModeButton buttonRef={setButtonRef("translate")} icon={<Languages size={15} />} label="段落翻译" active={activeTab === "translate"} onClick={() => onChange("translate")} />
       <ModeButton buttonRef={setButtonRef("dictionary")} icon={<BookOpen size={15} />} label="词典" active={activeTab === "dictionary"} onClick={() => onChange("dictionary")} />
-      <ModeButton buttonRef={setButtonRef("personal")} icon={<Bookmark size={15} />} label="个人词典" active={activeTab === "personal"} onClick={() => onChange("personal")} />
       <ModeButton buttonRef={setButtonRef("glossary")} icon={<FileText size={15} />} label="术语表" active={activeTab === "glossary"} onClick={() => onChange("glossary")} />
-      <ModeButton buttonRef={setButtonRef("history")} icon={<History size={15} />} label="翻译历史" active={activeTab === "history"} onClick={() => onChange("history")} />
     </nav>
   );
 }
@@ -1312,6 +1375,8 @@ interface TranslateViewProps {
   onTranslate: () => void;
   onCancel: () => void;
   onCopy: () => void;
+  history: HistoryEntry[];
+  onOpenHistory: () => void;
 }
 
 function LanguageSelect({
@@ -1492,7 +1557,10 @@ function TranslateView(props: TranslateViewProps) {
             </div>
             <div className="panel-footer result-footer">
               <span>{props.status === "completed" && props.translationSummary ? formatTranslationSummary(props.translationSummary) : ""}</span>
-              <button className="icon-button" title="复制译文" aria-label="复制译文" onClick={props.onCopy} disabled={!props.translatedText} type="button"><Copy size={16} /></button>
+              <div className="result-footer-actions">
+                <button className="icon-button" title="翻译历史" aria-label="打开翻译历史" onClick={props.onOpenHistory} type="button"><History size={16} /></button>
+                <button className="icon-button" title="复制译文" aria-label="复制译文" onClick={props.onCopy} disabled={!props.translatedText} type="button"><Copy size={16} /></button>
+              </div>
             </div>
           </div>
         </div>
@@ -1566,15 +1634,14 @@ function GlossaryRow({ term, onChanged }: { term: GlossaryTerm; onChanged: () =>
   return <div className="list-row"><div><strong>{term.source}</strong><span className="arrow">→</span><span>{term.target}</span>{term.note && <small>{term.note}</small>}</div><button className="text-button danger-text" type="button" onClick={() => void remove()}>删除</button></div>;
 }
 
-function HistoryView({ history }: { history: HistoryEntry[] }) {
+function HistoryContent({ history }: { history: HistoryEntry[] }) {
   return (
-    <section className="page-section narrow-page">
-      <PageTitle eyebrow="HISTORY" title="翻译历史" description="历史记录属于客户端固定功能，按设置中的条数保留。" />
+    <div className="history-dialog-content">
       <div className="list-card history-card">
         <div className="list-card-heading"><strong>最近翻译</strong><span>{history.length} 条</span></div>
         {history.length === 0 ? <div className="empty-list">完成一次段落翻译后，记录会出现在这里。</div> : history.map((item) => <HistoryRow key={item.id} item={item} />)}
       </div>
-    </section>
+    </div>
   );
 }
 

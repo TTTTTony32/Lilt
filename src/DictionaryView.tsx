@@ -41,6 +41,7 @@ interface DictionaryViewProps {
   openRequest: DictionaryOpenRequest | null;
   onOpenRequestHandled: () => void;
   onPersonalDictionaryChanged: () => Promise<void>;
+  onOpenPersonalDictionary: () => void;
 }
 
 export interface WordExampleRequestInput {
@@ -90,6 +91,7 @@ export default function DictionaryView({
   openRequest,
   onOpenRequestHandled,
   onPersonalDictionaryChanged,
+  onOpenPersonalDictionary,
 }: DictionaryViewProps) {
   const [word, setWord] = useState("");
   const [result, setResult] = useState<DictionaryEntry | null>(null);
@@ -206,9 +208,15 @@ export default function DictionaryView({
           <p className="eyebrow">DICTIONARY</p>
           <h1>词典</h1>
         </div>
-        {state.status === "ready" && state.installedRelease && (
-          <div className="model-pill">{state.installedRelease}</div>
-        )}
+        <div className="dictionary-heading-actions">
+          {state.status === "ready" && state.installedRelease && (
+            <div className="model-pill">{state.installedRelease}</div>
+          )}
+          <button className="secondary-button small-button" type="button" onClick={onOpenPersonalDictionary}>
+            <Bookmark size={15} />
+            收藏
+          </button>
+        </div>
       </div>
 
       <div className="dictionary-search-card">

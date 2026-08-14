@@ -1,6 +1,6 @@
 import { DEFAULT_DICTIONARY_STATE, type DictionaryHistoryEntry, type DictionaryState } from "./dictionary";
 
-export type AppTab = "translate" | "dictionary" | "personal" | "glossary" | "history";
+export type AppTab = "translate" | "dictionary" | "personal" | "glossary";
 
 export type TranslationStatus = "idle" | "streaming" | "cancelling" | "completed" | "failed";
 
