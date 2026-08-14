@@ -142,3 +142,9 @@ npm run tauri -- build
 - 字典输入联想和全词库预测下拉框暂未启用，当前以精确查询为主。
 - 托盘图标只在应用启动时根据 DPI 选择资源，运行中跨显示器切换不会实时重选。
 - 发布版本的本地日志文件暂未实现。
+
+## 许可证
+
+Lilt 软件本体采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPLv3）授权。
+
+随软件分发的词典数据来自 [ahpxex/open-dictionary](https://github.com/ahpxex/open-dictionary)，采用与 [Creative Commons Attribution-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-sa/4.0/)（CC BY-SA 4.0）兼容的许可。词典数据的署名和相同方式共享要求以数据来源的具体许可声明为准。
