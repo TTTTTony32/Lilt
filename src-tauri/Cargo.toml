@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 futures-util = "0.3"
 flate2 = "1"
+ico = "0.5"
 keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -32,5 +33,5 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 uiautomation = { version = "0.21.6", default-features = false, features = ["event", "pattern"] }
