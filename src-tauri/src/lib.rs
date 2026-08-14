@@ -11,16 +11,15 @@ mod tray;
 
 use contracts::{
     clamp_selection_window_dimension, AppSnapshot, CloseBehavior, DictionaryCommandResult,
-    DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryState,
-    DictionarySuggestion, GlossaryTerm, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
-    Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
-    SelectionSettingsResult, SelectionTriggerNotice, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
-    TranslationStarted, WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted,
-    WordExampleFailed, WordExamplePosDelta, WordExampleRequest, WordExampleStarted,
-    WordExampleTranslationDelta, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
-    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-    MIN_SELECTION_WINDOW_WIDTH, WORD_EXAMPLE_PROTOCOL_VERSION,
+    DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryState, GlossaryTerm,
+    ModelInfo, ParagraphExample, PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode,
+    SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
+    SelectionTriggerNotice, TranslationCancelled, TranslationCommandResult, TranslationCompleted,
+    TranslationFailed, TranslationRequest, TranslationStarted, WordExampleCancelled,
+    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
+    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta, DEFAULT_PROVIDER_ID,
+    DICTIONARY_HISTORY_LIMIT, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, WORD_EXAMPLE_PROTOCOL_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -295,7 +294,6 @@ pub fn run() {
             resolve_window_close,
             reset_close_behavior,
             query_dictionary,
-            suggest_dictionary,
             generate_word_example,
             cancel_word_example,
             get_dictionary_state,
@@ -1606,36 +1604,6 @@ fn query_dictionary(
         example,
         history,
     })
-}
-
-#[tauri::command]
-fn suggest_dictionary(
-    state: State<'_, AppState>,
-    word: String,
-) -> Result<Vec<DictionarySuggestion>, String> {
-    let normalized_word = dictionary::normalize_headword(&word);
-    if normalized_word.is_empty() {
-        return Ok(Vec::new());
-    }
-    let update_guard = state
-        .dictionary_update
-        .lock()
-        .map_err(|_| "词典更新状态锁已损坏".to_string())?;
-    if update_guard.is_some() {
-        return Err(dictionary::DictionaryError::Updating.to_string());
-    }
-    let mut store = state
-        .dictionary_store
-        .lock()
-        .map_err(|_| "词典存储锁已损坏".to_string())?;
-    if !store.is_runtime_ready() {
-        store
-            .open_runtime("suggestion")
-            .map_err(|error| error.to_string())?;
-    }
-    store
-        .suggest(&normalized_word, dictionary::DICTIONARY_SUGGESTION_LIMIT)
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

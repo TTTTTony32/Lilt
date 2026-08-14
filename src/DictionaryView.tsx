@@ -4,7 +4,6 @@ import { describeError } from "./lib/errors";
 import { invokeCommand } from "./lib/tauri";
 import {
   decodeDictionaryLookupCommandResult,
-  decodeDictionarySuggestions,
   collectPronunciations,
   groupRelationsByType,
   posLabelZh,
@@ -16,7 +15,6 @@ import {
   type DictionaryPosGroup,
   type DictionaryState,
   type DictionaryLookupCandidate,
-  type DictionarySuggestion,
   type ParagraphExample,
 } from "./types/dictionary";
 import type { PersonalDictionaryEntry, WordExampleState } from "./types/contracts";
@@ -101,14 +99,9 @@ export default function DictionaryView({
   const [notFound, setNotFound] = useState(false);
   const [querying, setQuerying] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-  const [suggestions, setSuggestions] = useState<DictionarySuggestion[]>([]);
   const [savingFavorite, setSavingFavorite] = useState(false);
-  const suggestionRequestId = useRef(0);
   const lastOpenRequestId = useRef<string | null>(null);
   const updating = state.status === "updating" || progress !== null;
-  const suggestionQuery = word.trim();
-  const showSuggestionMenu = suggestionsOpen && suggestionQuery.length > 0 && suggestions.length > 0;
 
   const query = useCallback(async (candidate: string, selectedCanonicalWord?: string) => {
     const trimmed = candidate.trim();
@@ -127,9 +120,6 @@ export default function DictionaryView({
     setResult(null);
     setLookupMeta(null);
     setExample(null);
-    suggestionRequestId.current += 1;
-    setSuggestionsOpen(false);
-    setSuggestions([]);
     onWordExampleRequested(null);
     try {
       const rawResult = await invokeCommand<unknown>("query_dictionary", {
@@ -156,8 +146,6 @@ export default function DictionaryView({
         });
       }
       onHistoryChanged(decoded.history);
-      setSuggestionsOpen(false);
-      setSuggestions([]);
     } catch (reason) {
       setResult(null);
       setLookupMeta(null);
@@ -170,28 +158,6 @@ export default function DictionaryView({
       setQuerying(false);
     }
   }, [onHistoryChanged, onWordExampleRequested, state.error, state.status, targetLanguage]);
-
-  useEffect(() => {
-    const queryText = word.trim();
-    const requestId = ++suggestionRequestId.current;
-    if (!suggestionsOpen || !queryText || state.status !== "ready" || updating) {
-      setSuggestions([]);
-      return;
-    }
-    setSuggestions([]);
-    const timer = window.setTimeout(() => {
-      void invokeCommand<unknown>("suggest_dictionary", { word: queryText })
-        .then((rawResult) => {
-          if (requestId !== suggestionRequestId.current) return;
-          const decoded = decodeDictionarySuggestions(rawResult);
-          setSuggestions(decoded ?? []);
-        })
-        .catch(() => {
-          if (requestId === suggestionRequestId.current) setSuggestions([]);
-        });
-    }, 120);
-    return () => window.clearTimeout(timer);
-  }, [state.status, suggestionsOpen, updating, word]);
 
   useEffect(() => {
     if (!openRequest || openRequest.requestId === lastOpenRequestId.current) return;
@@ -228,9 +194,6 @@ export default function DictionaryView({
     try {
       await invokeCommand("clear_dictionary_history");
       await onSnapshotChanged();
-      suggestionRequestId.current += 1;
-      setSuggestionsOpen(false);
-      setSuggestions([]);
     } catch (reason) {
       setQueryError(describeError(reason, "清空词典历史失败"));
     }
@@ -248,61 +211,24 @@ export default function DictionaryView({
         )}
       </div>
 
-      <div
-        className={`dictionary-search-shell ${showSuggestionMenu ? "has-suggestions" : ""}`}
-        onBlur={(event) => {
-          const nextTarget = event.relatedTarget;
-          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
-            suggestionRequestId.current += 1;
-            setSuggestionsOpen(false);
-            setSuggestions([]);
-          }
-        }}
-      >
-        <div className="dictionary-search-card">
-          <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
-            <div className="dictionary-input-wrap">
-              <Search size={17} aria-hidden="true" />
-              <input
-                value={word}
-                onChange={(event) => {
-                  const nextWord = event.target.value;
-                  setWord(nextWord);
-                  suggestionRequestId.current += 1;
-                  setSuggestions([]);
-                  setSuggestionsOpen(nextWord.trim().length > 0);
-                }}
-                onFocus={() => setSuggestionsOpen(word.trim().length > 0)}
-                placeholder="输入单词、词组或短语"
-                aria-label="词典查询"
-                aria-controls="dictionary-suggestion-menu"
-                aria-expanded={showSuggestionMenu}
-                aria-autocomplete="list"
-                autoComplete="off"
-                disabled={updating}
-              />
-            </div>
-            <button className="primary-button" type="submit" disabled={querying || updating || state.status !== "ready"}>
-              {querying ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
-              查询
-            </button>
-          </form>
-        </div>
-        {showSuggestionMenu && (
-          <div className="dictionary-suggestion-menu" id="dictionary-suggestion-menu" role="listbox" aria-label="词典候选">
-            {suggestions.map((suggestion) => (
-              <button
-                key={suggestion.normalizedWord}
-                type="button"
-                role="option"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => { setWord(suggestion.word); void query(suggestion.word); }}
-              >
-                <span>{suggestion.word}</span>
-              </button>
-            ))}
+      <div className="dictionary-search-card">
+        <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
+          <div className="dictionary-input-wrap">
+            <Search size={17} aria-hidden="true" />
+            <input
+              value={word}
+              onChange={(event) => setWord(event.target.value)}
+              placeholder="输入单词、词组或短语"
+              aria-label="词典查询"
+              autoComplete="off"
+              disabled={updating}
+            />
           </div>
-        )}
+          <button className="primary-button" type="submit" disabled={querying || updating || state.status !== "ready"}>
+            {querying ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
+            查询
+          </button>
+        </form>
       </div>
 
       {state.status !== "ready" && (

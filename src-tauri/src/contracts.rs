@@ -302,13 +302,6 @@ pub struct DictionaryLookupCandidate {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DictionarySuggestion {
-    pub word: String,
-    pub normalized_word: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ParagraphExample {
     pub example_id: i64,
     pub source_text: String,

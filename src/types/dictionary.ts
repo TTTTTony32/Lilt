@@ -88,11 +88,6 @@ export interface DictionaryLookupCandidate {
   normalizedCanonicalWord: string;
 }
 
-export interface DictionarySuggestion {
-  word: string;
-  normalizedWord: string;
-}
-
 export interface ParagraphExample {
   exampleId: number;
   sourceText: string;
@@ -501,17 +496,6 @@ function decodeDictionaryLookupCandidate(value: unknown): DictionaryLookupCandid
   return canonicalWord === null || normalizedCanonicalWord === null
     ? null
     : { canonicalWord, normalizedCanonicalWord };
-}
-
-export function decodeDictionarySuggestions(value: unknown): DictionarySuggestion[] | null {
-  if (!Array.isArray(value)) return null;
-  const suggestions = value.map((item) => {
-    if (!isRecord(item)) return null;
-    const word = stringValue(item.word);
-    const normalizedWord = stringValue(item.normalizedWord);
-    return word === null || normalizedWord === null ? null : { word, normalizedWord };
-  });
-  return suggestions.some((item) => item === null) ? null : suggestions as DictionarySuggestion[];
 }
 
 function decodeParagraphExample(value: unknown): ParagraphExample | null {
