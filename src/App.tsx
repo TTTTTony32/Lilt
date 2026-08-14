@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Bookmark, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
 import liltLogo from "../lilt_logo.svg";
@@ -91,6 +91,243 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+
+function usePrefersReducedMotion(): boolean {
+  const [reducedMotion, setReducedMotion] = useState(() => (
+    typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia(REDUCED_MOTION_QUERY).matches
+  ));
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia(REDUCED_MOTION_QUERY);
+    const update = () => setReducedMotion(mediaQuery.matches);
+    update();
+    mediaQuery.addEventListener("change", update);
+    return () => mediaQuery.removeEventListener("change", update);
+  }, []);
+
+  return reducedMotion;
+}
+
+interface PageTransitionLayer {
+  id: number;
+  node: ReactNode;
+}
+
+function PageTransition({ activeKey, children }: { activeKey: string; children: ReactNode }) {
+  const reducedMotion = usePrefersReducedMotion();
+  const [outgoing, setOutgoing] = useState<PageTransitionLayer | null>(null);
+  const previousKeyRef = useRef(activeKey);
+  const previousChildrenRef = useRef<ReactNode>(children);
+  const transitionIdRef = useRef(0);
+
+  useLayoutEffect(() => {
+    if (reducedMotion) {
+      previousKeyRef.current = activeKey;
+      previousChildrenRef.current = children;
+      setOutgoing(null);
+      return;
+    }
+
+    if (activeKey === previousKeyRef.current) {
+      previousChildrenRef.current = children;
+      return;
+    }
+
+    const previousChildren = previousChildrenRef.current;
+    previousKeyRef.current = activeKey;
+    previousChildrenRef.current = children;
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && activeElement.closest(".page-transition-layer")) {
+      activeElement.blur();
+    }
+    transitionIdRef.current += 1;
+    setOutgoing({ id: transitionIdRef.current, node: previousChildren });
+  }, [activeKey, children, reducedMotion]);
+
+  const handleOutgoingAnimationEnd = useCallback((id: number, event: ReactAnimationEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    setOutgoing((current) => current?.id === id ? null : current);
+  }, []);
+
+  return (
+    <div className="page-transition-stack">
+      {outgoing && (
+        <div
+          key={`outgoing-${outgoing.id}`}
+          className="page-transition-layer page-transition-layer-outgoing"
+          aria-hidden="true"
+          onAnimationEnd={(event) => handleOutgoingAnimationEnd(outgoing.id, event)}
+        >
+          {outgoing.node}
+        </div>
+      )}
+      <div key={`incoming-${activeKey}`} className="page-transition-layer page-transition-layer-incoming">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+type OverlayPhase = "opening" | "open" | "closing";
+
+function AnimatedOverlay({
+  open,
+  className,
+  children,
+  onClosed,
+  onBackdropClick,
+}: {
+  open: boolean;
+  className: string;
+  children: ReactNode;
+  onClosed: () => void;
+  onBackdropClick?: (event: ReactMouseEvent<HTMLDivElement>) => void;
+}) {
+  const reducedMotion = usePrefersReducedMotion();
+  const [phase, setPhase] = useState<OverlayPhase>(open ? "opening" : "closing");
+  const closeNotifiedRef = useRef(false);
+  const frameRef = useRef<number | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+
+  const notifyClosed = useCallback(() => {
+    if (closeNotifiedRef.current) return;
+    closeNotifiedRef.current = true;
+    onClosed();
+  }, [onClosed]);
+
+  useEffect(() => {
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+
+    if (open) {
+      closeNotifiedRef.current = false;
+      setPhase("opening");
+      if (reducedMotion) {
+        setPhase("open");
+        return;
+      }
+      frameRef.current = window.requestAnimationFrame(() => {
+        frameRef.current = null;
+        setPhase("open");
+      });
+      return () => {
+        if (frameRef.current !== null) {
+          window.cancelAnimationFrame(frameRef.current);
+          frameRef.current = null;
+        }
+      };
+    }
+
+    setPhase("closing");
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && overlayRef.current?.contains(activeElement)) {
+      activeElement.blur();
+    }
+    if (reducedMotion) notifyClosed();
+    return undefined;
+  }, [notifyClosed, open, reducedMotion]);
+
+  const handleAnimationEnd = useCallback((event: ReactAnimationEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || open || phase !== "closing") return;
+    notifyClosed();
+  }, [notifyClosed, open, phase]);
+
+  return (
+    <div
+      ref={overlayRef}
+      className={`${className} overlay-phase-${phase}`}
+      role="presentation"
+      aria-hidden={phase === "closing"}
+      onClick={onBackdropClick}
+      onAnimationEnd={handleAnimationEnd}
+    >
+      {children}
+    </div>
+  );
+}
+
+function FeedbackMessage({
+  message,
+  kind,
+  as = "span",
+  className = "",
+}: {
+  message: string | null;
+  kind: "error" | "notice";
+  as?: "span" | "p";
+  className?: string;
+}) {
+  const reducedMotion = usePrefersReducedMotion();
+  const [visible, setVisible] = useState<{ message: string; kind: "error" | "notice" } | null>(
+    () => message ? { message, kind } : null,
+  );
+  const [phase, setPhase] = useState<"entering" | "visible" | "exiting">("visible");
+  const frameRef = useRef<number | null>(null);
+  const hasVisibleRef = useRef(Boolean(message));
+
+  useEffect(() => {
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+
+    if (message) {
+      hasVisibleRef.current = true;
+      setVisible({ message, kind });
+      if (reducedMotion) {
+        setPhase("visible");
+        return;
+      }
+      setPhase("entering");
+      frameRef.current = window.requestAnimationFrame(() => {
+        frameRef.current = null;
+        setPhase("visible");
+      });
+      return () => {
+        if (frameRef.current !== null) {
+          window.cancelAnimationFrame(frameRef.current);
+          frameRef.current = null;
+        }
+      };
+    }
+
+    if (!hasVisibleRef.current) return undefined;
+    if (reducedMotion) {
+      hasVisibleRef.current = false;
+      setVisible(null);
+      setPhase("visible");
+    } else {
+      setPhase("exiting");
+    }
+    return undefined;
+  }, [kind, message, reducedMotion]);
+
+  const handleAnimationEnd = useCallback((event: ReactAnimationEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget || phase !== "exiting") return;
+    hasVisibleRef.current = false;
+    setVisible(null);
+    setPhase("visible");
+  }, [phase]);
+
+  if (!visible) return null;
+  const Element = as;
+  return (
+    <Element
+      key={`${visible.kind}-${visible.message}`}
+      className={`feedback-message ${visible.kind}-message feedback-${phase} ${className}`.trim()}
+      onAnimationEnd={handleAnimationEnd}
+    >
+      {visible.message}
+    </Element>
+  );
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(DEFAULT_SNAPSHOT);
   const [tab, setTab] = useState<AppTab>("translate");
@@ -109,12 +346,16 @@ function App() {
   const [wordExample, setWordExample] = useState<WordExampleState>(DEFAULT_WORD_EXAMPLE_STATE);
   const [dictionaryOpenRequest, setDictionaryOpenRequest] = useState<DictionaryOpenRequest | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [closeDialogMounted, setCloseDialogMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOverlayMounted, setSettingsOverlayMounted] = useState(false);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const activeRequestId = useRef<string | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
   const settingsDialogRef = useRef<HTMLDivElement | null>(null);
+  const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const closeDialogReturnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const window = getCurrentWindow();
@@ -141,21 +382,37 @@ function App() {
     };
   }, []);
 
+  const openSettings = useCallback(() => {
+    settingsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSettingsOverlayMounted(true);
+    setSettingsOpen(true);
+  }, []);
+
+  const requestSettingsClose = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
+
+  const handleSettingsClosed = useCallback(() => {
+    setSettingsOverlayMounted(false);
+    const previouslyFocused = settingsReturnFocusRef.current;
+    settingsReturnFocusRef.current = null;
+    previouslyFocused?.focus();
+  }, []);
+
   useEffect(() => {
     if (!settingsOpen) return;
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    settingsDialogRef.current?.focus();
+    const frame = window.requestAnimationFrame(() => settingsDialogRef.current?.focus());
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      setSettingsOpen(false);
+      requestSettingsClose();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", handleKeyDown);
-      previouslyFocused?.focus();
     };
-  }, [settingsOpen]);
+  }, [requestSettingsClose, settingsOpen]);
 
   const handleTitlebarMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -267,11 +524,28 @@ function App() {
     };
   }, []);
 
+  const openCloseDialog = useCallback(() => {
+    closeDialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setCloseDialogMounted(true);
+    setCloseDialogOpen(true);
+  }, []);
+
+  const requestCloseDialog = useCallback(() => {
+    setCloseDialogOpen(false);
+  }, []);
+
+  const handleCloseDialogClosed = useCallback(() => {
+    setCloseDialogMounted(false);
+    const previouslyFocused = closeDialogReturnFocusRef.current;
+    closeDialogReturnFocusRef.current = null;
+    previouslyFocused?.focus();
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void listenTo<unknown>("window_close_requested", () => {
-      if (!disposed) setCloseDialogOpen(true);
+      if (!disposed) openCloseDialog();
     }).then((next) => {
       if (disposed) next();
       else unlisten = next;
@@ -282,7 +556,7 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [openCloseDialog]);
 
   const applyTranslationResult = useCallback((requestId: string, result: TranslationCommandResult) => {
     if (requestId !== activeRequestId.current) return;
@@ -769,7 +1043,7 @@ function App() {
           <ModeButton icon={<History size={15} />} label="翻译历史" active={tab === "history"} onClick={() => setTab("history")} />
         </nav>
         <div className="chrome-actions" data-no-drag>
-          <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={() => setSettingsOpen(true)} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
+          <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={openSettings} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
           <div className="window-controls" data-no-drag>
             <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={14} /></button>
             <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
@@ -779,66 +1053,77 @@ function App() {
       </header>
 
       <main className="main-content">
-          {tab === "translate" && (
-            <TranslateView
-              sourceText={sourceText}
-              translatedText={translatedText}
-              sourceLanguage={sourceLanguage}
-              targetLanguage={targetLanguage}
-              selectedModel={selectedModel}
-              status={status}
-              error={error ?? translationEventsError}
-              notice={notice}
-              cacheHit={lastCacheHit}
-              eventsReady={translationEventsReady}
-              onSourceTextChange={setSourceText}
-              onSourceLanguageChange={setSourceLanguage}
-              onTargetLanguageChange={setTargetLanguage}
-              onTranslate={() => void handleTranslate()}
-              onCancel={() => void handleCancel()}
-              onCopy={() => void handleCopy()}
-            />
-          )}
-          {tab === "dictionary" && (
-            <DictionaryView
-              state={snapshot.dictionary}
-              history={snapshot.dictionaryHistory}
-              progress={dictionaryProgress}
-              targetLanguage={targetLanguage}
-              wordExample={wordExample}
-              onUpdate={handleDictionaryUpdate}
-              onHistoryChanged={handleDictionaryHistoryChanged}
-              onSnapshotChanged={refreshSnapshot}
-              onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
-              onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
-              personalDictionary={snapshot.personalDictionary}
-              openRequest={dictionaryOpenRequest}
-              onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
-              onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
-            />
-          )}
-          {tab === "personal" && (
-            <PersonalDictionaryView
-              entries={snapshot.personalDictionary}
-              onOpen={openPersonalWord}
-              onRemove={(entry) => { void removePersonalWord(entry); }}
-            />
-          )}
-          {tab === "glossary" && (
-            <GlossaryView terms={snapshot.glossaryTerms} onChanged={() => void refreshSnapshot()} />
-          )}
-          {tab === "history" && <HistoryView history={snapshot.history} />}
+        <PageTransition activeKey={tab}>
+          <div className="page-view" key={tab}>
+            {tab === "translate" && (
+              <TranslateView
+                sourceText={sourceText}
+                translatedText={translatedText}
+                sourceLanguage={sourceLanguage}
+                targetLanguage={targetLanguage}
+                selectedModel={selectedModel}
+                status={status}
+                error={error ?? translationEventsError}
+                notice={notice}
+                cacheHit={lastCacheHit}
+                eventsReady={translationEventsReady}
+                onSourceTextChange={setSourceText}
+                onSourceLanguageChange={setSourceLanguage}
+                onTargetLanguageChange={setTargetLanguage}
+                onTranslate={() => void handleTranslate()}
+                onCancel={() => void handleCancel()}
+                onCopy={() => void handleCopy()}
+              />
+            )}
+            {tab === "dictionary" && (
+              <DictionaryView
+                state={snapshot.dictionary}
+                history={snapshot.dictionaryHistory}
+                progress={dictionaryProgress}
+                targetLanguage={targetLanguage}
+                wordExample={wordExample}
+                onUpdate={handleDictionaryUpdate}
+                onHistoryChanged={handleDictionaryHistoryChanged}
+                onSnapshotChanged={refreshSnapshot}
+                onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
+                onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
+                personalDictionary={snapshot.personalDictionary}
+                openRequest={dictionaryOpenRequest}
+                onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
+                onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
+              />
+            )}
+            {tab === "personal" && (
+              <PersonalDictionaryView
+                entries={snapshot.personalDictionary}
+                onOpen={openPersonalWord}
+                onRemove={(entry) => { void removePersonalWord(entry); }}
+              />
+            )}
+            {tab === "glossary" && (
+              <GlossaryView terms={snapshot.glossaryTerms} onChanged={() => void refreshSnapshot()} />
+            )}
+            {tab === "history" && <HistoryView history={snapshot.history} />}
+          </div>
+        </PageTransition>
       </main>
       </div>
-      {settingsOpen && (
-        <div className="settings-overlay" role="presentation">
+      {settingsOverlayMounted && (
+        <AnimatedOverlay
+          className="settings-overlay"
+          open={settingsOpen}
+          onClosed={handleSettingsClosed}
+          onBackdropClick={(event) => {
+            if (event.target === event.currentTarget) requestSettingsClose();
+          }}
+        >
           <div className="settings-dialog" ref={settingsDialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabIndex={-1}>
             <div className="settings-dialog-heading">
               <div>
                 <span className="settings-dialog-eyebrow">SETTINGS</span>
                 <strong id="settings-dialog-title">设置</strong>
               </div>
-              <button className="icon-button" type="button" onClick={() => setSettingsOpen(false)} aria-label="关闭设置" title="关闭设置"><X size={17} /></button>
+              <button className="icon-button" type="button" onClick={requestSettingsClose} aria-label="关闭设置" title="关闭设置"><X size={17} /></button>
             </div>
             <div className="settings-dialog-scroll">
               <SettingsView
@@ -850,16 +1135,47 @@ function App() {
               />
             </div>
           </div>
-        </div>
+        </AnimatedOverlay>
       )}
-      {closeDialogOpen && <CloseBehaviorDialog onResolved={() => setCloseDialogOpen(false)} />}
+      {closeDialogMounted && (
+        <CloseBehaviorDialog
+          open={closeDialogOpen}
+          onResolved={requestCloseDialog}
+          onClosed={handleCloseDialogClosed}
+        />
+      )}
     </div>
   );
 }
 
-function CloseBehaviorDialog({ onResolved }: { onResolved: () => void }) {
+function CloseBehaviorDialog({
+  open,
+  onResolved,
+  onClosed,
+}: {
+  open: boolean;
+  onResolved: () => void;
+  onClosed: () => void;
+}) {
   const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onResolved();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onResolved, open]);
+
   const resolve = async (action: Exclude<CloseBehavior, "ask">) => {
     setError(null);
     try {
@@ -870,14 +1186,21 @@ function CloseBehaviorDialog({ onResolved }: { onResolved: () => void }) {
     }
   };
   return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
+    <AnimatedOverlay
+      className="modal-backdrop"
+      open={open}
+      onClosed={onClosed}
+      onBackdropClick={(event) => {
+        if (event.target === event.currentTarget) onResolved();
+      }}
+    >
+      <div className="modal-card" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="close-dialog-title" tabIndex={-1}>
         <div className="modal-heading"><div><strong id="close-dialog-title">关闭 Lilt</strong><span>选择本次关闭窗口的处理方式。</span></div><button className="icon-button" type="button" onClick={onResolved} aria-label="取消"><X size={17} /></button></div>
         <label className="modal-check"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住我的选择</label>
         {error && <p className="error-message settings-message">{error}</p>}
         <div className="form-actions modal-actions"><button className="secondary-button" type="button" onClick={() => void resolve("tray")}>缩小到托盘</button><button className="primary-button" type="button" onClick={() => void resolve("exit")}>退出程序</button></div>
       </div>
-    </div>
+    </AnimatedOverlay>
   );
 }
 
@@ -959,8 +1282,10 @@ function TranslateView(props: TranslateViewProps) {
 
       <div className="action-row">
         <div className="message-area">
-          {props.error && <span className="error-message">{props.error}</span>}
-          {!props.error && props.notice && <span className="notice-message">{props.notice}</span>}
+          <FeedbackMessage
+            message={props.error ?? props.notice}
+            kind={props.error ? "error" : "notice"}
+          />
         </div>
         {isBusy ? (
           <button className="primary-button cancel-button" type="button" onClick={props.onCancel} disabled={props.status === "cancelling"}>
