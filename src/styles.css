@@ -27,7 +27,9 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 
 .app-shell { width: 100%; height: 100vh; min-height: 100vh; overflow: hidden; }
 .main-surface { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: #f5f3ed; }
-.app-chrome { min-height: 76px; padding: 0 18px 0 22px; display: grid; grid-template-columns: minmax(140px, 1fr) auto minmax(140px, 1fr); align-items: center; gap: 18px; border-bottom: 1px solid #e4e2da; background: rgba(250, 249, 245, .9); user-select: none; }
+.app-chrome { position: relative; z-index: 2; min-height: 76px; padding: 0 18px 0 22px; display: grid; grid-template-columns: minmax(140px, 1fr) auto minmax(140px, 1fr); align-items: center; gap: 18px; background: linear-gradient(180deg, rgba(245, 244, 238, .97) 0%, rgba(239, 238, 231, .84) 72%, rgba(239, 238, 231, 0) 100%); -webkit-backdrop-filter: blur(10px) brightness(.92); backdrop-filter: blur(10px) brightness(.92); user-select: none; }
+.app-chrome::after { content: ""; position: absolute; z-index: 0; top: 100%; right: 0; left: 0; height: 38px; pointer-events: none; background: linear-gradient(180deg, rgba(218, 219, 211, .42), rgba(245, 243, 237, 0)); -webkit-backdrop-filter: blur(14px) brightness(.86); backdrop-filter: blur(14px) brightness(.86); }
+.app-chrome > * { position: relative; z-index: 1; }
 .brand-lockup { width: max-content; display: flex; align-items: center; gap: 8px; color: #303f35; }
 .brand-logo { width: 23px; height: 23px; display: block; border-radius: 7px; }
 .brand-name { color: #303f35; font-family: Georgia, serif; font-size: 18px; line-height: 1; }
