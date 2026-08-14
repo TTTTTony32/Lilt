@@ -76,6 +76,15 @@ const LANGUAGE_OPTIONS = [
   ["韩语", "ko"],
 ] as const;
 
+interface TranslationSummary {
+  durationMs: number;
+  cacheHit: boolean;
+}
+
+function formatTranslationSummary(summary: TranslationSummary): string {
+  return `${(summary.durationMs / 1000).toFixed(2)}秒·${summary.cacheHit ? "缓存命中" : "未命中缓存"}`;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -338,6 +347,7 @@ function App() {
   const [status, setStatus] = useState<TranslationStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [translationSummary, setTranslationSummary] = useState<TranslationSummary | null>(null);
   const [translationEventsReady, setTranslationEventsReady] = useState(false);
   const [translationEventsError, setTranslationEventsError] = useState<string | null>(null);
   const [dictionaryProgress, setDictionaryProgress] = useState<DictionaryProgress | null>(null);
@@ -350,6 +360,7 @@ function App() {
   const [settingsOverlayMounted, setSettingsOverlayMounted] = useState(false);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const activeRequestId = useRef<string | null>(null);
+  const translationStartedAt = useRef<number | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
   const settingsDialogRef = useRef<HTMLDivElement | null>(null);
@@ -560,18 +571,26 @@ function App() {
   const applyTranslationResult = useCallback((requestId: string, result: TranslationCommandResult) => {
     if (requestId !== activeRequestId.current) return;
     activeRequestId.current = null;
+    const startedAt = translationStartedAt.current;
+    translationStartedAt.current = null;
     switch (result.outcome) {
       case "completed":
         setTranslatedText(result.content ?? "");
+        setTranslationSummary({
+          durationMs: startedAt === null ? 0 : Math.max(0, performance.now() - startedAt),
+          cacheHit: result.cacheHit,
+        });
         setError(null);
         setStatus("completed");
         void refreshSnapshot();
         break;
       case "cancelled":
+        setTranslationSummary(null);
         setError(null);
         setStatus("idle");
         break;
       case "failed":
+        setTranslationSummary(null);
         setError(result.message ?? "翻译请求失败");
         setStatus("failed");
         break;
@@ -959,6 +978,8 @@ function App() {
     setError(null);
     setNotice(null);
     setTranslatedText("");
+    setTranslationSummary(null);
+    translationStartedAt.current = performance.now();
     setStatus("streaming");
     try {
       const rawResult = await invokeCommand<unknown>("translate", {
@@ -975,6 +996,7 @@ function App() {
       const result = decodeTranslationCommandResult(rawResult);
       if (!result) {
         activeRequestId.current = null;
+        translationStartedAt.current = null;
         setError("翻译命令返回了无法识别的终态。");
         setStatus("failed");
         return;
@@ -983,6 +1005,8 @@ function App() {
     } catch (reason) {
       if (activeRequestId.current !== requestId) return;
       activeRequestId.current = null;
+      translationStartedAt.current = null;
+      setTranslationSummary(null);
       setError(describeError(reason, "翻译请求失败"));
       setStatus("failed");
     }
@@ -1001,6 +1025,8 @@ function App() {
         return;
       }
       if (!result) {
+        translationStartedAt.current = null;
+        setTranslationSummary(null);
         setError(null);
         setStatus("idle");
       }
@@ -1056,6 +1082,7 @@ function App() {
                 status={status}
                 error={error ?? translationEventsError}
                 notice={notice}
+                translationSummary={translationSummary}
                 eventsReady={translationEventsReady}
                 onSourceTextChange={setSourceText}
                 onSourceLanguageChange={setSourceLanguage}
@@ -1273,6 +1300,7 @@ interface TranslateViewProps {
   status: TranslationStatus;
   error: string | null;
   notice: string | null;
+  translationSummary: TranslationSummary | null;
   eventsReady: boolean;
   onSourceTextChange: (value: string) => void;
   onSourceLanguageChange: (value: string) => void;
@@ -1310,11 +1338,8 @@ function TranslateView(props: TranslateViewProps) {
               <textarea
                 value={props.sourceText}
                 onChange={(event) => props.onSourceTextChange(event.target.value)}
-                placeholder="粘贴需要翻译的英文段落……"
                 spellCheck={false}
               />
-              <span className="translation-edge-fade translation-edge-fade-top" aria-hidden="true" />
-              <span className="translation-edge-fade translation-edge-fade-bottom" aria-hidden="true" />
             </div>
             <div className="panel-footer"><span>{props.sourceText.length} 字符</span></div>
           </div>
@@ -1333,14 +1358,12 @@ function TranslateView(props: TranslateViewProps) {
           <div className="translation-panel result-panel">
             <div className="translation-scroll-region">
               <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
-                {props.translatedText || <span className="empty-result">译文会显示在这里</span>}
+                {props.translatedText}
                 {props.status === "streaming" && <span className="stream-caret" />}
               </div>
-              <span className="translation-edge-fade translation-edge-fade-top" aria-hidden="true" />
-              <span className="translation-edge-fade translation-edge-fade-bottom" aria-hidden="true" />
             </div>
             <div className="panel-footer result-footer">
-              <span>{props.status === "completed" ? "已完成" : ""}</span>
+              <span>{props.status === "completed" && props.translationSummary ? formatTranslationSummary(props.translationSummary) : ""}</span>
               <button className="icon-button" title="复制译文" aria-label="复制译文" onClick={props.onCopy} disabled={!props.translatedText} type="button"><Copy size={16} /></button>
             </div>
           </div>
