@@ -77,19 +77,14 @@ pub enum CloseBehavior {
     Tray,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
+    #[default]
     None,
     Low,
     Medium,
     High,
-}
-
-impl Default for ThinkingEffort {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl ThinkingEffort {
