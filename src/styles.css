@@ -181,16 +181,16 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-stack .simple-card:last-child { margin-bottom: 0; }
 .settings-message { margin: 12px 0 0; font-size: 12px; }
 
-.dictionary-search-card { position: relative; z-index: 3; margin-bottom: 18px; padding: 12px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
+.dictionary-search-card { position: relative; z-index: 1; margin-bottom: 18px; padding: 12px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
+.dictionary-search-card.has-suggestions { z-index: 4; }
 .dictionary-search-form { display: flex; align-items: center; gap: 10px; }
 .dictionary-input-wrap { position: relative; flex: 1; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: #8b958b; }
 .dictionary-input-wrap input { height: 42px; padding: 0; border: 0; background: transparent; font-size: 14px; }
 .dictionary-input-wrap input:focus { border: 0; box-shadow: none; }
-.dictionary-history-menu { position: absolute; z-index: 2; top: calc(100% + 1px); right: 0; left: 0; overflow: hidden; border: 1px solid #d8d9d0; border-radius: 8px; background: #fffefb; box-shadow: 0 9px 24px rgba(53, 62, 53, .09); }
-.dictionary-history-menu button { width: 100%; min-height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; border: 0; border-bottom: 1px solid #efede6; color: #59685c; background: transparent; text-align: left; font-size: 12px; }
-.dictionary-history-menu button:last-child { border-bottom: 0; }
-.dictionary-history-menu button:hover { background: #f0f3ed; }
-.dictionary-history-menu small { color: #a1a49a; font-size: 10px; }
+.dictionary-suggestion-menu { position: absolute; z-index: 2; top: calc(100% + 1px); right: 0; left: 0; overflow: hidden; border: 1px solid #d8d9d0; border-radius: 8px; background: #fffefb; box-shadow: 0 9px 24px rgba(53, 62, 53, .09); }
+.dictionary-suggestion-menu button { width: 100%; min-height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; border: 0; border-bottom: 1px solid #efede6; color: #59685c; background: transparent; text-align: left; font-size: 12px; }
+.dictionary-suggestion-menu button:last-child { border-bottom: 0; }
+.dictionary-suggestion-menu button:hover { background: #f0f3ed; }
 .dictionary-message { margin: 12px 2px; font-size: 12px; }
 .dictionary-recent-card { margin-bottom: 18px; padding: 18px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
 .dictionary-recent-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-bottom: 12px; }
@@ -214,7 +214,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-progress-track { height: 5px; overflow: hidden; border-radius: 5px; background: #e2e5de; }
 .dictionary-progress-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
 .dictionary-empty-state { padding: 55px 20px; border: 1px dashed #d9d9d0; border-radius: 10px; color: #a4a69d; background: rgba(251, 250, 247, .55); text-align: center; font-size: 12px; }
-.dictionary-entry { overflow: hidden; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); animation: dictionary-result-in var(--motion-standard-duration) var(--motion-ease) both; }
+.dictionary-entry { position: relative; z-index: 3; overflow: hidden; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); animation: dictionary-result-in var(--motion-standard-duration) var(--motion-ease) both; }
 @keyframes dictionary-result-in {
   from { opacity: 0; transform: translateY(7px) scale(.992); }
   to { opacity: 1; transform: translateY(0) scale(1); }

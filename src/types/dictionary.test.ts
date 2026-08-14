@@ -4,6 +4,7 @@ import {
   decodeDictionaryLookupCommandResult,
   decodeDictionaryLookupResult,
   decodeDictionaryState,
+  decodeDictionarySuggestions,
   decodeDictionaryUpdateEvent,
   splitMeaningsByPriority,
 } from "./dictionary";
@@ -85,6 +86,18 @@ describe("dictionary contracts", () => {
       example: null,
       history,
     })).toEqual({ lookup, candidates: [], example: null, history });
+  });
+
+  it("decodes full-dictionary suggestions and rejects malformed rows", () => {
+    expect(decodeDictionarySuggestions([
+      { word: "resolve", normalizedWord: "resolve" },
+      { word: "resident", normalizedWord: "resident" },
+    ])).toEqual([
+      { word: "resolve", normalizedWord: "resolve" },
+      { word: "resident", normalizedWord: "resident" },
+    ]);
+    expect(decodeDictionarySuggestions([{ word: "resolve" }])).toBeNull();
+    expect(decodeDictionarySuggestions({ word: "resolve" })).toBeNull();
   });
 
   it("rejects missing or malformed lookup and history fields", () => {

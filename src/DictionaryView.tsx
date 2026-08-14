@@ -4,6 +4,7 @@ import { describeError } from "./lib/errors";
 import { invokeCommand } from "./lib/tauri";
 import {
   decodeDictionaryLookupCommandResult,
+  decodeDictionarySuggestions,
   collectPronunciations,
   groupRelationsByType,
   posLabelZh,
@@ -15,6 +16,7 @@ import {
   type DictionaryPosGroup,
   type DictionaryState,
   type DictionaryLookupCandidate,
+  type DictionarySuggestion,
   type ParagraphExample,
 } from "./types/dictionary";
 import type { PersonalDictionaryEntry, WordExampleState } from "./types/contracts";
@@ -99,15 +101,14 @@ export default function DictionaryView({
   const [notFound, setNotFound] = useState(false);
   const [querying, setQuerying] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<DictionarySuggestion[]>([]);
   const [savingFavorite, setSavingFavorite] = useState(false);
+  const suggestionRequestId = useRef(0);
   const lastOpenRequestId = useRef<string | null>(null);
   const updating = state.status === "updating" || progress !== null;
-  const historyQuery = word.trim().toLowerCase();
-  const matchingHistory = historyQuery
-    ? history.filter((item) => item.normalizedWord.includes(historyQuery))
-    : [];
-  const showHistoryMenu = historyOpen && historyQuery.length > 0 && matchingHistory.length > 0;
+  const suggestionQuery = word.trim();
+  const showSuggestionMenu = suggestionsOpen && suggestionQuery.length > 0 && suggestions.length > 0;
 
   const query = useCallback(async (candidate: string, selectedCanonicalWord?: string) => {
     const trimmed = candidate.trim();
@@ -126,7 +127,9 @@ export default function DictionaryView({
     setResult(null);
     setLookupMeta(null);
     setExample(null);
-    setHistoryOpen(false);
+    suggestionRequestId.current += 1;
+    setSuggestionsOpen(false);
+    setSuggestions([]);
     onWordExampleRequested(null);
     try {
       const rawResult = await invokeCommand<unknown>("query_dictionary", {
@@ -153,7 +156,8 @@ export default function DictionaryView({
         });
       }
       onHistoryChanged(decoded.history);
-      setHistoryOpen(false);
+      setSuggestionsOpen(false);
+      setSuggestions([]);
     } catch (reason) {
       setResult(null);
       setLookupMeta(null);
@@ -166,6 +170,28 @@ export default function DictionaryView({
       setQuerying(false);
     }
   }, [onHistoryChanged, onWordExampleRequested, state.error, state.status, targetLanguage]);
+
+  useEffect(() => {
+    const queryText = word.trim();
+    const requestId = ++suggestionRequestId.current;
+    if (!suggestionsOpen || !queryText || state.status !== "ready" || updating) {
+      setSuggestions([]);
+      return;
+    }
+    setSuggestions([]);
+    const timer = window.setTimeout(() => {
+      void invokeCommand<unknown>("suggest_dictionary", { word: queryText })
+        .then((rawResult) => {
+          if (requestId !== suggestionRequestId.current) return;
+          const decoded = decodeDictionarySuggestions(rawResult);
+          setSuggestions(decoded ?? []);
+        })
+        .catch(() => {
+          if (requestId === suggestionRequestId.current) setSuggestions([]);
+        });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [state.status, suggestionsOpen, updating, word]);
 
   useEffect(() => {
     if (!openRequest || openRequest.requestId === lastOpenRequestId.current) return;
@@ -202,7 +228,9 @@ export default function DictionaryView({
     try {
       await invokeCommand("clear_dictionary_history");
       await onSnapshotChanged();
-      setHistoryOpen(false);
+      suggestionRequestId.current += 1;
+      setSuggestionsOpen(false);
+      setSuggestions([]);
     } catch (reason) {
       setQueryError(describeError(reason, "清空词典历史失败"));
     }
@@ -220,13 +248,17 @@ export default function DictionaryView({
         )}
       </div>
 
-      <div className="dictionary-search-card">
+      <div className={`dictionary-search-card ${showSuggestionMenu ? "has-suggestions" : ""}`}>
         <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
           <div
             className="dictionary-input-wrap"
             onBlur={(event) => {
               const nextTarget = event.relatedTarget;
-              if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setHistoryOpen(false);
+              if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+                suggestionRequestId.current += 1;
+                setSuggestionsOpen(false);
+                setSuggestions([]);
+              }
             }}
           >
             <Search size={17} aria-hidden="true" />
@@ -235,29 +267,30 @@ export default function DictionaryView({
               onChange={(event) => {
                 const nextWord = event.target.value;
                 setWord(nextWord);
-                setHistoryOpen(nextWord.trim().length > 0);
+                suggestionRequestId.current += 1;
+                setSuggestions([]);
+                setSuggestionsOpen(nextWord.trim().length > 0);
               }}
-              onFocus={() => setHistoryOpen(word.trim().length > 0)}
+              onFocus={() => setSuggestionsOpen(word.trim().length > 0)}
               placeholder="输入单词、词组或短语"
               aria-label="词典查询"
-              aria-controls="dictionary-history-menu"
-              aria-expanded={showHistoryMenu}
+              aria-controls="dictionary-suggestion-menu"
+              aria-expanded={showSuggestionMenu}
               aria-autocomplete="list"
               autoComplete="off"
               disabled={updating}
             />
-            {showHistoryMenu && (
-              <div className="dictionary-history-menu" id="dictionary-history-menu" role="listbox" aria-label="查询历史匹配">
-                {matchingHistory.map((item) => (
+            {showSuggestionMenu && (
+              <div className="dictionary-suggestion-menu" id="dictionary-suggestion-menu" role="listbox" aria-label="词典候选">
+                {suggestions.map((suggestion) => (
                   <button
-                    key={item.normalizedWord}
+                    key={suggestion.normalizedWord}
                     type="button"
                     role="option"
                     onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => { setWord(item.displayWord); void query(item.displayWord); }}
+                    onClick={() => { setWord(suggestion.word); void query(suggestion.word); }}
                   >
-                    <span>{item.displayWord}</span>
-                    <small>{item.queryCount} 次</small>
+                    <span>{suggestion.word}</span>
                   </button>
                 ))}
               </div>

@@ -1,8 +1,8 @@
 use crate::contracts::{
     DictionaryCommandResult, DictionaryDownloadProgress, DictionaryExtractProgress,
     DictionaryLookupResult, DictionaryMatchType, DictionaryState, DictionaryStatus,
-    DictionaryUpdateCompleted, DictionaryUpdateFailed, DictionaryUpdateStarted,
-    DictionaryVerifyProgress, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
+    DictionarySuggestion, DictionaryUpdateCompleted, DictionaryUpdateFailed,
+    DictionaryUpdateStarted, DictionaryVerifyProgress, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
     DICTIONARY_SQLITE_SCHEMA_VERSION,
 };
 use crate::db::{self, DictionaryInstallationRecord};
@@ -42,6 +42,7 @@ const GITHUB_RELEASE_URL: &str =
 const MAX_DOWNLOAD_RETRIES: u32 = 2;
 const PROGRESS_CHUNK: u64 = 4 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DICTIONARY_SUGGESTION_LIMIT: i64 = 8;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DictionaryError {
@@ -320,6 +321,46 @@ impl DictionaryStore {
         )
     }
 
+    pub fn suggest(
+        &self,
+        word: &str,
+        limit: i64,
+    ) -> Result<Vec<DictionarySuggestion>, DictionaryError> {
+        let normalized_word = normalize_headword(word);
+        if normalized_word.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("{}%", escape_like_prefix(&normalized_word));
+        let connection = self.connection.as_ref().ok_or_else(|| {
+            self.validation_error
+                .clone()
+                .unwrap_or(DictionaryError::NotInstalled)
+        })?;
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT headword, normalized_headword
+                 FROM entries
+                 WHERE headword_language_code = 'en'
+                   AND normalized_headword LIKE ?1 ESCAPE '\\'
+                 ORDER BY normalized_headword
+                 LIMIT ?2",
+            )
+            .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+        let rows = statement
+            .query_map(
+                (pattern, limit.clamp(1, DICTIONARY_SUGGESTION_LIMIT)),
+                |row| {
+                    Ok(DictionarySuggestion {
+                        word: row.get(0)?,
+                        normalized_word: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DictionaryError::DatabaseUnreadable(error.to_string()))
+    }
+
     #[cfg(test)]
     pub fn lookup(&self, word: &str) -> Result<DictionaryLookupMeasurement, DictionaryError> {
         match self.resolve(word, None)? {
@@ -534,6 +575,13 @@ struct ReleasePlan {
 
 pub fn normalize_headword(word: &str) -> String {
     word.trim().to_lowercase()
+}
+
+fn escape_like_prefix(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn open_read_only(path: &Path) -> Result<Connection, DictionaryError> {
@@ -1486,6 +1534,22 @@ mod tests {
     fn normalizes_trimmed_headwords_case_insensitively() {
         assert_eq!(normalize_headword("  ReSoLvE  "), "resolve");
         assert_eq!(normalize_headword("Ä"), "ä");
+    }
+
+    #[test]
+    fn suggests_indexed_canonical_headwords_without_loading_entry_json() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_runtime("suggestion_test").unwrap();
+
+        let suggestions = store.suggest("  RES  ", 8).unwrap();
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].word, "resolve");
+        assert_eq!(suggestions[0].normalized_word, "resolve");
+        assert!(store.suggest("RES%", 8).unwrap().is_empty());
+        assert!(store.suggest("zzz", 8).unwrap().is_empty());
+        remove_directory(&directory);
     }
 
     #[test]
