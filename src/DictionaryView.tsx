@@ -103,6 +103,11 @@ export default function DictionaryView({
   const [savingFavorite, setSavingFavorite] = useState(false);
   const lastOpenRequestId = useRef<string | null>(null);
   const updating = state.status === "updating" || progress !== null;
+  const historyQuery = word.trim().toLowerCase();
+  const matchingHistory = historyQuery
+    ? history.filter((item) => item.normalizedWord.includes(historyQuery))
+    : [];
+  const showHistoryMenu = historyOpen && historyQuery.length > 0 && matchingHistory.length > 0;
 
   const query = useCallback(async (candidate: string, selectedCanonicalWord?: string) => {
     const trimmed = candidate.trim();
@@ -121,6 +126,7 @@ export default function DictionaryView({
     setResult(null);
     setLookupMeta(null);
     setExample(null);
+    setHistoryOpen(false);
     onWordExampleRequested(null);
     try {
       const rawResult = await invokeCommand<unknown>("query_dictionary", {
@@ -192,13 +198,22 @@ export default function DictionaryView({
     }
   };
 
+  const clearHistory = async () => {
+    try {
+      await invokeCommand("clear_dictionary_history");
+      await onSnapshotChanged();
+      setHistoryOpen(false);
+    } catch (reason) {
+      setQueryError(describeError(reason, "清空词典历史失败"));
+    }
+  };
+
   return (
     <section className="page-section dictionary-page">
       <div className="page-heading">
         <div>
           <p className="eyebrow">DICTIONARY</p>
           <h1>词典</h1>
-          <p className="page-description">离线查询英语词条、中文释义和官方双语例句。</p>
         </div>
         {state.status === "ready" && state.installedRelease && (
           <div className="model-pill">{state.installedRelease}</div>
@@ -207,20 +222,33 @@ export default function DictionaryView({
 
       <div className="dictionary-search-card">
         <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
-          <div className="dictionary-input-wrap">
+          <div
+            className="dictionary-input-wrap"
+            onBlur={(event) => {
+              const nextTarget = event.relatedTarget;
+              if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setHistoryOpen(false);
+            }}
+          >
             <Search size={17} aria-hidden="true" />
             <input
               value={word}
-              onChange={(event) => setWord(event.target.value)}
-              onFocus={() => setHistoryOpen(true)}
-              placeholder="输入英语词形，例如 resolve"
+              onChange={(event) => {
+                const nextWord = event.target.value;
+                setWord(nextWord);
+                setHistoryOpen(nextWord.trim().length > 0);
+              }}
+              onFocus={() => setHistoryOpen(word.trim().length > 0)}
+              placeholder="输入单词、词组或短语"
               aria-label="词典查询"
+              aria-controls="dictionary-history-menu"
+              aria-expanded={showHistoryMenu}
+              aria-autocomplete="list"
               autoComplete="off"
               disabled={updating}
             />
-            {historyOpen && history.length > 0 && (
-              <div className="dictionary-history-menu" role="listbox">
-                {history.map((item) => (
+            {showHistoryMenu && (
+              <div className="dictionary-history-menu" id="dictionary-history-menu" role="listbox" aria-label="查询历史匹配">
+                {matchingHistory.map((item) => (
                   <button
                     key={item.normalizedWord}
                     type="button"
@@ -229,25 +257,9 @@ export default function DictionaryView({
                     onClick={() => { setWord(item.displayWord); void query(item.displayWord); }}
                   >
                     <span>{item.displayWord}</span>
-                    {item.queryCount > 1 && <small>{item.queryCount} 次</small>}
+                    <small>{item.queryCount} 次</small>
                   </button>
                 ))}
-                <button
-                  type="button"
-                  className="dictionary-history-clear"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={async () => {
-                    try {
-                      await invokeCommand("clear_dictionary_history");
-                      await onSnapshotChanged();
-                      setHistoryOpen(false);
-                    } catch (reason) {
-                      setQueryError(describeError(reason, "清空词典历史失败"));
-                    }
-                  }}
-                >
-                  清空历史
-                </button>
               </div>
             )}
           </div>
@@ -288,7 +300,29 @@ export default function DictionaryView({
         <div className="dictionary-empty-state">没有找到对应词条。</div>
       )}
       {state.status === "ready" && !result && !notFound && candidates.length === 0 && !queryError && (
-        <div className="dictionary-empty-state">输入词形后，结果会显示在这里。</div>
+        history.length > 0 ? (
+          <div className="dictionary-recent-card">
+            <div className="dictionary-recent-heading">
+              <div><strong>最近查询</strong><span>{history.length} 条记录</span></div>
+              <button className="text-button" type="button" onClick={() => void clearHistory()}>清空历史</button>
+            </div>
+            <div className="dictionary-recent-grid">
+              {history.map((item) => (
+                <button
+                  className="dictionary-recent-item"
+                  key={item.normalizedWord}
+                  type="button"
+                  onClick={() => { setWord(item.displayWord); void query(item.displayWord); }}
+                >
+                  <span>{item.displayWord}</span>
+                  <small>{item.queryCount} 次</small>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="dictionary-empty-state">{word.trim() ? "输入词形后，结果会显示在这里。" : "还没有最近查询。"}</div>
+        )
       )}
       {state.status === "ready" && result && (
         <DictionaryEntryView
