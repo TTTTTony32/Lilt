@@ -204,11 +204,11 @@ export default function DictionaryView({
   return (
     <section className="page-section dictionary-page">
       <div className="page-heading dictionary-page-heading">
-        <div className="dictionary-title-block">
+        <div className="page-title-block">
           <p className="eyebrow">DICTIONARY</p>
-          <div className="dictionary-title-line">
+          <div className="page-title-line">
             <h1>词典</h1>
-            <div className="dictionary-title-meta" aria-label="词典版本">
+            <div className="page-title-meta" aria-label="词典版本">
               <span>版本 {state.installedRelease ?? "未安装"}</span>
             </div>
           </div>

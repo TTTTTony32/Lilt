@@ -1507,11 +1507,15 @@ function TranslateView(props: TranslateViewProps) {
   return (
     <section className="page-section translate-page">
       <div className="page-heading">
-        <div>
+        <div className="page-title-block">
           <p className="eyebrow">TRANSLATE</p>
-          <h1>段落翻译</h1>
+          <div className="page-title-line">
+            <h1>段落翻译</h1>
+            <div className="page-title-meta" aria-label="当前翻译模型">
+              <span>模型 {props.selectedModel || "未配置模型"}</span>
+            </div>
+          </div>
         </div>
-        <div className="model-pill">{props.selectedModel || "未配置模型"}</div>
       </div>
 
       <div className="translation-grid">
