@@ -1,8 +1,40 @@
+# 依赖、构建产物和测试输出
 node_modules/
 dist/
+coverage/
 src-tauri/target/
 src-tauri/gen/
-.trellis/tasks/**/research/dictionary-artifact/
+
+# 本地日志和调试输出
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 本地环境变量
 .env
 .env.*
 !.env.example
+
+# 操作系统和编辑器生成的文件
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 本地 Trellis、AI 代理和开发说明
+/.agents/
+/.codex/
+/.trellis/
+/AGENTS.md
+/.gitattributes
+
+# 本地参考项目
+/reference-projects/
+
+# 不随源码发布的早期设计文档
+/Lilt：产品与技术方案.md
