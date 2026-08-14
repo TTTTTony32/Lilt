@@ -109,10 +109,12 @@ function App() {
   const [wordExample, setWordExample] = useState<WordExampleState>(DEFAULT_WORD_EXAMPLE_STATE);
   const [dictionaryOpenRequest, setDictionaryOpenRequest] = useState<DictionaryOpenRequest | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const activeRequestId = useRef<string | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
+  const settingsDialogRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const window = getCurrentWindow();
@@ -138,6 +140,22 @@ function App() {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    settingsDialogRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setSettingsOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [settingsOpen]);
 
   const handleTitlebarMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -737,44 +755,30 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar" onMouseDown={handleTitlebarMouseDown}>
+      <div className="main-surface">
+      <header className="app-chrome" onMouseDown={handleTitlebarMouseDown}>
         <div className="brand-lockup">
           <img className="brand-logo" src={liltLogo} alt="" />
-          <div>
-            <div className="brand-name">Lilt</div>
-            <div className="brand-caption">阅读辅助工具</div>
-          </div>
+          <span className="brand-name">Lilt</span>
         </div>
-        <div className="topbar-actions">
-          <div className="topbar-status">
-            <span className="status-dot" />
-            本地运行
-          </div>
+        <nav className="mode-switcher" aria-label="工作模式" data-no-drag>
+          <ModeButton icon={<Languages size={15} />} label="段落翻译" active={tab === "translate"} onClick={() => setTab("translate")} />
+          <ModeButton icon={<BookOpen size={15} />} label="词典" active={tab === "dictionary"} onClick={() => setTab("dictionary")} />
+          <ModeButton icon={<Bookmark size={15} />} label="个人词典" active={tab === "personal"} onClick={() => setTab("personal")} />
+          <ModeButton icon={<FileText size={15} />} label="术语表" active={tab === "glossary"} onClick={() => setTab("glossary")} />
+          <ModeButton icon={<History size={15} />} label="翻译历史" active={tab === "history"} onClick={() => setTab("history")} />
+        </nav>
+        <div className="chrome-actions" data-no-drag>
+          <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={() => setSettingsOpen(true)} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
           <div className="window-controls" data-no-drag>
-            <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={15} /></button>
-            <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
-            <button className="window-control window-control-close" type="button" onClick={closeMainWindow} aria-label="关闭窗口" title="关闭"><X size={15} /></button>
+            <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={14} /></button>
+            <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
+            <button className="window-control window-control-close" type="button" onClick={closeMainWindow} aria-label="关闭窗口" title="关闭"><X size={14} /></button>
           </div>
         </div>
       </header>
 
-      <div className="workspace">
-        <aside className="sidebar">
-          <nav className="nav-list" aria-label="主导航">
-            <NavItem icon={<Languages size={17} />} label="段落翻译" active={tab === "translate"} onClick={() => setTab("translate")} />
-            <NavItem icon={<BookOpen size={17} />} label="词典" active={tab === "dictionary"} onClick={() => setTab("dictionary")} />
-            <NavItem icon={<Bookmark size={17} />} label="个人词典" active={tab === "personal"} onClick={() => setTab("personal")} />
-            <NavItem icon={<FileText size={17} />} label="术语表" active={tab === "glossary"} onClick={() => setTab("glossary")} />
-            <NavItem icon={<History size={17} />} label="翻译历史" active={tab === "history"} onClick={() => setTab("history")} />
-            <NavItem icon={<Settings size={17} />} label="设置" active={tab === "settings"} onClick={() => setTab("settings")} />
-          </nav>
-          <div className="sidebar-note">
-            <WandSparkles size={16} />
-            <span>首版聚焦段落翻译</span>
-          </div>
-        </aside>
-
-        <main className="main-content">
+      <main className="main-content">
           {tab === "translate" && (
             <TranslateView
               sourceText={sourceText}
@@ -824,17 +828,30 @@ function App() {
             <GlossaryView terms={snapshot.glossaryTerms} onChanged={() => void refreshSnapshot()} />
           )}
           {tab === "history" && <HistoryView history={snapshot.history} />}
-          {tab === "settings" && (
-            <SettingsView
-              snapshot={snapshot}
-              dictionaryProgress={dictionaryProgress}
-              dictionaryEventsError={dictionaryEventsError}
-              onDictionaryUpdate={handleDictionaryUpdate}
-              onSaved={handleSettingsSaved}
-            />
-          )}
-        </main>
+      </main>
       </div>
+      {settingsOpen && (
+        <div className="settings-overlay" role="presentation">
+          <div className="settings-dialog" ref={settingsDialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabIndex={-1}>
+            <div className="settings-dialog-heading">
+              <div>
+                <span className="settings-dialog-eyebrow">SETTINGS</span>
+                <strong id="settings-dialog-title">设置</strong>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setSettingsOpen(false)} aria-label="关闭设置" title="关闭设置"><X size={17} /></button>
+            </div>
+            <div className="settings-dialog-scroll">
+              <SettingsView
+                snapshot={snapshot}
+                dictionaryProgress={dictionaryProgress}
+                dictionaryEventsError={dictionaryEventsError}
+                onDictionaryUpdate={handleDictionaryUpdate}
+                onSaved={handleSettingsSaved}
+              />
+            </div>
+          </div>
+        </div>
+      )}
       {closeDialogOpen && <CloseBehaviorDialog onResolved={() => setCloseDialogOpen(false)} />}
     </div>
   );
@@ -864,9 +881,9 @@ function CloseBehaviorDialog({ onResolved }: { onResolved: () => void }) {
   );
 }
 
-function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
+function ModeButton({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button className={`nav-item ${active ? "is-active" : ""}`} onClick={onClick} type="button">
+    <button className={`nav-item ${active ? "is-active" : ""}`} onClick={onClick} type="button" aria-pressed={active} title={label}>
       {icon}
       <span>{label}</span>
     </button>
