@@ -1035,13 +1035,7 @@ function App() {
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
         </div>
-        <nav className="mode-switcher" aria-label="工作模式" data-no-drag>
-          <ModeButton icon={<Languages size={15} />} label="段落翻译" active={tab === "translate"} onClick={() => setTab("translate")} />
-          <ModeButton icon={<BookOpen size={15} />} label="词典" active={tab === "dictionary"} onClick={() => setTab("dictionary")} />
-          <ModeButton icon={<Bookmark size={15} />} label="个人词典" active={tab === "personal"} onClick={() => setTab("personal")} />
-          <ModeButton icon={<FileText size={15} />} label="术语表" active={tab === "glossary"} onClick={() => setTab("glossary")} />
-          <ModeButton icon={<History size={15} />} label="翻译历史" active={tab === "history"} onClick={() => setTab("history")} />
-        </nav>
+        <ModeSwitcher activeTab={tab} onChange={setTab} />
         <div className="chrome-actions" data-no-drag>
           <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={openSettings} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
           <div className="window-controls" data-no-drag>
@@ -1204,9 +1198,70 @@ function CloseBehaviorDialog({
   );
 }
 
-function ModeButton({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
+function ModeSwitcher({ activeTab, onChange }: { activeTab: AppTab; onChange: (tab: AppTab) => void }) {
+  const switcherRef = useRef<HTMLElement | null>(null);
+  const buttonRefs = useRef<Partial<Record<AppTab, HTMLButtonElement | null>>>({});
+  const [indicator, setIndicator] = useState({ left: 0, width: 0, ready: false });
+
+  const updateIndicator = useCallback(() => {
+    const switcher = switcherRef.current;
+    const button = buttonRefs.current[activeTab];
+    if (!switcher || !button) return;
+    const switcherRect = switcher.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    setIndicator({
+      left: buttonRect.left - switcherRect.left,
+      width: buttonRect.width,
+      ready: true,
+    });
+  }, [activeTab]);
+
+  useLayoutEffect(() => {
+    updateIndicator();
+  }, [updateIndicator]);
+
+  useEffect(() => {
+    const switcher = switcherRef.current;
+    if (!switcher) return;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateIndicator);
+    observer?.observe(switcher);
+    Object.values(buttonRefs.current).forEach((button) => {
+      if (button) observer?.observe(button);
+    });
+    window.addEventListener("resize", updateIndicator);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateIndicator);
+    };
+  }, [updateIndicator]);
+
+  const setButtonRef = (tab: AppTab) => (button: HTMLButtonElement | null) => {
+    buttonRefs.current[tab] = button;
+  };
+
   return (
-    <button className={`nav-item ${active ? "is-active" : ""}`} onClick={onClick} type="button" aria-pressed={active} title={label}>
+    <nav ref={switcherRef} className="mode-switcher" aria-label="工作模式" data-no-drag>
+      <span
+        className="mode-switcher-indicator"
+        aria-hidden="true"
+        style={{
+          width: `${indicator.width}px`,
+          transform: `translateX(${indicator.left}px)`,
+          opacity: indicator.ready ? 1 : 0,
+        }}
+      />
+      <ModeButton buttonRef={setButtonRef("translate")} icon={<Languages size={15} />} label="段落翻译" active={activeTab === "translate"} onClick={() => onChange("translate")} />
+      <ModeButton buttonRef={setButtonRef("dictionary")} icon={<BookOpen size={15} />} label="词典" active={activeTab === "dictionary"} onClick={() => onChange("dictionary")} />
+      <ModeButton buttonRef={setButtonRef("personal")} icon={<Bookmark size={15} />} label="个人词典" active={activeTab === "personal"} onClick={() => onChange("personal")} />
+      <ModeButton buttonRef={setButtonRef("glossary")} icon={<FileText size={15} />} label="术语表" active={activeTab === "glossary"} onClick={() => onChange("glossary")} />
+      <ModeButton buttonRef={setButtonRef("history")} icon={<History size={15} />} label="翻译历史" active={activeTab === "history"} onClick={() => onChange("history")} />
+    </nav>
+  );
+}
+
+function ModeButton({ icon, label, active, onClick, buttonRef }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void; buttonRef?: (button: HTMLButtonElement | null) => void }) {
+  return (
+    <button ref={buttonRef} className={`nav-item ${active ? "is-active" : ""}`} onClick={onClick} type="button" aria-pressed={active} title={label}>
       {icon}
       <span>{label}</span>
     </button>
