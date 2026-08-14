@@ -2,6 +2,8 @@
 
 use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, AppHandle, Manager};
 
+use crate::icons;
+
 pub const TRAY_ID: &str = "main-tray";
 pub const MENU_ID_OPEN: &str = "tray-open";
 pub const MENU_ID_EXIT: &str = "tray-exit";
@@ -18,9 +20,7 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("Lilt");
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
-    }
+    builder = builder.icon(icons::high_resolution_icon()?);
     let _tray = builder.build(&handle)?;
     Ok(())
 }

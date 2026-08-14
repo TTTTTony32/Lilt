@@ -3,6 +3,7 @@ mod db;
 mod diagnostics;
 mod dictionary;
 mod examples;
+mod icons;
 mod provider;
 mod secrets;
 mod selection;
@@ -327,26 +328,7 @@ fn set_main_taskbar_icon(window: &WebviewWindow) -> Result<(), String> {
         UI::WindowsAndMessaging::{CreateIcon, SendMessageW, ICON_BIG, WM_SETICON},
     };
 
-    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
-        "../icons/128x128@2x.png"
-    )));
-    let mut reader = decoder
-        .read_info()
-        .map_err(|error| format!("读取任务栏图标失败：{error}"))?;
-    let mut rgba = vec![
-        0;
-        reader.output_buffer_size().ok_or_else(|| {
-            "任务栏图标尺寸超出可处理范围".to_string()
-        })?
-    ];
-    let output = reader
-        .next_frame(&mut rgba)
-        .map_err(|error| format!("解码任务栏图标失败：{error}"))?;
-    if output.color_type != png::ColorType::Rgba {
-        return Err("任务栏图标不是 RGBA 格式".to_string());
-    }
-    rgba.truncate(output.buffer_size());
-    let image = tauri::image::Image::new_owned(rgba, output.width, output.height);
+    let image = icons::high_resolution_icon().map_err(|error| error.to_string())?;
     let width = image.width();
     let height = image.height();
     if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
