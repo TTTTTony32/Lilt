@@ -1134,7 +1134,6 @@ function App() {
                 history={snapshot.dictionaryHistory}
                 progress={dictionaryProgress}
                 targetLanguage={targetLanguage}
-                selectedModel={selectedModel}
                 wordExample={wordExample}
                 onUpdate={handleDictionaryUpdate}
                 onHistoryChanged={handleDictionaryHistoryChanged}

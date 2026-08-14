@@ -31,7 +31,6 @@ interface DictionaryViewProps {
   history: DictionaryHistoryEntry[];
   progress: DictionaryProgress | null;
   targetLanguage: string;
-  selectedModel: string;
   wordExample: WordExampleState;
   onUpdate: () => Promise<void>;
   onHistoryChanged: (history: DictionaryHistoryEntry[]) => void;
@@ -82,7 +81,6 @@ export default function DictionaryView({
   history,
   progress,
   targetLanguage,
-  selectedModel,
   wordExample,
   onUpdate,
   onHistoryChanged,
@@ -210,9 +208,8 @@ export default function DictionaryView({
           <p className="eyebrow">DICTIONARY</p>
           <div className="dictionary-title-line">
             <h1>词典</h1>
-            <div className="dictionary-title-meta" aria-label="词典版本与当前翻译模型">
+            <div className="dictionary-title-meta" aria-label="词典版本">
               <span>版本 {state.installedRelease ?? "未安装"}</span>
-              <span>翻译模型 {selectedModel || "未配置模型"}</span>
             </div>
           </div>
         </div>
