@@ -26,13 +26,6 @@ desktop.ini
 *.swp
 *.swo
 
-# 本地 Trellis、AI 代理和开发说明
-/.agents/
-/.codex/
-/.trellis/
-/AGENTS.md
-/.gitattributes
-
 # 本地参考项目
 /reference-projects/
 
