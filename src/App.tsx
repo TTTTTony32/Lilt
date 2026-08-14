@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus } from "lucide-react";
+import { Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus, Trash2 } from "lucide-react";
 import liltLogo from "../lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -1634,7 +1634,7 @@ function GlossaryRow({ term, onChanged }: { term: GlossaryTerm; onChanged: () =>
     await invokeCommand("delete_glossary_term", { id: term.id });
     onChanged();
   };
-  return <div className="list-row"><div><strong>{term.source}</strong><span className="arrow">→</span><span>{term.target}</span>{term.note && <small>{term.note}</small>}</div><button className="text-button danger-text" type="button" onClick={() => void remove()}>删除</button></div>;
+  return <div className="list-row"><div><strong>{term.source}</strong><span className="arrow">→</span><span>{term.target}</span>{term.note && <small>{term.note}</small>}</div><button className="icon-button danger-icon-button" type="button" onClick={() => void remove()} title="删除术语" aria-label="删除术语"><Trash2 size={14} /></button></div>;
 }
 
 function HistoryContent({ history }: { history: HistoryEntry[] }) {
