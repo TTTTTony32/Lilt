@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Copy, ExternalLink, LoaderCircle, Square, X } from "lucide-react";
 import { getCurrentWindow, PhysicalSize } from "@tauri-apps/api/window";
-import liltLogo from "../lilt_logo.svg";
+import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { isDictionarySelection } from "./lib/selection";
 import { invokeCommand, listenTo } from "./lib/tauri";

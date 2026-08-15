@@ -1,6 +1,6 @@
 [package]
 name = "lilt"
-version = "0.2.5"
+version = "0.2.6"
 description = "Lilt desktop reading assistant"
 authors = ["Lilt"]
 edition = "2021"

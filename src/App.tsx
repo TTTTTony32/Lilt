@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, X, Maximize2, Minimize2, Minus, Trash2 } from "lucide-react";
-import liltLogo from "../lilt_logo.svg";
+import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";

@@ -1,6 +1,10 @@
-# Lilt
+<p align="center">
+  <img src="source/banner.jpg" alt="Lilt" />
+</p>
 
-Lilt 是面向中文用户的桌面阅读辅助工具。
+<h1 align="center">Lilt</h1>
+
+<p align="center">Lilt 是面向中文用户的桌面阅读辅助工具</p>
 
 ## 主要功能
 
@@ -109,3 +113,4 @@ npm run tauri -- build
 Lilt 软件本体采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPLv3）授权。
 
 随软件分发的词典数据来自 [ahpxex/open-dictionary](https://github.com/ahpxex/open-dictionary)，采用与 [Creative Commons Attribution-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-sa/4.0/)（CC BY-SA 4.0）兼容的许可。词典数据的署名和相同方式共享要求以数据来源的具体许可声明为准。
+
