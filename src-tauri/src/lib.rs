@@ -7,6 +7,7 @@ mod glossary;
 mod icons;
 mod pdf;
 pub mod pdf_protocol;
+pub mod pdf_worker;
 mod provider;
 mod secrets;
 mod selection;
