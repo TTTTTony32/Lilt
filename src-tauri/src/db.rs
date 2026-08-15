@@ -1384,10 +1384,16 @@ pub fn list_personal_dictionary(
 
 pub fn save_personal_word(
     connection: &Connection,
-    normalized_canonical_word: &str,
+    _normalized_canonical_word: &str,
     canonical_word: &str,
     lookup_word: &str,
 ) -> Result<PersonalDictionaryEntry, String> {
+    let canonical_word = canonical_word.trim();
+    let lookup_word = lookup_word.trim();
+    let normalized_canonical_word = canonical_word.to_lowercase();
+    if normalized_canonical_word.is_empty() {
+        return Err("个人词典词条不能为空".to_string());
+    }
     let saved_at = Utc::now().to_rfc3339();
     connection
         .execute(
@@ -1418,6 +1424,10 @@ pub fn remove_personal_word(
     connection: &Connection,
     normalized_canonical_word: &str,
 ) -> Result<(), String> {
+    let normalized_canonical_word = normalized_canonical_word.trim().to_lowercase();
+    if normalized_canonical_word.is_empty() {
+        return Err("个人词典词条不能为空".to_string());
+    }
     connection
         .execute(
             "DELETE FROM personal_dictionary WHERE normalized_canonical_word = ?1",

@@ -1,0 +1,246 @@
+name: Release build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Quality checks
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate project versions
+        shell: pwsh
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $tauri = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $cargo = Get-Content src-tauri/Cargo.toml -Raw
+
+          $cargoVersionMatch = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $cargoVersionMatch.Success) {
+            throw '无法从 src-tauri/Cargo.toml 读取版本号'
+          }
+
+          $versions = @(
+            $package.version
+            $tauri.version
+            $cargoVersionMatch.Groups[1].Value
+          ) | Select-Object -Unique
+
+          if ($versions.Count -ne 1) {
+            throw "版本号不一致：package.json=$($package.version)，tauri.conf.json=$($tauri.version)，Cargo.toml=$($cargoVersionMatch.Groups[1].Value)"
+          }
+
+          Write-Host "项目版本：$($package.version)"
+
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $expectedTag = "v$($package.version)"
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "标签 $($env:RELEASE_TAG) 与项目版本 $($package.version) 不一致，应使用 $expectedTag"
+          }
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Rust format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Build Rust test binaries
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
+
+      - name: Add Windows test manifest
+        shell: pwsh
+        run: |
+          $manifest = @'
+          <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+            <dependency>
+              <dependentAssembly>
+                <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
+              </dependentAssembly>
+            </dependency>
+          </assembly>
+          '@
+
+          $testBinaries = @(Get-ChildItem -Path src-tauri/target/debug/deps -Filter 'lilt_lib-*.exe' -File)
+          if ($testBinaries.Count -eq 0) {
+            throw '未找到 Rust 测试二进制'
+          }
+
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          foreach ($testBinary in $testBinaries) {
+            [System.IO.File]::WriteAllText("$($testBinary.FullName).manifest", $manifest, $utf8NoBom)
+          }
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  build:
+    name: Build Windows ${{ matrix.arch }}
+    needs: quality
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-2025
+            rust_target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build NSIS installer
+        uses: tauri-apps/tauri-action@v0.6.2
+        with:
+          tauriScript: npm run tauri --
+          args: --target ${{ matrix.rust_target }} --bundles nsis
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+
+      - name: Stage installer
+        shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $bundlePath = Join-Path "src-tauri/target/$env:RUST_TARGET/release/bundle/nsis" '*-setup.exe'
+          $installers = @(Get-ChildItem -Path $bundlePath -File)
+
+          if ($installers.Count -ne 1) {
+            throw "NSIS 安装包数量异常：$($installers.Count)，搜索路径为 $bundlePath"
+          }
+
+          $stagingPath = 'release-staging'
+          New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
+          $destination = Join-Path $stagingPath "Lilt_$($package.version)_windows_$env:ARCH`_setup.exe"
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $destination
+          Write-Host "已暂存安装包：$destination"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lilt-windows-${{ matrix.arch }}-nsis
+          path: release-staging/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-draft:
+    name: Create Draft Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lilt-windows-*-nsis
+          merge-multiple: true
+          path: release-assets
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -name '*.exe' -print)
+          if [[ "${#assets[@]}" -ne 2 ]]; then
+            echo "期望两个 Windows 安装包，实际找到 ${#assets[@]} 个"
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}" | grep -q 'windows_amd64_setup\.exe$'
+          printf '%s\n' "${assets[@]}" | grep -q 'windows_arm64_setup\.exe$'
+
+      - name: Create or reuse Draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if release_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$release_draft" != 'true' ]]; then
+              echo "标签 $RELEASE_TAG 已对应正式 Release，停止修改已发布内容"
+              exit 1
+            fi
+            echo "复用已有 Draft Release：$RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$RELEASE_SHA" \
+              --title "Lilt $RELEASE_TAG" \
+              --draft \
+              --generate-notes \
+              --notes 'Windows 安装包暂未进行代码签名，首次安装时可能出现 SmartScreen 提示。'
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" release-assets/*.exe --clobber
