@@ -27,7 +27,7 @@
 
 ### 其他功能
 
-- 术语表：支持手动添加原文-译文对和备注，支持 CSV 导入
+- 术语表：支持手动添加原文-译文对和备注，支持 CSV 导入与导出
 - PDF全文翻译（基于 [PDFMathTranslate-Next](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next) ）（暂未做完）
 
 ## 技术架构

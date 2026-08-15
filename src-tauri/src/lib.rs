@@ -14,13 +14,13 @@ mod tray;
 use contracts::{
     AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
     DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
-    DictionaryState, GlossaryImportResult, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT,
-    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo,
-    ParagraphExample, PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt,
-    ProviderConfig, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
-    SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
-    TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    DictionaryState, GlossaryExportResult, GlossaryImportResult, GlossaryTerm,
+    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
+    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
+    PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
+    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
+    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationFailed,
+    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
     WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
     WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
@@ -298,6 +298,7 @@ pub fn run() {
             upsert_glossary_term,
             delete_glossary_term,
             import_glossary,
+            export_glossary,
             create_prompt,
             update_prompt,
             duplicate_prompt,
@@ -1390,6 +1391,40 @@ fn import_glossary(
         updated_count: counts.updated_count,
         skipped_count: parsed.skipped_rows.len(),
         skipped_rows: parsed.skipped_rows,
+    })
+}
+
+#[tauri::command]
+fn export_glossary(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<GlossaryExportResult, String> {
+    let path = file_path.trim();
+    if path.is_empty() {
+        return Err("术语表导出路径不能为空".to_string());
+    }
+    let (content, entry_count) = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        let terms = db::list_glossary_terms(&connection)?;
+        if terms.is_empty() {
+            return Err("术语表为空，没有可导出的内容".to_string());
+        }
+        let content = glossary::export_csv(&terms)?;
+        (content, terms.len())
+    };
+    fs::write(path, content.as_bytes()).map_err(|error| format!("写入术语表文件失败：{error}"))?;
+    let file_name = PathBuf::from(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("lilt-glossary.csv")
+        .to_string();
+    Ok(GlossaryExportResult {
+        entry_count,
+        file_name,
     })
 }
 

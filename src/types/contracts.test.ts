@@ -9,6 +9,7 @@ import {
   decodeTranslationEvent,
   decodePrompt,
   decodePersonalDictionaryExportResult,
+  decodeGlossaryExportResult,
   decodeGlossaryImportResult,
 } from "./contracts";
 
@@ -213,6 +214,17 @@ describe("dictionary and glossary transfer contracts", () => {
       fileName: "lilt-personal-dictionary.txt",
     });
     expect(decodePersonalDictionaryExportResult({ entryCount: -1, fileName: "words.txt" })).toBeNull();
+  });
+
+  it("decodes successful glossary exports", () => {
+    expect(decodeGlossaryExportResult({
+      entryCount: 3,
+      fileName: "lilt-glossary.csv",
+    })).toEqual({
+      entryCount: 3,
+      fileName: "lilt-glossary.csv",
+    });
+    expect(decodeGlossaryExportResult({ entryCount: 1, fileName: "" })).toBeNull();
   });
 
   it("decodes glossary import counts and skipped rows", () => {

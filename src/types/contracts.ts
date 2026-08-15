@@ -105,6 +105,11 @@ export interface PersonalDictionaryExportResult {
   fileName: string;
 }
 
+export interface GlossaryExportResult {
+  entryCount: number;
+  fileName: string;
+}
+
 export interface GlossaryTerm {
   id: string;
   source: string;
@@ -470,6 +475,14 @@ function nonNegativeInteger(value: unknown): value is number {
 }
 
 export function decodePersonalDictionaryExportResult(value: unknown): PersonalDictionaryExportResult | null {
+  if (!isRecord(value) || !nonNegativeInteger(value.entryCount)) return null;
+  const fileName = stringValue(value.fileName);
+  return fileName === null || fileName.trim().length === 0
+    ? null
+    : { entryCount: value.entryCount, fileName };
+}
+
+export function decodeGlossaryExportResult(value: unknown): GlossaryExportResult | null {
   if (!isRecord(value) || !nonNegativeInteger(value.entryCount)) return null;
   const fileName = stringValue(value.fileName);
   return fileName === null || fileName.trim().length === 0

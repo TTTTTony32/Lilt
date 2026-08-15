@@ -234,6 +234,13 @@ pub struct PersonalDictionaryExportResult {
     pub file_name: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlossaryExportResult {
+    pub entry_count: usize,
+    pub file_name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlossaryTerm {
@@ -658,11 +665,11 @@ impl DictionaryState {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, GlossaryImportResult,
-        GlossaryImportSkippedRow, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-        MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, PersonalDictionaryExportResult,
-        ThinkingEffort, TranslationCommandResult, TranslationOutcome,
-        clamp_selection_window_dimension, parse_selection_window_dimension,
+        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, GlossaryExportResult,
+        GlossaryImportResult, GlossaryImportSkippedRow, MAX_SELECTION_WINDOW_HEIGHT,
+        MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
+        PersonalDictionaryExportResult, ThinkingEffort, TranslationCommandResult,
+        TranslationOutcome, clamp_selection_window_dimension, parse_selection_window_dimension,
     };
 
     #[test]
@@ -786,6 +793,14 @@ mod tests {
         .unwrap();
         assert_eq!(export["entryCount"], 2);
         assert_eq!(export["fileName"], "words.txt");
+
+        let glossary_export = serde_json::to_value(GlossaryExportResult {
+            entry_count: 3,
+            file_name: "glossary.csv".to_string(),
+        })
+        .unwrap();
+        assert_eq!(glossary_export["entryCount"], 3);
+        assert_eq!(glossary_export["fileName"], "glossary.csv");
 
         let import = serde_json::to_value(GlossaryImportResult {
             added_count: 1,
