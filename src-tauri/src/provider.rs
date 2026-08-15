@@ -1,12 +1,11 @@
 use crate::{
-    contracts::{ModelInfo, ThinkingEffort, TranslationDelta},
+    contracts::{ModelInfo, ThinkingEffort},
     diagnostics,
 };
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -42,18 +41,6 @@ impl ProviderError {
     fn retryable(&self) -> bool {
         matches!(self, Self::Network(_) | Self::Server(_) | Self::Protocol(_))
     }
-}
-
-pub struct StreamRequest<'a> {
-    pub app: &'a AppHandle,
-    pub request_id: &'a str,
-    pub base_url: &'a str,
-    pub api_key: &'a str,
-    pub model_id: &'a str,
-    pub system_prompt: &'a str,
-    pub user_text: &'a str,
-    pub cancel: &'a CancellationToken,
-    pub thinking_effort: &'a ThinkingEffort,
 }
 
 pub struct ChatStreamRequest<'a> {
@@ -123,35 +110,6 @@ fn parse_model_payload(payload: &Value) -> Result<Vec<ModelInfo>, ProviderError>
         ));
     }
     Ok(models)
-}
-
-pub async fn translate_stream(request: StreamRequest<'_>) -> Result<String, ProviderError> {
-    let app = request.app;
-    let request_id = request.request_id.to_string();
-    stream_chat_completion(
-        ChatStreamRequest {
-            request_id: &request_id,
-            base_url: request.base_url,
-            api_key: request.api_key,
-            model_id: request.model_id,
-            system_prompt: request.system_prompt,
-            user_text: request.user_text,
-            cancel: request.cancel,
-            operation: "translate",
-            thinking_effort: request.thinking_effort,
-        },
-        |content| {
-            app.emit(
-                "translation_delta",
-                TranslationDelta {
-                    request_id: request_id.clone(),
-                    content,
-                },
-            )
-            .map_err(|error| ProviderError::Event(error.to_string()))
-        },
-    )
-    .await
 }
 
 pub async fn stream_chat_completion<F>(

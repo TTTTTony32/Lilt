@@ -6,9 +6,11 @@ mod examples;
 mod glossary;
 mod icons;
 mod pdf;
+pub mod pdf_protocol;
 mod provider;
 mod secrets;
 mod selection;
+mod translation_core;
 #[cfg(desktop)]
 mod tray;
 
@@ -20,10 +22,10 @@ use contracts::{
     MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
     PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
     SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
-    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationFailed,
-    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
-    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
-    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
+    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationDelta,
+    TranslationFailed, TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION,
+    WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted, WordExampleFailed,
+    WordExamplePosDelta, WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
 };
 use rusqlite::Connection;
@@ -38,6 +40,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 use tokio_util::sync::CancellationToken;
+use translation_core::{StreamRequest as CoreStreamRequest, TranslationCore, TranslationMode};
 use uuid::Uuid;
 
 const STARTUP_BACKGROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -926,17 +929,29 @@ async fn translate_impl(
         "command.translate.provider_request request_id={} provider_id={} model={}",
         request_id, prepared.provider.id, prepared.provider.model_id
     ));
-    let translated = provider::translate_stream(provider::StreamRequest {
-        app: &app,
-        request_id: &request_id,
-        base_url: &prepared.provider.base_url,
-        api_key: &api_key,
-        model_id: &prepared.provider.model_id,
-        system_prompt: &prepared.system_prompt,
-        user_text: &source_text,
-        cancel: &cancellation,
-        thinking_effort: &prepared.provider.thinking_effort,
-    })
+    let translated = TranslationCore::stream(
+        CoreStreamRequest {
+            request_id: &request_id,
+            base_url: &prepared.provider.base_url,
+            api_key: &api_key,
+            model_id: &prepared.provider.model_id,
+            system_prompt: &prepared.system_prompt,
+            user_text: &source_text,
+            cancel: &cancellation,
+            mode: TranslationMode::Paragraph,
+            thinking_effort: &prepared.provider.thinking_effort,
+        },
+        |content| {
+            app.emit(
+                "translation_delta",
+                TranslationDelta {
+                    request_id: request_id.clone(),
+                    content,
+                },
+            )
+            .map_err(|error| provider::ProviderError::Event(error.to_string()))
+        },
+    )
     .await;
     unregister_request(&state, &request_id);
 
@@ -1912,8 +1927,8 @@ async fn generate_word_example_impl(
         prepared.canonical_word, prepared.word, prepared.example.source_text
     );
     let mut parser = WordExampleProtocolParser::default();
-    let streamed = provider::stream_chat_completion(
-        provider::ChatStreamRequest {
+    let streamed = TranslationCore::stream(
+        CoreStreamRequest {
             request_id: &request_id,
             base_url: &prepared.provider.base_url,
             api_key: &api_key,
@@ -1921,7 +1936,7 @@ async fn generate_word_example_impl(
             system_prompt: &system_prompt,
             user_text: &user_text,
             cancel: &cancellation,
-            operation: "word_example",
+            mode: TranslationMode::WordExample,
             thinking_effort: &prepared.provider.thinking_effort,
         },
         |content| {

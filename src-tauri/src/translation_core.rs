@@ -1,0 +1,92 @@
+use crate::provider::{self, ProviderError};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationMode {
+    Paragraph,
+    PdfSegment,
+    WordExample,
+}
+
+impl TranslationMode {
+    pub fn from_wire_mode(mode: &str) -> Option<Self> {
+        match mode {
+            "paragraph" => Some(Self::Paragraph),
+            "pdf_segment" => Some(Self::PdfSegment),
+            "word_example" => Some(Self::WordExample),
+            _ => None,
+        }
+    }
+
+    pub const fn provider_operation(self) -> &'static str {
+        match self {
+            Self::Paragraph => "translate",
+            Self::PdfSegment => "pdf_segment",
+            Self::WordExample => "word_example",
+        }
+    }
+}
+
+pub struct StreamRequest<'a> {
+    pub request_id: &'a str,
+    pub base_url: &'a str,
+    pub api_key: &'a str,
+    pub model_id: &'a str,
+    pub system_prompt: &'a str,
+    pub user_text: &'a str,
+    pub cancel: &'a CancellationToken,
+    pub mode: TranslationMode,
+    pub thinking_effort: &'a crate::contracts::ThinkingEffort,
+}
+
+pub struct TranslationCore;
+
+impl TranslationCore {
+    pub async fn stream<F>(request: StreamRequest<'_>, on_delta: F) -> Result<String, ProviderError>
+    where
+        F: FnMut(String) -> Result<(), ProviderError>,
+    {
+        provider::stream_chat_completion(
+            provider::ChatStreamRequest {
+                request_id: request.request_id,
+                base_url: request.base_url,
+                api_key: request.api_key,
+                model_id: request.model_id,
+                system_prompt: request.system_prompt,
+                user_text: request.user_text,
+                cancel: request.cancel,
+                operation: request.mode.provider_operation(),
+                thinking_effort: request.thinking_effort,
+            },
+            on_delta,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TranslationMode;
+
+    #[test]
+    fn modes_keep_a_single_provider_operation_mapping() {
+        assert_eq!(
+            TranslationMode::from_wire_mode("paragraph"),
+            Some(TranslationMode::Paragraph)
+        );
+        assert_eq!(
+            TranslationMode::from_wire_mode("pdf_segment"),
+            Some(TranslationMode::PdfSegment)
+        );
+        assert_eq!(TranslationMode::from_wire_mode("unknown"), None);
+        assert_eq!(TranslationMode::Paragraph.provider_operation(), "translate");
+        assert_eq!(
+            TranslationMode::PdfSegment.provider_operation(),
+            "pdf_segment"
+        );
+        assert_eq!(
+            TranslationMode::WordExample.provider_operation(),
+            "word_example"
+        );
+    }
+}
