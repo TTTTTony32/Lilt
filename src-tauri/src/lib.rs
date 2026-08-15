@@ -6,6 +6,7 @@ mod examples;
 mod glossary;
 mod icons;
 mod pdf;
+mod pdf_jobs;
 pub mod pdf_protocol;
 pub mod pdf_worker;
 mod provider;
@@ -131,6 +132,7 @@ pub struct AppState {
     pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
     pub(crate) dictionary_initialising: Arc<AtomicBool>,
     pub(crate) selection: selection::SelectionService,
+    pub(crate) pdf_jobs: Arc<Mutex<HashMap<String, pdf_jobs::PdfJobHandle>>>,
     startup: Arc<StartupRuntime>,
 }
 
@@ -148,6 +150,7 @@ impl AppState {
             dictionary_store: Arc::new(Mutex::new(dictionary_store)),
             dictionary_initialising: Arc::new(AtomicBool::new(false)),
             selection,
+            pdf_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup,
         }
     }
@@ -320,7 +323,9 @@ pub fn run() {
             get_dictionary_state,
             update_dictionary,
             clear_dictionary_history,
-            pdf::read_pdf_bytes
+            pdf::read_pdf_bytes,
+            pdf_jobs::start_pdf_translation,
+            pdf_jobs::cancel_pdf_translation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lilt");
@@ -1040,18 +1045,18 @@ async fn translate_impl(
     Ok(TranslationCommandResult::completed(content, false))
 }
 
-struct PreparedTranslation {
-    provider: contracts::ProviderRecord,
-    prompt: Prompt,
-    system_prompt: String,
-    cache_key: String,
-    cache_enabled: bool,
-    cache_max_bytes: i64,
-    history_retention: i64,
-    glossary_version: i64,
+pub(crate) struct PreparedTranslation {
+    pub(crate) provider: contracts::ProviderRecord,
+    pub(crate) prompt: Prompt,
+    pub(crate) system_prompt: String,
+    pub(crate) cache_key: String,
+    pub(crate) cache_enabled: bool,
+    pub(crate) cache_max_bytes: i64,
+    pub(crate) history_retention: i64,
+    pub(crate) glossary_version: i64,
 }
 
-fn prepare_translation(
+pub(crate) fn prepare_translation(
     state: &AppState,
     request: &TranslationRequest,
     source_text: &str,

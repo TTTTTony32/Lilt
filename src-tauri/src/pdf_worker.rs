@@ -45,7 +45,7 @@ pub enum WorkerSessionEvent {
 pub struct WorkerSession {
     task_id: String,
     outbound: Mutex<Option<Sender<RustToWorkerMessage>>>,
-    events: Receiver<WorkerSessionEvent>,
+    events: Mutex<Receiver<WorkerSessionEvent>>,
     child: Arc<Mutex<Child>>,
 }
 
@@ -114,7 +114,7 @@ impl WorkerSession {
         Ok(Self {
             task_id,
             outbound: Mutex::new(Some(outbound_tx)),
-            events: events_rx,
+            events: Mutex::new(events_rx),
             child,
         })
     }
@@ -145,12 +145,17 @@ impl WorkerSession {
 
     pub fn recv(&self) -> Result<WorkerSessionEvent, WorkerSessionError> {
         self.events
+            .lock()
+            .map_err(|_| WorkerSessionError::ChannelClosed)?
             .recv()
             .map_err(|_| WorkerSessionError::ChannelClosed)
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<WorkerSessionEvent, RecvTimeoutError> {
-        self.events.recv_timeout(timeout)
+        self.events
+            .lock()
+            .map_err(|_| RecvTimeoutError::Disconnected)?
+            .recv_timeout(timeout)
     }
 
     pub fn close_writer(&self) {
