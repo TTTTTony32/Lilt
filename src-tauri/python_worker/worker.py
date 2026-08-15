@@ -7,13 +7,16 @@ TRANSLATE_REQUEST and is completed by the matching TRANSLATE_RESPONSE.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import multiprocessing
+import os
 import queue
 import sys
 import threading
 import uuid
+from asyncio import CancelledError
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
@@ -52,6 +55,101 @@ class WorkerCancelled(RuntimeError):
 
 class WorkerTranslationError(RuntimeError):
     pass
+
+
+class WorkerEngineUnavailable(RuntimeError):
+    pass
+
+
+class _CancellationBridge:
+    """Expose request cancellation without marking success as cancelled."""
+
+    def __init__(self, source: threading.Event) -> None:
+        self._source = source
+        self._local = threading.Event()
+
+    def is_set(self) -> bool:
+        return self._source.is_set() or self._local.is_set()
+
+    def set(self) -> None:
+        self._local.set()
+
+
+def _save_pdf_without_subprocess(
+    pdf: Any,
+    output_path: str,
+    _translation_config: Any,
+    *,
+    garbage: int = 1,
+    deflate: bool = True,
+    clean: bool = True,
+    deflate_fonts: bool = True,
+    linear: bool = False,
+    timeout: int = 120,
+    tag: str = "",
+) -> bool:
+    """Save a BabelDOC PDF without spawning its Windows cleanup process.
+
+    BabelDOC 0.6.4 starts a multiprocessing child for this operation. The
+    Lilt Worker must keep a command reader alive while Rust answers translation
+    requests, and that combination can leave the child holding the working PDF
+    on Windows. A direct deflated save keeps the output valid and leaves font
+    subsetting disabled by the Worker configuration.
+    """
+    del clean, timeout, tag
+    pdf.save(
+        output_path,
+        garbage=garbage,
+        deflate=deflate,
+        clean=False,
+        deflate_fonts=deflate_fonts,
+        linear=linear,
+    )
+    return False
+
+
+@dataclass(frozen=True)
+class BabelDocApi:
+    do_translate: Callable[..., Any]
+    get_translation_stage: Callable[..., Any]
+    progress_monitor: type
+    translation_config: type
+    watermark_output_mode: Any
+
+
+def _load_babeldoc_api() -> BabelDocApi:
+    """Load BabelDOC's native modules on the Worker main thread.
+
+    BabelDOC imports cv2 and numpy through its PDF layout stack. On Windows,
+    importing those native extensions for the first time from a background
+    thread can block indefinitely. The synchronous entrypoint stays on the
+    Worker main thread so BabelDOC can start its own Windows child processes.
+    """
+    # BabelDOC's fallback line clustering calls scikit-learn, whose Windows
+    # CPU probe starts PowerShell. Keep that probe out of the job thread and
+    # avoid an unnecessary subprocess on every PDF job.
+    os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
+    try:
+        from babeldoc.format.pdf.high_level import do_translate
+        from babeldoc.format.pdf.high_level import get_translation_stage
+        from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater
+        from babeldoc.format.pdf.translation_config import TranslationConfig
+        from babeldoc.format.pdf.translation_config import WatermarkOutputMode
+        from babeldoc.progress_monitor import ProgressMonitor
+    except Exception as exc:  # noqa: BLE001 - dependency boundary
+        detail = str(exc).splitlines()[0][:500] or type(exc).__name__
+        raise WorkerEngineUnavailable(
+            f"无法加载 BabelDOC v0.6.4 运行依赖：{detail}"
+        ) from exc
+    if os.name == "nt":
+        PDFCreater.save_pdf_with_timeout = staticmethod(_save_pdf_without_subprocess)
+    return BabelDocApi(
+        do_translate=do_translate,
+        get_translation_stage=get_translation_stage,
+        progress_monitor=ProgressMonitor,
+        translation_config=TranslationConfig,
+        watermark_output_mode=WatermarkOutputMode,
+    )
 
 
 def encode_message(message: dict[str, Any]) -> bytes:
@@ -262,7 +360,13 @@ class BabelDocWorker:
             return
         raise WorkerProtocolError(f"未知的 Rust → Worker 消息类型：{message_type}")
 
-    def _start_job(self, message: dict[str, Any]) -> None:
+    def _start_job(
+        self,
+        message: dict[str, Any],
+        *,
+        run_in_thread: bool = True,
+        babeldoc_api: BabelDocApi | None = None,
+    ) -> None:
         if self._job_thread is not None and self._job_thread.is_alive():
             raise WorkerProtocolError("当前 Worker 已经有运行中的任务")
         if message.get("protocol_version") != PROTOCOL_VERSION:
@@ -285,9 +389,30 @@ class BabelDocWorker:
                 "worker_version": ENGINE_VERSION,
             }
         )
+        self.emit({"type": "STAGE_CHANGED", "task_id": task_id, "stage": "engine_starting"})
+        if babeldoc_api is None:
+            try:
+                with redirect_stdout(sys.stderr):
+                    babeldoc_api = _load_babeldoc_api()
+            except WorkerEngineUnavailable as exc:
+                self.emit(
+                    {
+                        "type": "ERROR",
+                        "task_id": task_id,
+                        "error": {
+                            "code": "engine_unavailable",
+                            "message": str(exc),
+                            "retryable": False,
+                        },
+                    }
+                )
+                return
+        if not run_in_thread:
+            self._run_job(message, input_pdf, output_dir, babeldoc_api)
+            return
         self._job_thread = threading.Thread(
             target=self._run_job,
-            args=(message, input_pdf, output_dir),
+            args=(message, input_pdf, output_dir, babeldoc_api),
             name=f"lilt-pdf-job-{task_id}",
             daemon=True,
         )
@@ -298,12 +423,26 @@ class BabelDocWorker:
             raise WorkerProtocolError("CANCEL_JOB 的 task_id 与当前任务不匹配")
         self.cancel_event.set()
 
-    def _run_job(self, message: dict[str, Any], input_pdf: Path, output_dir: Path) -> None:
+    def _run_job(
+        self,
+        message: dict[str, Any],
+        input_pdf: Path,
+        output_dir: Path,
+        babeldoc_api: BabelDocApi,
+    ) -> None:
         task_id = self._task_id
         assert task_id is not None
         try:
-            self.emit({"type": "STAGE_CHANGED", "task_id": task_id, "stage": "engine_starting"})
-            result = _run_babeldoc(message, input_pdf, output_dir, self.router, self.cancel_event, self.emit)
+            with redirect_stdout(sys.stderr):
+                result = _run_babeldoc(
+                    message,
+                    input_pdf,
+                    output_dir,
+                    self.router,
+                    self.cancel_event,
+                    self.emit,
+                    babeldoc_api,
+                )
             if self.cancel_event.is_set():
                 self.emit({"type": "CANCELLED", "task_id": task_id, "reason": "user_requested"})
                 return
@@ -344,23 +483,71 @@ def run_worker(stdin: BinaryIO, stdout: BinaryIO) -> None:
             stdout.flush()
 
     worker = BabelDocWorker(emit=emit)
-    for line in stdin:
+    start_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+    fatal_protocol_error = threading.Event()
+    try:
+        with redirect_stdout(sys.stderr):
+            preloaded_babeldoc_api = _load_babeldoc_api()
+    except WorkerEngineUnavailable:
+        preloaded_babeldoc_api = None
+
+    def emit_protocol_error(exc: WorkerProtocolError) -> None:
+        task_id = worker._task_id or "unknown"
+        emit(
+            {
+                "type": "ERROR",
+                "task_id": task_id,
+                "error": {"code": "protocol_error", "message": str(exc), "retryable": False},
+            }
+        )
+        if task_id == "unknown":
+            fatal_protocol_error.set()
+            worker.cancel_event.set()
+
+    def read_commands() -> None:
         try:
-            worker.handle(decode_message(line))
-        except WorkerProtocolError as exc:
-            task_id = worker._task_id or "unknown"
-            emit(
-                {
-                    "type": "ERROR",
-                    "task_id": task_id,
-                    "error": {"code": "protocol_error", "message": str(exc), "retryable": False},
-                }
-            )
-            if task_id == "unknown":
+            for line in stdin:
+                try:
+                    message = decode_message(line)
+                    if message["type"] == "START_JOB":
+                        start_queue.put(message)
+                    else:
+                        worker.handle(message)
+                except WorkerProtocolError as exc:
+                    emit_protocol_error(exc)
+                    if fatal_protocol_error.is_set():
+                        break
+        finally:
+            worker.cancel_event.set()
+            start_queue.put(None)
+
+    reader = threading.Thread(
+        target=read_commands,
+        name="lilt-pdf-command-reader",
+        daemon=True,
+    )
+    reader.start()
+
+    try:
+        while not fatal_protocol_error.is_set():
+            message = start_queue.get()
+            if message is None:
                 break
-    worker.cancel_event.set()
-    if worker._job_thread is not None:
-        worker._job_thread.join(timeout=2)
+            try:
+                # BabelDOC's synchronous entrypoint must run on the Worker main
+                # thread because its PDF writer starts Windows child processes.
+                worker._start_job(
+                    message,
+                    run_in_thread=False,
+                    babeldoc_api=preloaded_babeldoc_api,
+                )
+            except WorkerProtocolError as exc:
+                emit_protocol_error(exc)
+    finally:
+        worker.cancel_event.set()
+        if worker._job_thread is not None:
+            worker._job_thread.join(timeout=2)
+        reader.join(timeout=2)
 
 
 def _run_babeldoc(
@@ -370,14 +557,14 @@ def _run_babeldoc(
     router: ResponseRouter,
     cancel_event: threading.Event,
     emit: Callable[[dict[str, Any]], None],
+    babeldoc_api: BabelDocApi,
 ) -> dict[str, Any]:
-    """Create the fixed BabelDOC config and run its async high-level entrypoint."""
-    try:
-        from babeldoc.format.pdf.high_level import async_translate
-        from babeldoc.format.pdf.translation_config import TranslationConfig
-        from babeldoc.format.pdf.translation_config import WatermarkOutputMode
-    except ImportError as exc:
-        raise RuntimeError("PDF Engine 未安装 BabelDOC v0.6.4 运行依赖") from exc
+    """Create the fixed BabelDOC config and run its synchronous entrypoint."""
+    do_translate = babeldoc_api.do_translate
+    get_translation_stage = babeldoc_api.get_translation_stage
+    ProgressMonitor = babeldoc_api.progress_monitor
+    TranslationConfig = babeldoc_api.translation_config
+    WatermarkOutputMode = babeldoc_api.watermark_output_mode
 
     options = start.get("pdf_options")
     if not isinstance(options, dict):
@@ -404,36 +591,49 @@ def _run_babeldoc(
         no_mono=bool(options.get("no_mono", False)),
         qps=1,
         debug=False,
+        skip_clean=os.name == "nt",
         use_alternating_pages_dual=bool(options.get("alternating_pages", False)),
         watermark_output_mode=WatermarkOutputMode.NoWatermark,
         custom_system_prompt=None,
         glossaries=None,
         auto_extract_glossary=False,
     )
+    engine_cancel_event = _CancellationBridge(cancel_event)
 
-    async def run() -> dict[str, Any]:
-        async for event in async_translate(config):
-            if cancel_event.is_set():
-                config.cancel_translation()
-                raise WorkerCancelled("用户取消了 PDF 翻译")
-            event_type = event.get("type") if isinstance(event, dict) else None
-            if event_type == "error":
-                raise RuntimeError(str(event.get("error") or "BabelDOC 翻译失败"))
-            if event_type == "finish":
-                result = event.get("translate_result")
-                return _translate_result_to_payload(result, options)
-            if isinstance(event, dict):
-                emit(
-                    {
-                        "type": "PROGRESS",
-                        "task_id": str(start["task_id"]),
-                        "stage": str(event.get("stage") or event.get("type") or "engine"),
-                        "message": str(event.get("message")) if event.get("message") else None,
-                    }
-                )
-        raise RuntimeError("BabelDOC 未返回完成事件")
+    def report_progress(**event: Any) -> None:
+        progress: dict[str, Any] = {
+            "type": "PROGRESS",
+            "task_id": str(start["task_id"]),
+            "stage": str(event.get("stage") or event.get("type") or "engine"),
+        }
+        current = event.get("stage_current")
+        total = event.get("stage_total")
+        fraction = event.get("overall_progress")
+        if isinstance(current, int | float):
+            progress["current"] = int(current)
+        if isinstance(total, int | float):
+            progress["total"] = int(total)
+        if isinstance(fraction, int | float):
+            progress["fraction"] = max(0.0, min(1.0, float(fraction) / 100.0))
+        if isinstance(event.get("message"), str):
+            progress["message"] = event["message"]
+        emit(progress)
 
-    return asyncio.run(run())
+    progress_monitor = ProgressMonitor(
+        get_translation_stage(config),
+        progress_change_callback=report_progress,
+        finish_callback=lambda **_event: None,
+        cancel_event=engine_cancel_event,
+        report_interval=0.1,
+    )
+    config.progress_monitor = progress_monitor
+    try:
+        result = do_translate(progress_monitor, config)
+    except CancelledError as exc:
+        raise WorkerCancelled("用户取消了 PDF 翻译") from exc
+    if cancel_event.is_set():
+        raise WorkerCancelled("用户取消了 PDF 翻译")
+    return _translate_result_to_payload(result, options)
 
 
 def _translate_result_to_payload(result: Any, options: dict[str, Any]) -> dict[str, Any]:
@@ -536,5 +736,6 @@ def _required_string(message: dict[str, Any], key: str) -> str:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     run_worker(sys.stdin.buffer, sys.stdout.buffer)
