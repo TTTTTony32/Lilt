@@ -222,7 +222,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if release_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+          if release_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null); then
             if [[ "$release_draft" != 'true' ]]; then
               echo "标签 $RELEASE_TAG 已对应正式 Release，停止修改已发布内容"
               exit 1
@@ -230,6 +230,7 @@ jobs:
             echo "复用已有 Draft Release：$RELEASE_TAG"
           else
             gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_SHA" \
               --title "Lilt $RELEASE_TAG" \
               --draft \
@@ -242,4 +243,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
-        run: gh release upload "$RELEASE_TAG" release-assets/*.exe --clobber
+        run: gh release upload "$RELEASE_TAG" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --clobber
