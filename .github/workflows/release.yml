@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -134,10 +134,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -153,10 +153,9 @@ jobs:
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v0.6.2
         with:
-          tauriScript: npm run tauri --
+          tauriScript: npm run tauri
           args: --target ${{ matrix.rust_target }} --bundles nsis
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: false
+          includeUpdaterJson: false
 
       - name: Stage installer
         shell: pwsh
@@ -179,7 +178,7 @@ jobs:
           Write-Host "已暂存安装包：$destination"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lilt-windows-${{ matrix.arch }}-nsis
           path: release-staging/*.exe
@@ -196,7 +195,7 @@ jobs:
 
     steps:
       - name: Download installer artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: lilt-windows-*-nsis
           merge-multiple: true
