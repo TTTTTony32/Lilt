@@ -1,9 +1,9 @@
 [package]
 name = "lilt"
-version = "0.2.6"
-description = "Lilt desktop reading assistant"
-authors = ["Lilt"]
-edition = "2021"
+version = "0.2.7"
+description = "A simple desktop translation workspace for English learners."
+authors = ["Tony32"]
+edition = "2024"
 
 [lib]
 name = "lilt_lib"

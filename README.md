@@ -39,7 +39,7 @@
 
 ## 开发环境
 
-- Node.js 20 或更高版本
+- Node.js 24 或更高版本
 - Rust stable MSVC 工具链
 - Windows WebView2 Runtime
 - Windows 10 或更高版本
@@ -113,4 +113,3 @@ npm run tauri -- build
 Lilt 软件本体采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPLv3）授权。
 
 随软件分发的词典数据来自 [ahpxex/open-dictionary](https://github.com/ahpxex/open-dictionary)，采用与 [Creative Commons Attribution-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-sa/4.0/)（CC BY-SA 4.0）兼容的许可。词典数据的署名和相同方式共享要求以数据来源的具体许可声明为准。
-

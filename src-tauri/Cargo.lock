@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "lilt"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "chrono",
  "flate2",
