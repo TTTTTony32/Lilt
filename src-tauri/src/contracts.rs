@@ -227,6 +227,13 @@ pub struct PersonalDictionaryEntry {
     pub saved_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalDictionaryExportResult {
+    pub entry_count: usize,
+    pub file_name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlossaryTerm {
@@ -234,6 +241,22 @@ pub struct GlossaryTerm {
     pub source: String,
     pub target: String,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlossaryImportSkippedRow {
+    pub line: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlossaryImportResult {
+    pub added_count: usize,
+    pub updated_count: usize,
+    pub skipped_count: usize,
+    pub skipped_rows: Vec<GlossaryImportSkippedRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -635,9 +658,10 @@ impl DictionaryState {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH,
-        MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-        MIN_SELECTION_WINDOW_WIDTH, ThinkingEffort, TranslationCommandResult, TranslationOutcome,
+        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, GlossaryImportResult,
+        GlossaryImportSkippedRow, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+        MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, PersonalDictionaryExportResult,
+        ThinkingEffort, TranslationCommandResult, TranslationOutcome,
         clamp_selection_window_dimension, parse_selection_window_dimension,
     };
 
@@ -751,5 +775,31 @@ mod tests {
             assert_eq!(serde_json::to_value(effort).unwrap(), expected);
             assert_eq!(effort.as_str(), expected);
         }
+    }
+
+    #[test]
+    fn transfer_results_serialize_to_frontend_contracts() {
+        let export = serde_json::to_value(PersonalDictionaryExportResult {
+            entry_count: 2,
+            file_name: "words.txt".to_string(),
+        })
+        .unwrap();
+        assert_eq!(export["entryCount"], 2);
+        assert_eq!(export["fileName"], "words.txt");
+
+        let import = serde_json::to_value(GlossaryImportResult {
+            added_count: 1,
+            updated_count: 2,
+            skipped_count: 1,
+            skipped_rows: vec![GlossaryImportSkippedRow {
+                line: 4,
+                reason: "译文不能为空".to_string(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(import["addedCount"], 1);
+        assert_eq!(import["updatedCount"], 2);
+        assert_eq!(import["skippedCount"], 1);
+        assert_eq!(import["skippedRows"][0]["line"], 4);
     }
 }

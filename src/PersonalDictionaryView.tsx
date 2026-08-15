@@ -1,22 +1,24 @@
 import { useState } from "react";
-import { Bookmark, ExternalLink, Trash2 } from "lucide-react";
+import { Bookmark, Download, ExternalLink, Trash2 } from "lucide-react";
 import type { PersonalDictionaryEntry } from "./types/contracts";
 
 export default function PersonalDictionaryView({
   entries,
   onOpen,
   onRemove,
+  onExport,
 }: {
   entries: PersonalDictionaryEntry[];
   onOpen: (entry: PersonalDictionaryEntry) => void;
   onRemove: (entry: PersonalDictionaryEntry) => void;
+  onExport: () => void;
 }) {
   const [visibleCount, setVisibleCount] = useState(10);
   const visibleEntries = entries.slice(0, visibleCount);
 
   return (
     <section className="page-section narrow-page bounded-list-page personal-dictionary-page">
-      <PageTitle />
+      <PageTitle onExport={onExport} />
       <div className="list-card bounded-list-card personal-dictionary-card">
         <div className="list-card-heading">
           <strong>已收藏词条</strong>
@@ -51,13 +53,17 @@ export default function PersonalDictionaryView({
   );
 }
 
-function PageTitle() {
+function PageTitle({ onExport }: { onExport: () => void }) {
   return (
     <div className="page-heading">
       <div>
         <p className="eyebrow">PERSONAL DICTIONARY</p>
         <h1>个人词典</h1>
       </div>
+      <button className="secondary-button small-button" type="button" onClick={onExport}>
+        <Download size={15} />
+        导出词典
+      </button>
     </div>
   );
 }

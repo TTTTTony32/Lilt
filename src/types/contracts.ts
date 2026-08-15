@@ -100,11 +100,28 @@ export interface PersonalDictionaryEntry {
   savedAt: string;
 }
 
+export interface PersonalDictionaryExportResult {
+  entryCount: number;
+  fileName: string;
+}
+
 export interface GlossaryTerm {
   id: string;
   source: string;
   target: string;
   note: string | null;
+}
+
+export interface GlossaryImportSkippedRow {
+  line: number;
+  reason: string;
+}
+
+export interface GlossaryImportResult {
+  addedCount: number;
+  updatedCount: number;
+  skippedCount: number;
+  skippedRows: GlossaryImportSkippedRow[];
 }
 
 export interface HistoryEntry {
@@ -446,6 +463,44 @@ export function decodePrompt(value: unknown): Prompt | null {
     return null;
   }
   return { id, name, content, version, isBuiltin: value.isBuiltin };
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+export function decodePersonalDictionaryExportResult(value: unknown): PersonalDictionaryExportResult | null {
+  if (!isRecord(value) || !nonNegativeInteger(value.entryCount)) return null;
+  const fileName = stringValue(value.fileName);
+  return fileName === null || fileName.trim().length === 0
+    ? null
+    : { entryCount: value.entryCount, fileName };
+}
+
+export function decodeGlossaryImportResult(value: unknown): GlossaryImportResult | null {
+  if (
+    !isRecord(value)
+    || !nonNegativeInteger(value.addedCount)
+    || !nonNegativeInteger(value.updatedCount)
+    || !nonNegativeInteger(value.skippedCount)
+    || !Array.isArray(value.skippedRows)
+  ) {
+    return null;
+  }
+  const skippedRows: GlossaryImportSkippedRow[] = [];
+  for (const row of value.skippedRows) {
+    if (!isRecord(row) || !nonNegativeInteger(row.line) || row.line < 1) return null;
+    const reason = stringValue(row.reason);
+    if (reason === null || reason.trim().length === 0) return null;
+    skippedRows.push({ line: row.line, reason });
+  }
+  if (value.skippedCount !== skippedRows.length) return null;
+  return {
+    addedCount: value.addedCount,
+    updatedCount: value.updatedCount,
+    skippedCount: value.skippedCount,
+    skippedRows,
+  };
 }
 
 export const DEFAULT_SNAPSHOT: AppSnapshot = {

@@ -3,6 +3,7 @@ mod db;
 mod diagnostics;
 mod dictionary;
 mod examples;
+mod glossary;
 mod icons;
 mod provider;
 mod secrets;
@@ -13,12 +14,13 @@ mod tray;
 use contracts::{
     AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
     DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
-    DictionaryState, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample,
-    PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
-    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
-    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationFailed,
-    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    DictionaryState, GlossaryImportResult, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT,
+    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo,
+    ParagraphExample, PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt,
+    ProviderConfig, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
+    SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort, TranslationCancelled,
+    TranslationCommandResult, TranslationCompleted, TranslationFailed, TranslationRequest,
+    TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
     WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
     WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
@@ -152,6 +154,7 @@ impl AppState {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             if window.label() == "selection" {
@@ -294,6 +297,7 @@ pub fn run() {
             cancel_translation,
             upsert_glossary_term,
             delete_glossary_term,
+            import_glossary,
             create_prompt,
             update_prompt,
             duplicate_prompt,
@@ -301,6 +305,7 @@ pub fn run() {
             set_default_prompt,
             save_personal_word,
             remove_personal_word,
+            export_personal_dictionary,
             resolve_window_close,
             reset_close_behavior,
             query_dictionary,
@@ -1361,6 +1366,34 @@ fn delete_glossary_term(state: State<'_, AppState>, id: String) -> Result<(), St
 }
 
 #[tauri::command]
+fn import_glossary(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<GlossaryImportResult, String> {
+    let path = file_path.trim();
+    if path.is_empty() {
+        return Err("术语表文件路径不能为空".to_string());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("读取术语表文件失败：{error}"))?;
+    let content =
+        String::from_utf8(bytes).map_err(|_| "术语表文件必须使用 UTF-8 编码".to_string())?;
+    let parsed = glossary::parse_csv(&content);
+    let counts = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::import_glossary_terms(&connection, &parsed.terms)?
+    };
+    Ok(GlossaryImportResult {
+        added_count: counts.added_count,
+        updated_count: counts.updated_count,
+        skipped_count: parsed.skipped_rows.len(),
+        skipped_rows: parsed.skipped_rows,
+    })
+}
+
+#[tauri::command]
 fn create_prompt(
     state: State<'_, AppState>,
     name: String,
@@ -1474,6 +1507,39 @@ fn remove_personal_word(state: State<'_, AppState>, canonical_word: String) -> R
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
     db::remove_personal_word(&connection, &normalized_canonical_word)
+}
+
+#[tauri::command]
+fn export_personal_dictionary(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<PersonalDictionaryExportResult, String> {
+    let path = file_path.trim();
+    if path.is_empty() {
+        return Err("个人词典导出路径不能为空".to_string());
+    }
+    let (content, entry_count) = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        let Some((content, entry_count)) = db::personal_dictionary_export_text(&connection)? else {
+            return Err("个人词典为空，没有可导出的内容".to_string());
+        };
+        (content, entry_count)
+    };
+    fs::write(path, content.as_bytes())
+        .map_err(|error| format!("写入个人词典文件失败：{error}"))?;
+    let file_name = PathBuf::from(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("lilt-personal-dictionary.txt")
+        .to_string();
+    Ok(PersonalDictionaryExportResult {
+        entry_count,
+        file_name,
+    })
 }
 
 #[tauri::command]

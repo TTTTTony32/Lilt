@@ -9,6 +9,7 @@ use crate::contracts::{
     MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
     SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
+use crate::glossary::GlossaryImportTerm;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -733,6 +734,79 @@ pub fn upsert_glossary_term(
     bump_glossary_version(connection)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlossaryImportCounts {
+    pub added_count: usize,
+    pub updated_count: usize,
+}
+
+pub fn import_glossary_terms(
+    connection: &Connection,
+    terms: &[GlossaryImportTerm],
+) -> Result<GlossaryImportCounts, String> {
+    if terms.is_empty() {
+        return Ok(GlossaryImportCounts {
+            added_count: 0,
+            updated_count: 0,
+        });
+    }
+
+    let mut added_count = 0;
+    let mut updated_count = 0;
+    for term in terms {
+        let exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM glossary_terms
+                    WHERE glossary_id = ?1 AND source = ?2
+                )",
+                params![DEFAULT_GLOSSARY_ID, term.source],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("检查术语是否存在失败：{error}"))?
+            != 0;
+        if exists {
+            updated_count += 1;
+        } else {
+            added_count += 1;
+        }
+    }
+
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("开启术语导入事务失败：{error}"))?;
+    for term in terms {
+        transaction
+            .execute(
+                "INSERT INTO glossary_terms (id, glossary_id, source, target, note)
+                 VALUES (?1, ?2, ?3, ?4, NULL)
+                 ON CONFLICT(glossary_id, source) DO UPDATE SET
+                    target = excluded.target",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    DEFAULT_GLOSSARY_ID,
+                    term.source,
+                    term.target,
+                ],
+            )
+            .map_err(|error| format!("写入导入术语失败：{error}"))?;
+    }
+    transaction
+        .execute(
+            "UPDATE glossaries SET version = version + 1 WHERE id = ?1",
+            params![DEFAULT_GLOSSARY_ID],
+        )
+        .map_err(|error| format!("更新术语表版本失败：{error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交术语导入事务失败：{error}"))?;
+
+    Ok(GlossaryImportCounts {
+        added_count,
+        updated_count,
+    })
+}
+
 pub fn delete_glossary_term(connection: &Connection, id: &str) -> Result<(), String> {
     connection
         .execute("DELETE FROM glossary_terms WHERE id = ?1", params![id])
@@ -1382,6 +1456,22 @@ pub fn list_personal_dictionary(
         .map_err(|error| format!("读取个人词典失败：{error}"))
 }
 
+pub fn personal_dictionary_export_text(
+    connection: &Connection,
+) -> Result<Option<(String, usize)>, String> {
+    let entries = list_personal_dictionary(connection)?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let entry_count = entries.len();
+    let mut text = String::new();
+    for entry in entries {
+        text.push_str(&entry.canonical_word);
+        text.push('\n');
+    }
+    Ok(Some((text, entry_count)))
+}
+
 pub fn save_personal_word(
     connection: &Connection,
     _normalized_canonical_word: &str,
@@ -1966,6 +2056,92 @@ mod tests {
         assert_eq!(entries[0].canonical_word, "resolve");
         remove_personal_word(&connection, "RESOLVE").expect("personal word should remove");
         assert!(list_personal_dictionary(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn personal_dictionary_export_uses_saved_order_and_trailing_newline() {
+        let connection = test_connection();
+        save_personal_word(&connection, "first", "First", "first").expect("first word should save");
+        save_personal_word(&connection, "second", "Second", "second")
+            .expect("second word should save");
+        connection
+            .execute(
+                "UPDATE personal_dictionary SET saved_at = CASE canonical_word
+                    WHEN 'First' THEN '2024-01-01T00:00:00Z'
+                    WHEN 'Second' THEN '2024-01-02T00:00:00Z'
+                END",
+                [],
+            )
+            .expect("fixture timestamps should update");
+
+        assert_eq!(
+            personal_dictionary_export_text(&connection).unwrap(),
+            Some(("Second\nFirst\n".to_string(), 2))
+        );
+    }
+
+    #[test]
+    fn glossary_import_updates_existing_terms_preserves_notes_and_bumps_once() {
+        let connection = test_connection();
+        upsert_glossary_term(&connection, None, "existing", "旧译文", Some("保留备注"))
+            .expect("existing term should save");
+        let version_before = glossary_version(&connection).unwrap();
+        let parsed = crate::glossary::parse_csv(
+            "source,target\nexisting,new\nnew term,new translation\nnew term,last translation\n",
+        );
+
+        let counts = import_glossary_terms(&connection, &parsed.terms).unwrap();
+        assert_eq!(
+            counts,
+            GlossaryImportCounts {
+                added_count: 1,
+                updated_count: 1,
+            }
+        );
+        assert_eq!(glossary_version(&connection).unwrap(), version_before + 1);
+
+        let terms = list_glossary_terms(&connection).unwrap();
+        let existing = terms.iter().find(|term| term.source == "existing").unwrap();
+        assert_eq!(existing.target, "new");
+        assert_eq!(existing.note.as_deref(), Some("保留备注"));
+        let imported = terms.iter().find(|term| term.source == "new term").unwrap();
+        assert_eq!(imported.target, "last translation");
+        assert_eq!(imported.note, None);
+    }
+
+    #[test]
+    fn glossary_import_rolls_back_all_rows_when_a_write_fails() {
+        let connection = test_connection();
+        let version_before = glossary_version(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_glossary_import
+                 BEFORE INSERT ON glossary_terms
+                 WHEN NEW.source = 'fail'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced import failure');
+                 END;",
+            )
+            .expect("failure trigger should be created");
+        let terms = vec![
+            crate::glossary::GlossaryImportTerm {
+                source: "ok".to_string(),
+                target: "应该回滚".to_string(),
+            },
+            crate::glossary::GlossaryImportTerm {
+                source: "fail".to_string(),
+                target: "触发失败".to_string(),
+            },
+        ];
+
+        assert!(import_glossary_terms(&connection, &terms).is_err());
+        assert!(
+            list_glossary_terms(&connection)
+                .unwrap()
+                .iter()
+                .all(|term| term.source != "ok")
+        );
+        assert_eq!(glossary_version(&connection).unwrap(), version_before);
     }
 
     #[test]

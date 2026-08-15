@@ -8,6 +8,8 @@ import {
   decodeTranslationCommandResult,
   decodeTranslationEvent,
   decodePrompt,
+  decodePersonalDictionaryExportResult,
+  decodeGlossaryImportResult,
 } from "./contracts";
 
 describe("selection contract", () => {
@@ -198,5 +200,38 @@ describe("prompt contract", () => {
   it("rejects malformed prompt results", () => {
     expect(decodePrompt({ id: "p", name: "缺正文", version: 1, isBuiltin: true })).toBeNull();
     expect(decodePrompt({ id: "p", name: "错误版本", content: "正文", version: 1.5, isBuiltin: true })).toBeNull();
+  });
+});
+
+describe("dictionary and glossary transfer contracts", () => {
+  it("decodes successful personal dictionary exports", () => {
+    expect(decodePersonalDictionaryExportResult({
+      entryCount: 2,
+      fileName: "lilt-personal-dictionary.txt",
+    })).toEqual({
+      entryCount: 2,
+      fileName: "lilt-personal-dictionary.txt",
+    });
+    expect(decodePersonalDictionaryExportResult({ entryCount: -1, fileName: "words.txt" })).toBeNull();
+  });
+
+  it("decodes glossary import counts and skipped rows", () => {
+    expect(decodeGlossaryImportResult({
+      addedCount: 2,
+      updatedCount: 1,
+      skippedCount: 1,
+      skippedRows: [{ line: 4, reason: "译文不能为空" }],
+    })).toEqual({
+      addedCount: 2,
+      updatedCount: 1,
+      skippedCount: 1,
+      skippedRows: [{ line: 4, reason: "译文不能为空" }],
+    });
+    expect(decodeGlossaryImportResult({
+      addedCount: 2,
+      updatedCount: 1,
+      skippedCount: 2,
+      skippedRows: [{ line: 4, reason: "译文不能为空" }],
+    })).toBeNull();
   });
 });

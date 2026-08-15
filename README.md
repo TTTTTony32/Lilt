@@ -17,7 +17,7 @@
 ### 词典
 
 - 使用 [ahpxex/open-dictionary](https://github.com/ahpxex/open-dictionary) 词典库
-- 支持收藏与个人词典导出（暂未做完）功能
+- 支持收藏与个人词典 UTF-8 TXT 导出
 - 查询词若曾在段落翻译中翻译过，所在句将自动作为例句出现
 
 ### 划词翻译
@@ -27,7 +27,7 @@
 
 ### 其他功能
 
-- 术语表：支持手动添加原文-译文对和备注，支持导入（暂未做完）
+- 术语表：支持手动添加原文-译文对和备注，支持 CSV 导入
 - PDF全文翻译（基于 [PDFMathTranslate-Next](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next) ）（暂未做完）
 
 ## 技术架构
@@ -90,10 +90,6 @@ npm run tauri -- build
 ```
 
 ## TO-DO
-
-- [ ] 个人词典导出
-
-- [ ] 术语库导入
 
 - [ ] PDF全文翻译集成
 
