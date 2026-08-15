@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronDown, Copy, FileText, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { Check, ChevronDown, Copy, FileText, FileType2, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
 import type { DictionaryOpenRequest } from "./DictionaryView";
+import PdfView from "./PdfView";
 import PersonalDictionaryView from "./PersonalDictionaryView";
 import {
   DEFAULT_SNAPSHOT,
@@ -1180,6 +1181,7 @@ function App() {
                 onOpenPersonalDictionary={openPersonalDictionary}
               />
             )}
+            {tab === "pdf" && <PdfView />}
             {tab === "personal" && (
               <PersonalDictionaryView
                 entries={snapshot.personalDictionary}
@@ -1564,6 +1566,7 @@ function ModeSwitcher({ activeTab, onChange }: { activeTab: AppTab; onChange: (t
       />
       <ModeButton buttonRef={setButtonRef("translate")} icon={<Languages size={15} />} label="段落翻译" active={activeTab === "translate"} onClick={() => onChange("translate")} />
       <ModeButton buttonRef={setButtonRef("dictionary")} icon={<BookOpen size={15} />} label="词典" active={activeTab === "dictionary"} onClick={() => onChange("dictionary")} />
+      <ModeButton buttonRef={setButtonRef("pdf")} icon={<FileType2 size={15} />} label="PDF" active={activeTab === "pdf"} onClick={() => onChange("pdf")} />
       <ModeButton buttonRef={setButtonRef("glossary")} icon={<FileText size={15} />} label="术语表" active={activeTab === "glossary"} onClick={() => onChange("glossary")} />
     </nav>
   );

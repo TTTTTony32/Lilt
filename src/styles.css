@@ -196,6 +196,24 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-stack .simple-card:last-child { margin-bottom: 0; }
 .settings-message { margin: 12px 0 0; font-size: 12px; }
 
+.pdf-page { max-width: 900px; }
+.pdf-import-card { padding: 18px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
+.pdf-drop-zone { min-height: 255px; padding: 34px 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #cbd6ca; border-radius: 8px; color: #637264; background: #f7f8f3; text-align: center; transition: border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
+.pdf-drop-zone.is-dragging { border-color: #719178; background: #edf4eb; box-shadow: 0 0 0 3px rgba(113, 145, 120, .12); }
+.pdf-drop-icon { width: 48px; height: 48px; margin-bottom: 15px; display: grid; place-items: center; border-radius: 13px; color: #6e8a72; background: #e7efe5; }
+.pdf-drop-zone strong { color: #526456; font-size: 14px; font-weight: 600; }
+.pdf-drop-zone p { max-width: 430px; margin: 8px 0 18px; color: #92978e; font-size: 11px; line-height: 1.65; }
+.pdf-file-card { min-height: 67px; margin-top: 14px; padding: 10px 11px 10px 13px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #e0e3da; border-radius: 8px; background: #fffefb; }
+.pdf-file-summary { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.pdf-file-icon { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 8px; color: #6e8a72; background: #edf3ea; }
+.pdf-file-summary strong, .pdf-file-summary span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-file-summary strong { max-width: 520px; color: #536456; font-size: 12px; font-weight: 600; }
+.pdf-file-summary span { margin-top: 4px; color: #a0a39a; font-size: 10px; }
+.pdf-message-area { min-height: 34px; padding: 11px 2px 0; font-size: 12px; }
+.pdf-message-area p { margin: 0; line-height: 1.6; }
+.pdf-stage-card { margin-bottom: 0; }
+.pdf-stage-description { margin: 0; color: #7e877d; font-size: 12px; line-height: 1.7; }
+
 .dictionary-search-card { position: relative; z-index: 1; margin-bottom: 18px; padding: 12px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
 .dictionary-heading-actions { display: flex; align-items: center; gap: 9px; }
 .dictionary-search-form { display: flex; align-items: center; gap: 10px; }
@@ -404,6 +422,13 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .nav-item { padding-right: 9px; padding-left: 9px; gap: 5px; font-size: 11px; }
   .main-content { padding-right: 32px; padding-left: 32px; }
   .prompt-manager-grid { grid-template-columns: 1fr; }
+  .pdf-file-summary strong { max-width: 360px; }
+}
+
+@media (max-width: 720px) {
+  .pdf-file-card { align-items: flex-start; flex-direction: column; }
+  .pdf-file-summary { width: 100%; }
+  .pdf-file-summary strong { max-width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
