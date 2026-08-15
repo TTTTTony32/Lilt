@@ -5,6 +5,7 @@ mod dictionary;
 mod examples;
 mod glossary;
 mod icons;
+mod pdf;
 mod provider;
 mod secrets;
 mod selection;
@@ -314,7 +315,8 @@ pub fn run() {
             cancel_word_example,
             get_dictionary_state,
             update_dictionary,
-            clear_dictionary_history
+            clear_dictionary_history,
+            pdf::read_pdf_bytes
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lilt");
