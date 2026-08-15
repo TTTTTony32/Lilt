@@ -84,36 +84,6 @@ npm run build
 npm run tauri -- build
 ```
 
-## GitHub Actions Release
-
-Release 工作流位于 `.github/workflows/release.yml`，只构建 Windows NSIS 安装包，分别生成 `amd64` 和 `arm64` 两个架构版本。
-
-### 手动验证构建
-
-在仓库的 `Actions` 页面打开 `Release build`，点击 `Run workflow` 并选择分支。手动运行会执行完整质量检查和双架构构建，产物只保存在本次运行的 Actions Artifact 中，不会创建公开 Release。
-
-### 正式发布
-
-1. 将 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 的版本号更新为同一个版本。
-2. 提交并推送版本变更。
-3. 创建并推送版本标签：
-
-   ```bash
-   git tag v0.2.5
-   git push origin v0.2.5
-   ```
-
-4. 工作流完成质量检查和两个架构的构建后，会创建对应的 Draft Release，并上传：
-
-   - `Lilt_<version>_windows_amd64_setup.exe`
-   - `Lilt_<version>_windows_arm64_setup.exe`
-
-5. 在 GitHub 的 Draft Release 页面检查安装包，编辑或补充 Release Note，确认无误后点击 `Publish release`。
-
-首版安装包未进行 Windows 代码签名，首次安装时可能出现 SmartScreen 提示。工作流不会读取 Provider 配置，也不会将运行时密钥写入构建日志或 Release 资产。
-
-如果质量检查或任一架构构建失败，工作流不会创建 Draft Release。修复后可以重跑同一个标签，已有 Draft 会复用并覆盖同名资产；标签已经对应正式 Release 时，工作流会停止修改，需使用新的版本号和标签。
-
 ## TO-DO
 
 - [ ] 个人词典导出
