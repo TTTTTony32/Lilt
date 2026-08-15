@@ -570,10 +570,18 @@ fn build_worker_command() -> Result<Command, String> {
     if !worker_script.is_file() {
         return Err("PDF Worker 脚本不存在，请检查 PDF Engine 安装".to_string());
     }
-    let python = std::env::var_os("LILT_PDF_PYTHON").unwrap_or_else(|| "python".into());
-    let mut command = Command::new(python);
+    let mut command = if let Some(python) = std::env::var_os("LILT_PDF_PYTHON") {
+        let mut command = Command::new(python);
+        command.arg(worker_script);
+        command
+    } else {
+        let uv = std::env::var_os("LILT_PDF_UV").unwrap_or_else(|| "uv".into());
+        let mut command = Command::new(uv);
+        command.args(["tool", "run", "--from", "BabelDOC==0.6.4", "python"]);
+        command.arg(worker_script);
+        command
+    };
     command
-        .arg(worker_script)
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8");
     if let Some(python_path) = std::env::var_os("LILT_PDF_PYTHONPATH") {
