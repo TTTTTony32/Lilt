@@ -1,16 +1,16 @@
 use crate::contracts::{
-    parse_selection_window_dimension, AppSettings, CacheStats, CachedTranslation, CloseBehavior,
-    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, ModelInfo, PersonalDictionaryEntry, Prompt,
-    ProviderRecord, SelectionMode, ThinkingEffort, DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID,
-    DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PROMPT_ID,
-    DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
+    AppSettings, CacheStats, CachedTranslation, CloseBehavior, DEFAULT_CACHE_MAX_BYTES,
+    DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED,
+    DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
     DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT,
     DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
-    DICTIONARY_SQLITE_SCHEMA_VERSION, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
+    DICTIONARY_SQLITE_SCHEMA_VERSION, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
+    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
+    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
+    SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub const DEFAULT_MODEL_ID: &str = "gpt-4o-mini";
 
@@ -1784,9 +1784,11 @@ mod tests {
             part_of_speech: "noun",
         };
         save_word_ai_cache(&connection, &word_cache).expect("word cache write should succeed");
-        assert!(find_word_ai_cache(&connection, "word-cache")
-            .unwrap()
-            .is_some());
+        assert!(
+            find_word_ai_cache(&connection, "word-cache")
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(get_cache_stats(&connection, 1024).unwrap().entry_count, 2);
         connection
             .execute(
@@ -1794,12 +1796,16 @@ mod tests {
                 [],
             )
             .expect("paragraph cache should delete");
-        assert!(find_word_ai_cache(&connection, "word-cache")
-            .unwrap()
-            .is_none());
-        assert!(find_latest_example(&connection, "target")
-            .unwrap()
-            .is_none());
+        assert!(
+            find_word_ai_cache(&connection, "word-cache")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_latest_example(&connection, "target")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

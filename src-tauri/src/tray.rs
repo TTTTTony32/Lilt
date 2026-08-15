@@ -1,6 +1,6 @@
 #![cfg(desktop)]
 
-use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, AppHandle, Manager};
+use tauri::{AppHandle, Manager, menu::MenuBuilder, tray::TrayIconBuilder};
 
 use crate::icons;
 

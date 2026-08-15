@@ -11,17 +11,17 @@ mod selection;
 mod tray;
 
 use contracts::{
-    clamp_selection_window_dimension, AppSnapshot, CloseBehavior, DictionaryCommandResult,
-    DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryState, GlossaryTerm,
-    ModelInfo, ParagraphExample, PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode,
-    SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
-    SelectionTriggerNotice, ThinkingEffort, TranslationCancelled, TranslationCommandResult,
-    TranslationCompleted, TranslationFailed, TranslationRequest, TranslationStarted,
-    WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted, WordExampleFailed,
-    WordExamplePosDelta, WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
-    DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT, MAX_SELECTION_WINDOW_HEIGHT,
-    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
-    WORD_EXAMPLE_PROTOCOL_VERSION,
+    AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
+    DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
+    DictionaryState, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample,
+    PersonalDictionaryEntry, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
+    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
+    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationFailed,
+    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
+    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
+    clamp_selection_window_dimension,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -325,7 +325,7 @@ pub fn run() {
 fn set_main_taskbar_icon(window: &WebviewWindow) -> Result<(), String> {
     use windows::Win32::{
         Foundation::{LPARAM, WPARAM},
-        UI::WindowsAndMessaging::{CreateIcon, SendMessageW, ICON_BIG, WM_SETICON},
+        UI::WindowsAndMessaging::{CreateIcon, ICON_BIG, SendMessageW, WM_SETICON},
     };
 
     let image = icons::high_resolution_icon().map_err(|error| error.to_string())?;
@@ -2383,13 +2383,13 @@ fn emit_word_failed(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_system_prompt, cancel_request, make_cache_key, make_word_ai_cache_key,
-        unregister_request, AppState, CacheKeyInput, StartupRuntime, WordAiCacheKeyInput,
-        WordExampleDelta, WordExampleProtocolParser, WORD_EXAMPLE_PROTOCOL_VERSION,
+        AppState, CacheKeyInput, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
+        WordAiCacheKeyInput, WordExampleDelta, WordExampleProtocolParser, build_system_prompt,
+        cancel_request, make_cache_key, make_word_ai_cache_key, unregister_request,
     };
     use crate::contracts::GlossaryTerm;
     use rusqlite::Connection;
-    use std::sync::{atomic::Ordering, Arc};
+    use std::sync::{Arc, atomic::Ordering};
     use tokio_util::sync::CancellationToken;
 
     fn test_cache_key(source_text: &str) -> String {

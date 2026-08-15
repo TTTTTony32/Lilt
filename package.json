@@ -1,8 +1,11 @@
 {
   "name": "lilt",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.3.0",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc -b && vite build",

@@ -635,10 +635,10 @@ impl DictionaryState {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_selection_window_dimension, parse_selection_window_dimension, ThinkingEffort,
-        TranslationCommandResult, TranslationOutcome, DEFAULT_SELECTION_WINDOW_HEIGHT,
-        DEFAULT_SELECTION_WINDOW_WIDTH, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-        MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH,
+        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH,
+        MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
+        MIN_SELECTION_WINDOW_WIDTH, ThinkingEffort, TranslationCommandResult, TranslationOutcome,
+        clamp_selection_window_dimension, parse_selection_window_dimension,
     };
 
     #[test]

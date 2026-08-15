@@ -40,7 +40,7 @@
 ## 开发环境
 
 - Node.js 24 或更高版本
-- Rust stable MSVC 工具链
+- Rust 1.85 或更高版本，使用 Rust 2024 edition 的 MSVC 工具链
 - Windows WebView2 Runtime
 - Windows 10 或更高版本
 
@@ -76,6 +76,7 @@ npm run dev
 npm run typecheck
 npm run lint
 npm test
+cargo check --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml

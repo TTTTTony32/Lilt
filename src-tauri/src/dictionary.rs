@@ -1,13 +1,13 @@
+use crate::AppState;
 use crate::contracts::{
+    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
     DictionaryCommandResult, DictionaryDownloadProgress, DictionaryExtractProgress,
     DictionaryLookupResult, DictionaryMatchType, DictionaryState, DictionaryStatus,
     DictionaryUpdateCompleted, DictionaryUpdateFailed, DictionaryUpdateStarted,
-    DictionaryVerifyProgress, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
-    DICTIONARY_SQLITE_SCHEMA_VERSION,
+    DictionaryVerifyProgress,
 };
 use crate::db::{self, DictionaryInstallationRecord};
 use crate::diagnostics;
-use crate::AppState;
 use chrono::Utc;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
@@ -21,8 +21,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};

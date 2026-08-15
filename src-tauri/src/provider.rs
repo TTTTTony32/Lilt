@@ -4,7 +4,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
@@ -383,7 +383,7 @@ fn ensure_success(response: &reqwest::Response) -> Result<(), ProviderError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_base_url, parse_model_payload, parse_sse_line, ProviderError};
+    use super::{ProviderError, normalize_base_url, parse_model_payload, parse_sse_line};
     use crate::contracts::ThinkingEffort;
     use serde_json::json;
     use std::io::{Read, Write};

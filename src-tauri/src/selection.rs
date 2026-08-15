@@ -1,16 +1,15 @@
 use crate::{
     contracts::{
-        SelectionAnchor, SelectionMode, SelectionNotice, SelectionRequestPayload,
-        SelectionRuntimeStatus, SelectionStatusChanged, SelectionTrigger, SelectionTriggerNotice,
-        SelectionUnavailable, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
-        DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH,
-        MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-        MIN_SELECTION_WINDOW_WIDTH,
+        DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT,
+        DEFAULT_SELECTION_WINDOW_WIDTH, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+        MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, SelectionAnchor, SelectionMode,
+        SelectionNotice, SelectionRequestPayload, SelectionRuntimeStatus, SelectionStatusChanged,
+        SelectionTrigger, SelectionTriggerNotice, SelectionUnavailable,
     },
     diagnostics,
 };
 use std::{
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -876,9 +875,9 @@ fn worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: SelectionServic
 #[cfg(windows)]
 fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: SelectionService) {
     use uiautomation::{
+        UIAutomation,
         events::{CustomEventHandlerFn, UIEventHandler, UIEventType},
         types::TreeScope,
-        UIAutomation,
     };
 
     let automation = match UIAutomation::new() {
@@ -1210,7 +1209,7 @@ fn read_prepared_selection(prepared: &PreparedSelection) -> Option<SelectionCand
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_shortcut, recently_resized, SelectionService};
+    use super::{SelectionService, normalize_shortcut, recently_resized};
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
