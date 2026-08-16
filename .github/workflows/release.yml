@@ -128,9 +128,6 @@ jobs:
           - arch: amd64
             runner: windows-2025
             rust_target: x86_64-pc-windows-msvc
-          - arch: arm64
-            runner: windows-11-arm
-            rust_target: aarch64-pc-windows-msvc
 
     steps:
       - name: Checkout
@@ -191,7 +188,7 @@ jobs:
           New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
           $destination = Join-Path $stagingPath "Lilt_$($package.version)_windows_$env:ARCH`_setup.exe"
           Copy-Item -LiteralPath $installers[0].FullName -Destination $destination
-          $engineTarget = if ($env:ARCH -eq 'amd64') { 'windows-x86_64' } else { 'windows-aarch64' }
+          $engineTarget = 'windows-x86_64'
           $engineZip = Join-Path "pdf-engine/dist" "babeldoc-0.6.4-$engineTarget.zip"
           $engineMetadata = Join-Path "pdf-engine/dist" "engine-metadata-$engineTarget.json"
           if (-not (Test-Path -LiteralPath $engineZip -PathType Leaf)) {
@@ -236,21 +233,19 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f -name '*.exe' -print)
-          if [[ "${#assets[@]}" -ne 2 ]]; then
-            echo "期望两个 Windows 安装包，实际找到 ${#assets[@]} 个"
+          if [[ "${#assets[@]}" -ne 1 ]]; then
+            echo "期望一个 Windows x64 安装包，实际找到 ${#assets[@]} 个"
             printf '%s\n' "${assets[@]}"
             exit 1
           fi
           printf '%s\n' "${assets[@]}" | grep -q 'windows_amd64_setup\.exe$'
-          printf '%s\n' "${assets[@]}" | grep -q 'windows_arm64_setup\.exe$'
           mapfile -t engines < <(find release-assets -maxdepth 1 -type f -name 'babeldoc-0.6.4-windows-*.zip' -print)
-          if [[ "${#engines[@]}" -ne 2 ]]; then
-            echo "期望两个 PDF Engine 压缩包，实际找到 ${#engines[@]} 个"
+          if [[ "${#engines[@]}" -ne 1 ]]; then
+            echo "期望一个 Windows x64 PDF Engine 压缩包，实际找到 ${#engines[@]} 个"
             printf '%s\n' "${engines[@]}"
             exit 1
           fi
           printf '%s\n' "${engines[@]}" | grep -q 'windows-x86_64\.zip$'
-          printf '%s\n' "${engines[@]}" | grep -q 'windows-aarch64\.zip$'
 
       - name: Create PDF Engine resource index
         shell: pwsh

@@ -22,6 +22,7 @@ use crate::AppState;
 
 pub(crate) const BABELDOC_ENGINE_VERSION: &str = "babeldoc-0.6.4";
 const BABELDOC_VERSION: &str = "0.6.4";
+const SUPPORTED_ENGINE_TARGET: &str = "windows-x86_64";
 #[cfg(not(debug_assertions))]
 const RELEASE_INDEX_URL: &str =
     "https://github.com/TTTTTony32/Lilt/releases/latest/download/pdf-engine-index.json";
@@ -292,6 +293,7 @@ fn validate_manifest(manifest: &EngineManifest) -> Result<(), String> {
         return Err("PDF Engine manifest 的分发修订号不能为空".to_string());
     }
     let expected_target = current_target();
+    ensure_supported_target(&expected_target)?;
     if manifest.target != expected_target {
         return Err(format!(
             "PDF Engine 架构不匹配：需要 {}，实际 {}",
@@ -505,6 +507,16 @@ fn current_target() -> String {
     format!("{}-{}", env::consts::OS, env::consts::ARCH)
 }
 
+fn ensure_supported_target(target: &str) -> Result<(), String> {
+    if target == SUPPORTED_ENGINE_TARGET {
+        Ok(())
+    } else {
+        Err(format!(
+            "当前平台不受 PDF Engine 支持：{target}；正式版本只支持 Windows x64"
+        ))
+    }
+}
+
 fn status_for_data_dir(data_dir: &Path, preparing: bool) -> PdfEngineStatus {
     let base = |status: &str, error: Option<String>, updating: bool| PdfEngineStatus {
         status: status.to_string(),
@@ -517,6 +529,9 @@ fn status_for_data_dir(data_dir: &Path, preparing: bool) -> PdfEngineStatus {
         updating,
         error,
     };
+    if let Err(error) = ensure_supported_target(&current_target()) {
+        return base("invalid", Some(error), false);
+    }
     if preparing {
         let current_root = data_dir.join(ENGINE_PARENT).join(BABELDOC_ENGINE_VERSION);
         return base("preparing", None, current_root.is_dir());
@@ -643,9 +658,7 @@ async fn prepare_release_engine(
     operation_id: &str,
 ) -> Result<(), String> {
     let target = current_target();
-    if !target.starts_with("windows-") {
-        return Err("正式 PDF Engine 目前只支持 Windows x64 和 ARM64".to_string());
-    }
+    ensure_supported_target(&target)?;
     let data_root = prepare_data_root(data_dir)?;
     let parent = data_root.join(ENGINE_PARENT);
     fs::create_dir_all(&parent).map_err(|error| format!("创建 PDF Engine 目录失败：{error}"))?;
@@ -759,6 +772,9 @@ fn validate_release_index(index: &PdfEngineIndex) -> Result<(), String> {
     }
     if index.assets.is_empty() {
         return Err("PDF Engine 资源索引没有可用工件".to_string());
+    }
+    if !index.assets.contains_key(SUPPORTED_ENGINE_TARGET) {
+        return Err("PDF Engine 资源索引缺少 Windows x64 工件".to_string());
     }
     Ok(())
 }
@@ -1044,6 +1060,7 @@ fn emit_engine_progress(
 
 #[cfg(debug_assertions)]
 fn prepare_development_engine(data_dir: &Path) -> Result<(), String> {
+    ensure_supported_target(&current_target())?;
     if !data_dir.is_absolute() {
         return Err("PDF Engine 只能写入绝对路径的应用数据目录".to_string());
     }
@@ -1460,7 +1477,7 @@ fn summarize_error(error: &str) -> String {
 mod tests {
     use super::{
         BABELDOC_ENGINE_VERSION, PdfEngineRuntime, build_worker_command, current_target,
-        resolve_runtime_file, status_for_data_dir,
+        ensure_supported_target, resolve_runtime_file, status_for_data_dir,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -1515,6 +1532,12 @@ mod tests {
             .expect("encode manifest"),
         )
         .expect("write manifest");
+    }
+
+    #[test]
+    fn rejects_an_unsupported_engine_target() {
+        let error = ensure_supported_target("windows-other").expect_err("target should fail");
+        assert!(error.contains("只支持 Windows x64"));
     }
 
     #[test]

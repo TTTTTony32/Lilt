@@ -7,8 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $metadataFiles = @(Get-ChildItem -LiteralPath $AssetsDirectory -Filter "engine-metadata-*.json" -File)
-if ($metadataFiles.Count -ne 2) {
-    throw "期望两个 PDF Engine 元数据文件，实际找到 $($metadataFiles.Count) 个"
+if ($metadataFiles.Count -ne 1) {
+    throw "期望一个 Windows x64 PDF Engine 元数据文件，实际找到 $($metadataFiles.Count) 个"
 }
 
 $metadata = @($metadataFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
@@ -23,7 +23,7 @@ if ($distributionVersions.Count -ne 1) {
 
 $assets = [ordered]@{}
 foreach ($item in $metadata) {
-    if ($item.target -ne "windows-x86_64" -and $item.target -ne "windows-aarch64") {
+    if ($item.target -ne "windows-x86_64") {
         throw "不支持的 Engine 架构：$($item.target)"
     }
     $zipPath = Join-Path $AssetsDirectory $item.zipName
@@ -48,8 +48,8 @@ foreach ($item in $metadata) {
         manifestSha256 = $item.manifestSha256.ToLowerInvariant()
     }
 }
-if (-not $assets.Contains("windows-x86_64") -or -not $assets.Contains("windows-aarch64")) {
-    throw "Release 索引必须同时包含 Windows x64 和 ARM64 Engine"
+if (-not $assets.Contains("windows-x86_64")) {
+    throw "Release 索引必须包含 Windows x64 Engine"
 }
 
 $index = [ordered]@{

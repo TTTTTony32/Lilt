@@ -1,6 +1,6 @@
 # PDF Engine 构建目录
 
-这里保存 PDF Engine 的构建输入和发布脚本。Engine 不进入 Lilt 安装包，GitHub Actions 为 Windows x64 与 ARM64 分别生成一个自包含 ZIP，并将 ZIP 与资源索引上传到同一 Release。
+这里保存 PDF Engine 的构建输入和发布脚本。Engine 不进入 Lilt 安装包，GitHub Actions 为 Windows x64 生成一个自包含 ZIP，并将 ZIP 与资源索引上传到同一 Release。
 
 构建结果位于 `build/` 和 `dist/`，这两个目录只保存 CI 或本地构建产物，已加入 `.gitignore`。正式运行时，Lilt 将 Engine 解压到：
 
@@ -10,7 +10,7 @@
 
 ## 固定输入
 
-- Python 3.13.15 embeddable package。x64 使用 `amd64` 包，ARM64 使用 `arm64` 包。
+- Python 3.13.15 embeddable package，使用 Windows x64 的 `amd64` 包。
 - BabelDOC 0.6.4，依赖从 PyPI 按固定版本解析，构建时写入资源清单。
 - `src-tauri/python_worker/worker.py` 是 Worker 的唯一源码来源。
 - BabelDOC 的离线资源在构建阶段生成并恢复到 Engine 私有缓存目录，正式运行不访问 PyPI、Git 仓库或系统 Python。
@@ -24,7 +24,7 @@ uv --version
 pwsh -File .\pdf-engine\scripts\build-engine.ps1 -Architecture amd64 -DistributionVersion local
 ```
 
-正式构建只允许使用 `amd64` 或 `arm64`。ARM64 构建应在 Windows ARM64 runner 上执行，以便验证目标架构的原生依赖与 Python 运行时。
+正式构建只允许使用 `amd64`，目标为 Windows x64。
 
 构建脚本会下载 Python、安装 BabelDOC 及其运行依赖，生成离线资源，写入 `runtime.json`，完成 Python 导入检查，最后生成：
 

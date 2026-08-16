@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("amd64", "arm64")]
+    [ValidateSet("amd64")]
     [string] $Architecture,
 
     [string] $DistributionVersion = "local",
@@ -15,8 +15,7 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
 
-$manifestArchitecture = if ($Architecture -eq "amd64") { "x86_64" } else { "aarch64" }
-$manifestPath = Join-Path $ProjectRoot "pdf-engine\manifests\windows-$manifestArchitecture.json"
+$manifestPath = Join-Path $ProjectRoot "pdf-engine\manifests\windows-x86_64.json"
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $engineVersion = "babeldoc-$($manifest.babeldocVersion)"
 $target = [string]$manifest.target
