@@ -31,6 +31,7 @@ import {
   type RenderTask,
 } from "./lib/pdf-reader";
 import { invokeCommand } from "./lib/tauri";
+import type { PdfEngineProgress, PdfEngineStatus, PdfJobUiState } from "./types/contracts";
 
 type PdfReaderStatus = "loading" | "ready" | "error";
 type PdfZoomMode = "fit-width" | "manual";
@@ -40,6 +41,18 @@ interface PdfReaderProps {
   file: PdfFile;
   onReplace: () => void;
   onRemove: () => void;
+  engineStatus: PdfEngineStatus | null;
+  engineStatusLoading: boolean;
+  enginePreparing: boolean;
+  engineProgress: PdfEngineProgress | null;
+  engineError: string | null;
+  job: PdfJobUiState;
+  jobEventsReady: boolean;
+  jobEventsError: string | null;
+  translationEnabled: boolean;
+  onPrepareEngine: () => void;
+  onStartTranslation: () => void;
+  onCancelTranslation: () => void;
 }
 
 interface PdfPageProps {
@@ -55,6 +68,183 @@ interface PdfPageProps {
 interface PageDimensions {
   width: number;
   height: number;
+}
+
+function formatStageName(stage: string): string {
+  return stage
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatPdfStage(stage: string | null): string {
+  if (!stage) return "等待 Worker";
+  const normalized = stage.toLowerCase().replace(/[-\s]+/g, "_");
+  const label = formatStageName(stage);
+  if (normalized.includes("babeldoc") || /parse|layout|render|typeset|output|finish/.test(normalized)) {
+    return `BabelDOC · ${label}`;
+  }
+  return `Worker · ${label}`;
+}
+
+function progressPercent(progress: { fraction: number | null; current: number | null; total: number | null } | null): number | null {
+  if (!progress) return null;
+  if (progress.fraction !== null) return Math.max(0, Math.min(100, Math.round(progress.fraction * 100)));
+  if (progress.current !== null && progress.total !== null && progress.total > 0) {
+    return Math.max(0, Math.min(100, Math.round((progress.current / progress.total) * 100)));
+  }
+  return null;
+}
+
+function engineStatusLabel(status: PdfEngineStatus | null, loading: boolean, preparing: boolean): string {
+  if (preparing || status?.status === "preparing") return "准备中";
+  if (loading) return "检查中";
+  if (status?.status === "missing") return "未准备";
+  if (status?.status === "ready") return "可用";
+  if (status?.status === "invalid") return "失败";
+  return "未准备";
+}
+
+function jobStatusLabel(status: PdfJobUiState["status"]): string {
+  switch (status) {
+    case "starting": return "正在启动 Worker";
+    case "running": return "翻译进行中";
+    case "cancelling": return "正在取消";
+    case "completed": return "翻译完成";
+    case "cancelled": return "已取消";
+    case "failed": return "翻译失败";
+    default: return "等待翻译";
+  }
+}
+
+interface PdfTaskPanelProps {
+  readerStatus: PdfReaderStatus;
+  engineStatus: PdfEngineStatus | null;
+  engineStatusLoading: boolean;
+  enginePreparing: boolean;
+  engineProgress: PdfEngineProgress | null;
+  engineError: string | null;
+  job: PdfJobUiState;
+  jobEventsReady: boolean;
+  jobEventsError: string | null;
+  translationEnabled: boolean;
+  onPrepareEngine: () => void;
+  onStartTranslation: () => void;
+  onCancelTranslation: () => void;
+}
+
+function PdfTaskPanel({
+  readerStatus,
+  engineStatus,
+  engineStatusLoading,
+  enginePreparing,
+  engineProgress,
+  engineError,
+  job,
+  jobEventsReady,
+  jobEventsError,
+  translationEnabled,
+  onPrepareEngine,
+  onStartTranslation,
+  onCancelTranslation,
+}: PdfTaskPanelProps) {
+  const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
+  const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
+  const engineProgressValue = progressPercent(engineProgress);
+  const jobProgressValue = progressPercent(job.progress);
+  const engineDetails = [
+    engineStatus?.engineVersion ? `Engine ${engineStatus.engineVersion}` : null,
+    engineStatus?.babeldocVersion ? `BabelDOC ${engineStatus.babeldocVersion}` : null,
+    engineStatus?.pythonVersion ? `Python ${engineStatus.pythonVersion}` : null,
+    engineStatus?.target ?? null,
+  ].filter((detail): detail is string => detail !== null);
+
+  return (
+    <div className="pdf-task-panel">
+      <div className="pdf-task-panel-section pdf-task-engine-section">
+        <div className="pdf-task-panel-heading">
+          <div>
+            <span className="pdf-task-panel-kicker">PDF ENGINE</span>
+            <strong>{engineStatusLabel(engineStatus, engineStatusLoading, enginePreparing)}</strong>
+          </div>
+          <button
+            className="secondary-button small-button"
+            type="button"
+            onClick={onPrepareEngine}
+            disabled={engineStatusLoading || enginePreparing || jobBusy}
+          >
+            {enginePreparing ? "准备中" : engineStatus?.status === "ready" ? "重新准备" : "准备 Engine"}
+          </button>
+        </div>
+        {engineDetails.length > 0 && <p className="pdf-task-panel-meta">{engineDetails.join(" · ")}</p>}
+        {(enginePreparing || engineProgress) && (
+          <div className="pdf-task-progress-block">
+            <div className="pdf-task-progress-label">
+              <span>{engineProgress?.message ?? (engineProgress ? formatPdfStage(engineProgress.stage) : "正在准备运行环境")}</span>
+              {engineProgressValue !== null && <span>{engineProgressValue}%</span>}
+            </div>
+            <div className="pdf-task-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={engineProgressValue ?? undefined}>
+              {engineProgressValue !== null && <span style={{ width: `${engineProgressValue}%` }} />}
+            </div>
+          </div>
+        )}
+        {engineError && <p className="pdf-task-error" role="alert">{engineError}</p>}
+      </div>
+
+      <div className="pdf-task-panel-section pdf-task-job-section">
+        <div className="pdf-task-panel-heading">
+          <div>
+            <span className="pdf-task-panel-kicker">PDF TRANSLATION</span>
+            <strong>{jobStatusLabel(job.status)}</strong>
+          </div>
+          <div className="pdf-task-panel-actions">
+            {jobBusy && job.status !== "cancelling" && (
+              <button className="secondary-button small-button" type="button" onClick={onCancelTranslation} disabled={!job.taskId}>
+                取消任务
+              </button>
+            )}
+            {job.status === "cancelling" && <span className="pdf-task-action-status">正在等待取消确认</span>}
+            {!jobBusy && (
+              <button className="primary-button small-button" type="button" onClick={onStartTranslation} disabled={!canStart}>
+                {job.status === "completed" ? "再次翻译" : "开始翻译"}
+              </button>
+            )}
+          </div>
+        </div>
+        {!jobEventsReady && <p className="pdf-task-error">{jobEventsError ?? "PDF 任务事件监听尚未就绪。"}</p>}
+        {job.stage && <p className="pdf-task-panel-stage">{formatPdfStage(job.stage)}</p>}
+        {job.progress && (
+          <div className="pdf-task-progress-block">
+            <div className="pdf-task-progress-label">
+              <span>{job.progress.message ?? formatPdfStage(job.progress.stage)}</span>
+              {jobProgressValue !== null && <span>{jobProgressValue}%</span>}
+            </div>
+            <div className="pdf-task-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={jobProgressValue ?? undefined}>
+              {jobProgressValue !== null && <span style={{ width: `${jobProgressValue}%` }} />}
+            </div>
+          </div>
+        )}
+        {job.message && <p className={job.status === "failed" ? "pdf-task-error" : "pdf-task-panel-message"} role={job.status === "failed" ? "alert" : undefined}>{job.message}</p>}
+        {job.code && <p className="pdf-task-panel-meta">错误代码：{job.code}</p>}
+        {job.status === "completed" && job.outputPdf && (
+          <div className="pdf-task-output">
+            <strong>输出已生成</strong>
+            <span>{job.outputPdf}</span>
+            <small>{[job.outputMode, job.pageCount === null ? null : `${job.pageCount} 页`].filter((item): item is string => item !== null).join(" · ")}</small>
+          </div>
+        )}
+        {job.warnings.length > 0 && (
+          <ul className="pdf-task-warnings">
+            {job.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
+        )}
+        {job.tokenUsage && (
+          <p className="pdf-task-panel-meta">
+            Token：{job.tokenUsage.totalTokens ?? "—"}
+          </p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function PdfPage({
@@ -208,7 +398,23 @@ function PdfPage({
   );
 }
 
-export default function PdfReader({ file, onReplace, onRemove }: PdfReaderProps) {
+export default function PdfReader({
+  file,
+  onReplace,
+  onRemove,
+  engineStatus,
+  engineStatusLoading,
+  enginePreparing,
+  engineProgress,
+  engineError,
+  job,
+  jobEventsReady,
+  jobEventsError,
+  translationEnabled,
+  onPrepareEngine,
+  onStartTranslation,
+  onCancelTranslation,
+}: PdfReaderProps) {
   const [status, setStatus] = useState<PdfReaderStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
@@ -401,6 +607,22 @@ export default function PdfReader({ file, onReplace, onRemove }: PdfReaderProps)
           <button className="pdf-toolbar-button danger-icon-button" type="button" onClick={onRemove} aria-label="移除 PDF" title="移除 PDF"><Trash2 size={15} /></button>
         </div>
       </div>
+
+      <PdfTaskPanel
+        readerStatus={status}
+        engineStatus={engineStatus}
+        engineStatusLoading={engineStatusLoading}
+        enginePreparing={enginePreparing}
+        engineProgress={engineProgress}
+        engineError={engineError}
+        job={job}
+        jobEventsReady={jobEventsReady}
+        jobEventsError={jobEventsError}
+        translationEnabled={translationEnabled}
+        onPrepareEngine={onPrepareEngine}
+        onStartTranslation={onStartTranslation}
+        onCancelTranslation={onCancelTranslation}
+      />
 
       {status === "loading" && (
         <div className="pdf-reader-state" role="status">

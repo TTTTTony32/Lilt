@@ -271,12 +271,410 @@ export interface WordExampleCommandResult {
   message: string | null;
 }
 
+export type PdfEngineStatusKind = "missing" | "preparing" | "ready" | "invalid";
+
+export interface PdfEngineStatus {
+  status: PdfEngineStatusKind;
+  engineVersion: string | null;
+  target: string | null;
+  pythonVersion: string | null;
+  babeldocVersion: string | null;
+  error: string | null;
+}
+
+export interface PdfEngineProgress {
+  operationId: string | null;
+  stage: string;
+  current: number | null;
+  total: number | null;
+  fraction: number | null;
+  message: string | null;
+}
+
+export type PdfEngineEvent =
+  | {
+    type: "status";
+    status: PdfEngineStatus;
+  }
+  | {
+    type: "prepareStarted";
+    operationId: string | null;
+  }
+  | {
+    type: "prepareProgress";
+    progress: PdfEngineProgress;
+  }
+  | {
+    type: "prepareCompleted";
+    operationId: string | null;
+    status: PdfEngineStatus | null;
+  }
+  | {
+    type: "prepareFailed";
+    operationId: string | null;
+    message: string;
+  };
+
+export interface PdfTranslationStarted {
+  taskId: string;
+}
+
+export interface PdfJobProgress {
+  stage: string;
+  current: number | null;
+  total: number | null;
+  fraction: number | null;
+  message: string | null;
+}
+
+export interface PdfJobTokenUsage {
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+}
+
+export type PdfJobStatus = "idle" | "starting" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+
+export interface PdfJobUiState {
+  taskId: string | null;
+  status: PdfJobStatus;
+  stage: string | null;
+  progress: PdfJobProgress | null;
+  workerVersion: string | null;
+  outputPdf: string | null;
+  outputMode: string | null;
+  pageCount: number | null;
+  warnings: string[];
+  tokenUsage: PdfJobTokenUsage | null;
+  code: string | null;
+  message: string | null;
+}
+
+export type PdfJobEvent =
+  | {
+    type: "started";
+    taskId: string;
+    workerVersion: string | null;
+  }
+  | {
+    type: "stage";
+    taskId: string;
+    stage: string;
+  }
+  | {
+    type: "progress";
+    taskId: string;
+    progress: PdfJobProgress;
+  }
+  | {
+    type: "tokenUsage";
+    taskId: string;
+    translationRequestId: string | null;
+    usage: PdfJobTokenUsage;
+  }
+  | {
+    type: "warning";
+    taskId: string;
+    code: string;
+    message: string;
+  }
+  | {
+    type: "finished";
+    taskId: string;
+    outputPdf: string;
+    outputMode: string | null;
+    pageCount: number | null;
+    warnings: string[];
+  }
+  | {
+    type: "cancelled";
+    taskId: string;
+    reason: string | null;
+  }
+  | {
+    type: "failed";
+    taskId: string;
+    code: string;
+    message: string;
+  };
+
+export const PDF_ENGINE_EVENT_NAMES = [
+  "pdf_engine_status_changed",
+  "pdf_engine_prepare_started",
+  "pdf_engine_prepare_progress",
+  "pdf_engine_prepare_completed",
+  "pdf_engine_prepare_failed",
+] as const;
+
+export const PDF_JOB_EVENT_NAMES = [
+  "pdf_translation_started",
+  "pdf_translation_stage",
+  "pdf_translation_progress",
+  "pdf_translation_token_usage",
+  "pdf_translation_warning",
+  "pdf_translation_finished",
+  "pdf_translation_cancelled",
+  "pdf_translation_failed",
+] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  const result = stringValue(value);
+  return result === null || result.trim().length === 0 ? null : result;
+}
+
+function readField(record: Record<string, unknown>, ...names: string[]): unknown {
+  for (const name of names) {
+    if (name in record) return record[name];
+  }
+  return undefined;
+}
+
+function optionalStringField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: string | null } {
+  const raw = readField(record, ...names);
+  if (raw === undefined || raw === null) return { valid: true, value: null };
+  const value = stringValue(raw);
+  return value === null ? { valid: false, value: null } : { valid: true, value };
+}
+
+function optionalNonNegativeIntegerField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: number | null } {
+  const raw = readField(record, ...names);
+  if (raw === undefined || raw === null) return { valid: true, value: null };
+  return typeof raw === "number" && Number.isInteger(raw) && Number.isFinite(raw) && raw >= 0
+    ? { valid: true, value: raw }
+    : { valid: false, value: null };
+}
+
+function optionalFractionField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: number | null } {
+  const raw = readField(record, ...names);
+  if (raw === undefined || raw === null) return { valid: true, value: null };
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 100) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: raw > 1 ? raw / 100 : raw };
+}
+
+function optionalOperationId(record: Record<string, unknown>): { valid: boolean; value: string | null } {
+  return optionalStringField(record, "operationId", "operation_id");
+}
+
+function decodePdfEngineStatusKind(value: unknown): PdfEngineStatusKind | null {
+  if (value === "missing" || value === "not_installed" || value === "unavailable") return "missing";
+  if (value === "preparing" || value === "installing" || value === "updating") return "preparing";
+  if (value === "ready" || value === "available") return "ready";
+  if (value === "invalid" || value === "failed" || value === "error") return "invalid";
+  return null;
+}
+
+function decodePdfEngineStatusPayload(value: unknown): PdfEngineStatus | null {
+  if (!isRecord(value)) return null;
+  const status = decodePdfEngineStatusKind(readField(value, "status", "state"));
+  if (status === null) return null;
+  const engineVersion = optionalStringField(value, "engineVersion", "engine_version");
+  const target = optionalStringField(value, "target", "architecture");
+  const pythonVersion = optionalStringField(value, "pythonVersion", "python_version");
+  const babeldocVersion = optionalStringField(value, "babeldocVersion", "babeldoc_version");
+  const error = optionalStringField(value, "error", "message");
+  if (!engineVersion.valid || !target.valid || !pythonVersion.valid || !babeldocVersion.valid || !error.valid) return null;
+  return {
+    status,
+    engineVersion: engineVersion.value,
+    target: target.value,
+    pythonVersion: pythonVersion.value,
+    babeldocVersion: babeldocVersion.value,
+    error: error.value,
+  };
+}
+
+export function decodePdfEngineStatus(value: unknown): PdfEngineStatus | null {
+  if (!isRecord(value)) return null;
+  const nested = readField(value, "status");
+  if (isRecord(nested)) return decodePdfEngineStatusPayload(nested);
+  return decodePdfEngineStatusPayload(value);
+}
+
+export function decodePdfEngineEvent(name: string, value: unknown): PdfEngineEvent | null {
+  if (!isRecord(value)) return null;
+
+  if (name === "pdf_engine_status_changed") {
+    const status = decodePdfEngineStatus(value);
+    return status === null ? null : { type: "status", status };
+  }
+
+  const operationId = optionalOperationId(value);
+  if (!operationId.valid) return null;
+
+  if (name === "pdf_engine_prepare_started") {
+    return { type: "prepareStarted", operationId: operationId.value };
+  }
+
+  if (name === "pdf_engine_prepare_progress") {
+    const stage = optionalStringField(value, "stage");
+    const current = optionalNonNegativeIntegerField(value, "current");
+    const total = optionalNonNegativeIntegerField(value, "total");
+    const fraction = optionalFractionField(value, "fraction", "progress");
+    const message = optionalStringField(value, "message");
+    if (!stage.valid || !current.valid || !total.valid || !fraction.valid || !message.valid) return null;
+    return {
+      type: "prepareProgress",
+      progress: {
+        operationId: operationId.value,
+        stage: stage.value ?? "preparing",
+        current: current.value,
+        total: total.value,
+        fraction: fraction.value,
+        message: message.value,
+      },
+    };
+  }
+
+  if (name === "pdf_engine_prepare_completed") {
+    const statusValue = readField(value, "status");
+    const status = statusValue === undefined || statusValue === null
+      ? null
+      : typeof statusValue === "string"
+        ? decodePdfEngineStatus({ status: statusValue })
+        : decodePdfEngineStatus(statusValue);
+    return statusValue !== undefined && statusValue !== null && status === null
+      ? null
+      : { type: "prepareCompleted", operationId: operationId.value, status };
+  }
+
+  if (name === "pdf_engine_prepare_failed") {
+    const message = nonEmptyString(readField(value, "message", "error"));
+    return message === null
+      ? null
+      : { type: "prepareFailed", operationId: operationId.value, message };
+  }
+
+  return null;
+}
+
+export function decodePdfTranslationStartResult(value: unknown): PdfTranslationStarted | null {
+  if (!isRecord(value)) return null;
+  const taskId = nonEmptyString(readField(value, "taskId", "task_id"));
+  return taskId === null ? null : { taskId };
+}
+
+export const decodePdfTranslationStartedResult = decodePdfTranslationStartResult;
+
+export function decodePdfTranslationCancelResult(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function decodePdfJobProgress(value: Record<string, unknown>): PdfJobProgress | null {
+  const stage = optionalStringField(value, "stage");
+  const current = optionalNonNegativeIntegerField(value, "current");
+  const total = optionalNonNegativeIntegerField(value, "total");
+  const fraction = optionalFractionField(value, "fraction", "progress");
+  const message = optionalStringField(value, "message");
+  return !stage.valid || !current.valid || !total.valid || !fraction.valid || !message.valid
+    ? null
+    : {
+      stage: stage.value ?? "engine",
+      current: current.value,
+      total: total.value,
+      fraction: fraction.value,
+      message: message.value,
+    };
+}
+
+function decodePdfJobTokenUsage(value: unknown): PdfJobTokenUsage | null {
+  if (!isRecord(value)) return null;
+  const promptTokens = optionalNonNegativeIntegerField(value, "promptTokens", "prompt_tokens");
+  const completionTokens = optionalNonNegativeIntegerField(value, "completionTokens", "completion_tokens");
+  const totalTokens = optionalNonNegativeIntegerField(value, "totalTokens", "total_tokens");
+  return !promptTokens.valid || !completionTokens.valid || !totalTokens.valid
+    ? null
+    : {
+      promptTokens: promptTokens.value,
+      completionTokens: completionTokens.value,
+      totalTokens: totalTokens.value,
+    };
+}
+
+function decodeStringArrayField(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : null;
+}
+
+export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | null {
+  if (!isRecord(value)) return null;
+  const taskId = nonEmptyString(readField(value, "taskId", "task_id"));
+  if (taskId === null) return null;
+
+  if (name === "pdf_translation_started") {
+    const workerVersion = optionalStringField(value, "workerVersion", "worker_version");
+    return workerVersion.valid
+      ? { type: "started", taskId, workerVersion: workerVersion.value }
+      : null;
+  }
+
+  if (name === "pdf_translation_stage") {
+    const stage = nonEmptyString(readField(value, "stage"));
+    if (stage !== null) return { type: "stage", taskId, stage };
+    const workerVersion = optionalStringField(value, "workerVersion", "worker_version");
+    return workerVersion.valid
+      ? { type: "started", taskId, workerVersion: workerVersion.value }
+      : null;
+  }
+
+  if (name === "pdf_translation_progress") {
+    const progress = decodePdfJobProgress(value);
+    return progress === null ? null : { type: "progress", taskId, progress };
+  }
+
+  if (name === "pdf_translation_token_usage") {
+    const translationRequestId = optionalStringField(value, "translationRequestId", "translation_request_id");
+    const usage = decodePdfJobTokenUsage(readField(value, "usage"));
+    return !translationRequestId.valid || usage === null
+      ? null
+      : { type: "tokenUsage", taskId, translationRequestId: translationRequestId.value, usage };
+  }
+
+  if (name === "pdf_translation_warning") {
+    const code = nonEmptyString(readField(value, "code"));
+    const message = nonEmptyString(readField(value, "message"));
+    return code === null || message === null ? null : { type: "warning", taskId, code, message };
+  }
+
+  if (name === "pdf_translation_finished") {
+    const outputPdf = nonEmptyString(readField(value, "outputPdf", "output_pdf"));
+    const outputMode = optionalStringField(value, "outputMode", "output_mode");
+    const pageCount = optionalNonNegativeIntegerField(value, "pageCount", "page_count");
+    const warnings = decodeStringArrayField(readField(value, "warnings"));
+    if (outputPdf === null || !outputMode.valid || !pageCount.valid || warnings === null) return null;
+    return {
+      type: "finished",
+      taskId,
+      outputPdf,
+      outputMode: outputMode.value,
+      pageCount: pageCount.value,
+      warnings,
+    };
+  }
+
+  if (name === "pdf_translation_cancelled") {
+    const reason = optionalStringField(value, "reason");
+    return reason.valid ? { type: "cancelled", taskId, reason: reason.value } : null;
+  }
+
+  if (name === "pdf_translation_failed") {
+    const code = nonEmptyString(readField(value, "code"));
+    const message = nonEmptyString(readField(value, "message"));
+    return code === null || message === null ? null : { type: "failed", taskId, code, message };
+  }
+
+  return null;
 }
 
 function selectionAnchor(value: unknown): SelectionAnchor | null | undefined {
