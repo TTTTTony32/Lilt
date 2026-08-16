@@ -763,14 +763,6 @@ export default function PdfView() {
           </div>
 
           <div className="simple-card pdf-stage-card">
-            <div className="card-heading">
-              <div>
-                <strong>PDF 阅读器</strong>
-                <span>选择文件后在当前窗口连续阅读。</span>
-              </div>
-              <span className="connection-status">第二阶段</span>
-            </div>
-            <p className="pdf-stage-description">阅读器只读取当前会话中选定的文件，不保存 PDF 内容，也不会创建翻译任务。</p>
             <PdfEnginePanel
               engineStatus={engineStatus}
               engineStatusLoading={engineStatusLoading}
