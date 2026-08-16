@@ -117,7 +117,9 @@ impl PdfEngineRuntime {
 }
 
 pub(crate) fn build_worker_command(data_dir: &Path) -> Result<Command, String> {
-    let worker_override = env::var_os("LILT_PDF_WORKER_SCRIPT");
+    let worker_override = cfg!(debug_assertions)
+        .then(|| env::var_os("LILT_PDF_WORKER_SCRIPT"))
+        .flatten();
     let worker_script = worker_override
         .clone()
         .map(PathBuf::from)
@@ -127,7 +129,9 @@ pub(crate) fn build_worker_command(data_dir: &Path) -> Result<Command, String> {
                 .join("worker.py")
         });
 
-    let python_override = env::var_os("LILT_PDF_PYTHON");
+    let python_override = cfg!(debug_assertions)
+        .then(|| env::var_os("LILT_PDF_PYTHON"))
+        .flatten();
     let command = if let Some(python) = python_override {
         ensure_worker_script(&worker_script)?;
         let mut command = Command::new(python);
@@ -141,7 +145,10 @@ pub(crate) fn build_worker_command(data_dir: &Path) -> Result<Command, String> {
         command.arg(worker_script);
         command
     } else {
-        let engine_root_override = env::var_os("LILT_PDF_ENGINE_ROOT").map(PathBuf::from);
+        let engine_root_override = cfg!(debug_assertions)
+            .then(|| env::var_os("LILT_PDF_ENGINE_ROOT"))
+            .flatten()
+            .map(PathBuf::from);
         let engine_root = engine_root_override.clone().unwrap_or_else(|| {
             data_dir
                 .join("engines")
@@ -185,7 +192,9 @@ fn configure_command(mut command: Command) -> Command {
     command
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8");
-    if let Some(python_path) = env::var_os("LILT_PDF_PYTHONPATH") {
+    if cfg!(debug_assertions)
+        && let Some(python_path) = env::var_os("LILT_PDF_PYTHONPATH")
+    {
         command.env("PYTHONPATH", python_path);
     }
     #[cfg(windows)]
@@ -392,6 +401,23 @@ mod tests {
         let error = resolve_runtime_file(&root, "../outside.py", "Worker")
             .expect_err("path traversal should fail");
         assert!(error.contains("不能跳出"));
+    }
+
+    #[test]
+    fn rejects_a_resource_with_the_wrong_digest() {
+        let temp = TempDir::new();
+        let root = temp.path().join("engine");
+        fs::create_dir_all(&root).expect("create engine");
+        write_runtime(
+            &root,
+            &current_target(),
+            "python/python.exe",
+            "pdf-worker/worker.py",
+        );
+        fs::write(root.join("resources/layout.onnx"), b"changed").expect("change resource");
+
+        let error = PdfEngineRuntime::load_from_root(root).expect_err("digest should fail");
+        assert!(error.contains("资源校验失败"));
     }
 
     #[test]

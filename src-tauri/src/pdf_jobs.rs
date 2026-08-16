@@ -781,6 +781,7 @@ mod tests {
     use super::{
         build_translation_response, commit_pdf_persistence, normalize_pdf_options,
         request_source_text, translate_pdf_request_inner, translate_pdf_request_with_api_key,
+        validate_input_pdf, validate_output_pdf,
     };
     use crate::AppState;
     use crate::StartupRuntime;
@@ -855,6 +856,24 @@ mod tests {
             .expect("options should be an object");
         assert_eq!(options["source_language"], "en");
         assert_eq!(options["target_language"], "ja");
+    }
+
+    #[test]
+    fn input_and_output_pdf_paths_are_confined_to_expected_files() {
+        let temp = TestTempDir::new();
+        let input = temp.path().join("input.PDF");
+        std::fs::write(&input, b"%PDF-1.7").unwrap();
+        assert!(validate_input_pdf(input.to_str().unwrap()).is_ok());
+        assert!(validate_input_pdf("missing.txt").is_err());
+
+        let output_dir = temp.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("translated.pdf");
+        std::fs::write(&output, b"%PDF-1.7").unwrap();
+        assert!(validate_output_pdf(output.to_str().unwrap(), temp.path()).is_ok());
+        let outside = temp.path().join("outside.pdf");
+        std::fs::write(&outside, b"%PDF-1.7").unwrap();
+        assert!(validate_output_pdf(outside.to_str().unwrap(), &output_dir).is_err());
     }
 
     #[tokio::test]
