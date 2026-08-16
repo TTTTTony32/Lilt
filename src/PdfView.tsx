@@ -5,6 +5,7 @@ import { FileType2, Upload } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { type PdfFile, validatePdfPath } from "./lib/pdf";
 import { invokeCommand, listenTo } from "./lib/tauri";
+import { PdfEnginePanel } from "./PdfEnginePanel";
 import {
   PDF_ENGINE_EVENT_NAMES,
   PDF_JOB_EVENT_NAMES,
@@ -58,6 +59,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 export default function PdfView() {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
+  const [readerReloadToken, setReaderReloadToken] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -689,6 +691,26 @@ export default function PdfView() {
     setError(null);
   }, [abandonPdfTask]);
 
+  const openOutputDirectory = useCallback(async (path: string) => {
+    try {
+      await invokeCommand("reveal_pdf_file", { filePath: path });
+      setError(null);
+    } catch (reason) {
+      setError(describeError(reason, "打开 PDF 文件目录失败"));
+    }
+  }, []);
+
+  const openOutputInReader = useCallback((path: string) => {
+    const file = validatePdfPath(path);
+    if (!file) {
+      setError("翻译输出文件不存在，无法在软件内打开。请检查输出目录。");
+      return;
+    }
+    setError(null);
+    setSelectedFile(file);
+    setReaderReloadToken((current) => current + 1);
+  }, []);
+
   return (
     <section className={`page-section pdf-page ${selectedFile ? "pdf-reader-page" : ""}`}>
       {!selectedFile && (
@@ -706,21 +728,18 @@ export default function PdfView() {
           {dragging && <div className="pdf-reader-drop-notice"><Upload size={14} />松开以替换当前 PDF</div>}
           <Suspense fallback={<div className="pdf-reader-shell"><div className="pdf-reader-state"><span>正在加载 PDF 阅读器</span></div></div>}>
             <PdfReader
+              key={`${selectedFile.path}-${readerReloadToken}`}
               file={selectedFile}
               onReplace={() => void chooseFile()}
               onRemove={removeFile}
-              engineStatus={engineStatus}
-              engineStatusLoading={engineStatusLoading}
-              enginePreparing={enginePreparing}
-              engineProgress={engineProgress}
-              engineError={engineError ?? engineEventsError}
               job={pdfJob}
               jobEventsReady={jobEventsReady}
               jobEventsError={jobEventsError}
               translationEnabled={engineStatus?.status === "ready" && jobEventsReady}
-              onPrepareEngine={() => void preparePdfEngine()}
               onStartTranslation={() => void startPdfTranslation()}
               onCancelTranslation={() => void cancelPdfTranslation()}
+              onOpenOutputDirectory={(path) => void openOutputDirectory(path)}
+              onOpenOutputInReader={openOutputInReader}
             />
           </Suspense>
           {error && <p className="error-message pdf-reader-external-error" role="alert">{error}</p>}
@@ -752,6 +771,14 @@ export default function PdfView() {
               <span className="connection-status">第二阶段</span>
             </div>
             <p className="pdf-stage-description">阅读器只读取当前会话中选定的文件，不保存 PDF 内容，也不会创建翻译任务。</p>
+            <PdfEnginePanel
+              engineStatus={engineStatus}
+              engineStatusLoading={engineStatusLoading}
+              enginePreparing={enginePreparing}
+              engineProgress={engineProgress}
+              engineError={engineError ?? engineEventsError}
+              onPrepareEngine={() => void preparePdfEngine()}
+            />
           </div>
         </>
       )}

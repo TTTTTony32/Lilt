@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, process::Command};
 use tauri::ipc::Response;
 
 const EMPTY_PATH_ERROR: &str = "PDF 文件路径不能为空";
@@ -39,6 +39,43 @@ fn read_pdf_file(file_path: &str) -> Result<Vec<u8>, String> {
 pub fn read_pdf_bytes(file_path: String) -> Result<Response, String> {
     let bytes = read_pdf_file(&file_path)?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn reveal_pdf_file(file_path: String) -> Result<(), String> {
+    let path = validate_pdf_path(&file_path)?;
+
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|error| format!("打开 PDF 文件目录失败：{error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("打开 PDF 文件目录失败：{error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let directory = path.parent().unwrap_or(path);
+        Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| format!("打开 PDF 文件目录失败：{error}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("当前平台不支持打开 PDF 文件目录".to_string())
 }
 
 #[cfg(test)]

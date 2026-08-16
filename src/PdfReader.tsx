@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  BookOpen,
   ChevronLeft,
   ChevronRight,
   FileType2,
+  FolderOpen,
   Maximize2,
   RotateCcw,
   Trash2,
@@ -31,7 +33,7 @@ import {
   type RenderTask,
 } from "./lib/pdf-reader";
 import { invokeCommand } from "./lib/tauri";
-import type { PdfEngineProgress, PdfEngineStatus, PdfJobUiState } from "./types/contracts";
+import type { PdfJobUiState } from "./types/contracts";
 
 type PdfReaderStatus = "loading" | "ready" | "error";
 type PdfZoomMode = "fit-width" | "manual";
@@ -41,18 +43,14 @@ interface PdfReaderProps {
   file: PdfFile;
   onReplace: () => void;
   onRemove: () => void;
-  engineStatus: PdfEngineStatus | null;
-  engineStatusLoading: boolean;
-  enginePreparing: boolean;
-  engineProgress: PdfEngineProgress | null;
-  engineError: string | null;
   job: PdfJobUiState;
   jobEventsReady: boolean;
   jobEventsError: string | null;
   translationEnabled: boolean;
-  onPrepareEngine: () => void;
   onStartTranslation: () => void;
   onCancelTranslation: () => void;
+  onOpenOutputDirectory: (path: string) => void;
+  onOpenOutputInReader: (path: string) => void;
 }
 
 interface PdfPageProps {
@@ -95,28 +93,6 @@ function progressPercent(progress: { fraction: number | null; current: number | 
   return null;
 }
 
-function formatBytes(value: number | null): string | null {
-  if (value === null || !Number.isFinite(value) || value < 0) return null;
-  if (value < 1024) return `${value} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let size = value;
-  let unit = -1;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
-}
-
-function engineStatusLabel(status: PdfEngineStatus | null, loading: boolean, preparing: boolean): string {
-  if (preparing || status?.status === "preparing" || status?.updating) return status?.updating ? "更新中" : "准备中";
-  if (loading) return "检查中";
-  if (status?.status === "missing") return "未准备";
-  if (status?.status === "ready") return "可用";
-  if (status?.status === "invalid") return "失败";
-  return "未准备";
-}
-
 function jobStatusLabel(status: PdfJobUiState["status"]): string {
   switch (status) {
     case "starting": return "正在启动 Worker";
@@ -131,80 +107,33 @@ function jobStatusLabel(status: PdfJobUiState["status"]): string {
 
 interface PdfTaskPanelProps {
   readerStatus: PdfReaderStatus;
-  engineStatus: PdfEngineStatus | null;
-  engineStatusLoading: boolean;
-  enginePreparing: boolean;
-  engineProgress: PdfEngineProgress | null;
-  engineError: string | null;
   job: PdfJobUiState;
   jobEventsReady: boolean;
   jobEventsError: string | null;
   translationEnabled: boolean;
-  onPrepareEngine: () => void;
   onStartTranslation: () => void;
   onCancelTranslation: () => void;
+  onOpenOutputDirectory: (path: string) => void;
+  onOpenOutputInReader: (path: string) => void;
 }
 
 function PdfTaskPanel({
   readerStatus,
-  engineStatus,
-  engineStatusLoading,
-  enginePreparing,
-  engineProgress,
-  engineError,
   job,
   jobEventsReady,
   jobEventsError,
   translationEnabled,
-  onPrepareEngine,
   onStartTranslation,
   onCancelTranslation,
+  onOpenOutputDirectory,
+  onOpenOutputInReader,
 }: PdfTaskPanelProps) {
   const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
   const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
-  const engineProgressValue = progressPercent(engineProgress);
   const jobProgressValue = progressPercent(job.progress);
-  const engineDetails = [
-    engineStatus?.engineVersion ? `Engine ${engineStatus.engineVersion}` : null,
-    engineStatus?.babeldocVersion ? `BabelDOC ${engineStatus.babeldocVersion}` : null,
-    engineStatus?.pythonVersion ? `Python ${engineStatus.pythonVersion}` : null,
-    engineStatus?.distributionVersion ? `资源 ${engineStatus.distributionVersion}` : null,
-    formatBytes(engineStatus?.resourceSizeBytes ?? null),
-    engineStatus?.target ?? null,
-  ].filter((detail): detail is string => detail !== null);
 
   return (
     <div className="pdf-task-panel">
-      <div className="pdf-task-panel-section pdf-task-engine-section">
-        <div className="pdf-task-panel-heading">
-          <div>
-            <span className="pdf-task-panel-kicker">PDF ENGINE</span>
-            <strong>{engineStatusLabel(engineStatus, engineStatusLoading, enginePreparing)}</strong>
-          </div>
-          <button
-            className="secondary-button small-button"
-            type="button"
-            onClick={onPrepareEngine}
-            disabled={engineStatusLoading || enginePreparing || jobBusy}
-          >
-            {enginePreparing ? "准备中" : engineStatus?.status === "ready" ? "重新准备" : "准备 Engine"}
-          </button>
-        </div>
-        {engineDetails.length > 0 && <p className="pdf-task-panel-meta">{engineDetails.join(" · ")}</p>}
-        {(enginePreparing || engineProgress) && (
-          <div className="pdf-task-progress-block">
-            <div className="pdf-task-progress-label">
-              <span>{engineProgress?.message ?? (engineProgress ? formatPdfStage(engineProgress.stage) : "正在准备运行环境")}</span>
-              {engineProgressValue !== null && <span>{engineProgressValue}%</span>}
-            </div>
-            <div className="pdf-task-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={engineProgressValue ?? undefined}>
-              {engineProgressValue !== null && <span style={{ width: `${engineProgressValue}%` }} />}
-            </div>
-          </div>
-        )}
-        {engineError && <p className="pdf-task-error" role="alert">{engineError}</p>}
-      </div>
-
       <div className="pdf-task-panel-section pdf-task-job-section">
         <div className="pdf-task-panel-heading">
           <div>
@@ -245,6 +174,16 @@ function PdfTaskPanel({
             <strong>输出已生成</strong>
             <span>{job.outputPdf}</span>
             <small>{[job.outputMode, job.pageCount === null ? null : `${job.pageCount} 页`].filter((item): item is string => item !== null).join(" · ")}</small>
+            <div className="pdf-task-output-actions">
+              <button className="secondary-button small-button" type="button" onClick={() => onOpenOutputDirectory(job.outputPdf!)}>
+                <FolderOpen size={14} />
+                打开文件目录
+              </button>
+              <button className="primary-button small-button" type="button" onClick={() => onOpenOutputInReader(job.outputPdf!)}>
+                <BookOpen size={14} />
+                软件内 PDF 阅读器打开
+              </button>
+            </div>
           </div>
         )}
         {job.warnings.length > 0 && (
@@ -417,18 +356,14 @@ export default function PdfReader({
   file,
   onReplace,
   onRemove,
-  engineStatus,
-  engineStatusLoading,
-  enginePreparing,
-  engineProgress,
-  engineError,
   job,
   jobEventsReady,
   jobEventsError,
   translationEnabled,
-  onPrepareEngine,
   onStartTranslation,
   onCancelTranslation,
+  onOpenOutputDirectory,
+  onOpenOutputInReader,
 }: PdfReaderProps) {
   const [status, setStatus] = useState<PdfReaderStatus>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -625,18 +560,14 @@ export default function PdfReader({
 
       <PdfTaskPanel
         readerStatus={status}
-        engineStatus={engineStatus}
-        engineStatusLoading={engineStatusLoading}
-        enginePreparing={enginePreparing}
-        engineProgress={engineProgress}
-        engineError={engineError}
         job={job}
         jobEventsReady={jobEventsReady}
         jobEventsError={jobEventsError}
         translationEnabled={translationEnabled}
-        onPrepareEngine={onPrepareEngine}
         onStartTranslation={onStartTranslation}
         onCancelTranslation={onCancelTranslation}
+        onOpenOutputDirectory={onOpenOutputDirectory}
+        onOpenOutputInReader={onOpenOutputInReader}
       />
 
       {status === "loading" && (

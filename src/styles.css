@@ -218,6 +218,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-message-area p { margin: 0; line-height: 1.6; }
 .pdf-stage-card { margin-bottom: 0; }
 .pdf-stage-description { margin: 0; color: #7e877d; font-size: 12px; line-height: 1.7; }
+.pdf-engine-panel { margin-top: 14px; padding-top: 13px; border-top: 1px solid #eeece6; }
 .pdf-reader-page { max-width: 1180px; height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .pdf-reader-page .pdf-reader-shell { flex: 1 1 auto; min-height: 0; }
 .pdf-reader-drop-notice { min-height: 30px; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9db49e; border-radius: 7px; color: #5e7863; background: #edf4eb; font-size: 11px; }
@@ -245,6 +246,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-task-output { margin-top: 9px; padding: 8px 10px; display: grid; gap: 3px; border: 1px solid #d9e3d6; border-radius: 6px; color: #627365; background: #eef4eb; font-size: 11px; }
 .pdf-task-output span { overflow-wrap: anywhere; color: #708076; font-size: 10px; }
 .pdf-task-output small { color: #93a094; font-size: 10px; }
+.pdf-task-output-actions { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 7px; }
+.pdf-task-output-actions button { gap: 6px; }
 .pdf-task-warnings { margin: 8px 0 0; padding-left: 17px; color: #937e5e; font-size: 10px; line-height: 1.55; }
 .pdf-task-warnings li + li { margin-top: 3px; }
 .pdf-reader-file { min-width: 0; flex: 1 1 180px; display: flex; align-items: center; gap: 8px; color: #536456; font-size: 12px; font-weight: 600; }
