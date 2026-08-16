@@ -46,7 +46,17 @@ impl TranslationCore {
     where
         F: FnMut(String) -> Result<(), ProviderError>,
     {
-        provider::stream_chat_completion(
+        Ok(Self::stream_with_usage(request, on_delta).await?.content)
+    }
+
+    pub async fn stream_with_usage<F>(
+        request: StreamRequest<'_>,
+        on_delta: F,
+    ) -> Result<provider::ProviderStreamResult, ProviderError>
+    where
+        F: FnMut(String) -> Result<(), ProviderError>,
+    {
+        provider::stream_chat_completion_with_usage(
             provider::ChatStreamRequest {
                 request_id: request.request_id,
                 base_url: request.base_url,

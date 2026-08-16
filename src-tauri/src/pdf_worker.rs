@@ -49,6 +49,14 @@ pub struct WorkerSession {
     child: Arc<Mutex<Child>>,
 }
 
+impl Drop for WorkerSession {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
+}
+
 impl WorkerSession {
     pub fn spawn(mut command: Command, task_id: String) -> Result<Self, WorkerSessionError> {
         let mut child = command

@@ -55,6 +55,12 @@ pub struct ChatStreamRequest<'a> {
     pub thinking_effort: &'a ThinkingEffort,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderStreamResult {
+    pub content: String,
+    pub token_usage: Option<crate::pdf_protocol::TokenUsage>,
+}
+
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>, ProviderError> {
     let endpoint = endpoint(base_url, "models")?;
     let started_at = Instant::now();
@@ -112,10 +118,10 @@ fn parse_model_payload(payload: &Value) -> Result<Vec<ModelInfo>, ProviderError>
     Ok(models)
 }
 
-pub async fn stream_chat_completion<F>(
+pub async fn stream_chat_completion_with_usage<F>(
     request: ChatStreamRequest<'_>,
     mut on_delta: F,
-) -> Result<String, ProviderError>
+) -> Result<ProviderStreamResult, ProviderError>
 where
     F: FnMut(String) -> Result<(), ProviderError>,
 {
@@ -132,15 +138,15 @@ where
             request.model_id
         ));
         match stream_once(&request, &endpoint, &mut started, &mut on_delta).await {
-            Ok(content) => {
+            Ok(result) => {
                 diagnostics::info(format!(
                     "provider.{}.completed request_id={} attempt={} output_chars={}",
                     request.operation,
                     request.request_id,
                     attempt,
-                    content.chars().count()
+                    result.content.chars().count()
                 ));
-                return Ok(content);
+                return Ok(result);
             }
             Err(error) if !started && attempt == 0 && error.retryable() => {
                 diagnostics::warn(format!(
@@ -165,7 +171,7 @@ async fn stream_once(
     endpoint: &str,
     started: &mut bool,
     on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderStreamResult, ProviderError> {
     if request.cancel.is_cancelled() {
         return Err(ProviderError::Cancelled);
     }
@@ -190,6 +196,7 @@ async fn stream_once(
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut translated = String::new();
+    let mut token_usage = None;
     loop {
         let chunk = tokio::select! {
             _ = request.cancel.cancelled() => return Err(ProviderError::Cancelled),
@@ -203,7 +210,11 @@ async fn stream_once(
         while let Some(position) = buffer.find('\n') {
             let line = buffer[..position].trim_end_matches('\r').to_string();
             buffer.drain(..=position);
-            if let Some(content) = parse_sse_line(&line)? {
+            let parsed = parse_sse_details(&line)?;
+            if let Some(usage) = parsed.token_usage {
+                token_usage = Some(usage);
+            }
+            if let Some(content) = parsed.content {
                 if content.is_empty() {
                     continue;
                 }
@@ -214,7 +225,11 @@ async fn stream_once(
         }
     }
     if !buffer.trim().is_empty() {
-        if let Some(content) = parse_sse_line(buffer.trim())? {
+        let parsed = parse_sse_details(buffer.trim())?;
+        if let Some(usage) = parsed.token_usage {
+            token_usage = Some(usage);
+        }
+        if let Some(content) = parsed.content {
             if !content.is_empty() {
                 *started = true;
                 translated.push_str(&content);
@@ -225,13 +240,17 @@ async fn stream_once(
     if translated.is_empty() {
         return Err(ProviderError::Protocol("流式响应没有返回译文".to_string()));
     }
-    Ok(translated)
+    Ok(ProviderStreamResult {
+        content: translated,
+        token_usage,
+    })
 }
 
 fn chat_completion_payload(request: &ChatStreamRequest<'_>) -> Value {
     json!({
         "model": request.model_id,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "reasoning_effort": request.thinking_effort.as_str(),
         "messages": [
             { "role": "system", "content": request.system_prompt },
@@ -240,16 +259,33 @@ fn chat_completion_payload(request: &ChatStreamRequest<'_>) -> Value {
     })
 }
 
+#[cfg(test)]
 fn parse_sse_line(line: &str) -> Result<Option<String>, ProviderError> {
+    Ok(parse_sse_details(line)?.content)
+}
+
+struct ParsedSseLine {
+    content: Option<String>,
+    token_usage: Option<crate::pdf_protocol::TokenUsage>,
+}
+
+fn parse_sse_details(line: &str) -> Result<ParsedSseLine, ProviderError> {
     let Some(payload) = line.strip_prefix("data:") else {
-        return Ok(None);
+        return Ok(ParsedSseLine {
+            content: None,
+            token_usage: None,
+        });
     };
     let payload = payload.trim();
     if payload.is_empty() || payload == "[DONE]" {
-        return Ok(None);
+        return Ok(ParsedSseLine {
+            content: None,
+            token_usage: None,
+        });
     }
     let value: Value = serde_json::from_str(payload)
         .map_err(|error| ProviderError::Protocol(format!("JSON 解析失败：{error}")))?;
+    let token_usage = value.get("usage").and_then(parse_token_usage);
     let content = value
         .get("choices")
         .and_then(Value::as_array)
@@ -257,17 +293,33 @@ fn parse_sse_line(line: &str) -> Result<Option<String>, ProviderError> {
         .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")))
         .and_then(|delta| delta.get("content"));
     match content {
-        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::String(text)) => Ok(ParsedSseLine {
+            content: Some(text.clone()),
+            token_usage,
+        }),
         Some(Value::Array(parts)) => {
             let text = parts
                 .iter()
                 .filter_map(|part| part.get("text").and_then(Value::as_str))
                 .collect::<String>();
-            Ok(Some(text))
+            Ok(ParsedSseLine {
+                content: Some(text),
+                token_usage,
+            })
         }
-        Some(_) => Ok(None),
-        None => Ok(None),
+        Some(_) | None => Ok(ParsedSseLine {
+            content: None,
+            token_usage,
+        }),
     }
+}
+
+fn parse_token_usage(value: &Value) -> Option<crate::pdf_protocol::TokenUsage> {
+    Some(crate::pdf_protocol::TokenUsage {
+        prompt_tokens: value.get("prompt_tokens").and_then(Value::as_u64),
+        completion_tokens: value.get("completion_tokens").and_then(Value::as_u64),
+        total_tokens: value.get("total_tokens").and_then(Value::as_u64),
+    })
 }
 
 fn client() -> Client {
@@ -341,7 +393,10 @@ fn ensure_success(response: &reqwest::Response) -> Result<(), ProviderError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderError, normalize_base_url, parse_model_payload, parse_sse_line};
+    use super::{
+        ChatStreamRequest, ProviderError, normalize_base_url, parse_model_payload,
+        parse_sse_details, parse_sse_line, stream_chat_completion_with_usage,
+    };
     use crate::contracts::ThinkingEffort;
     use serde_json::json;
     use std::io::{Read, Write};
@@ -425,6 +480,69 @@ mod tests {
         assert_eq!(models[0].id, "mock-model");
     }
 
+    #[tokio::test]
+    async fn streams_translation_from_an_openai_compatible_stub() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8192];
+            let bytes_read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]).to_lowercase();
+            assert!(request.starts_with("post /v1/chat/completions"));
+            assert!(request.contains("authorization: bearer test-key"));
+            assert!(request.contains("\"model\":\"stub-model\""));
+            assert!(request.contains("\"reasoning_effort\":\"none\""));
+
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"本地\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\" Provider\"}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut deltas = Vec::new();
+        let result = stream_chat_completion_with_usage(
+            ChatStreamRequest {
+                request_id: "request-1",
+                base_url: &format!("http://{address}/v1"),
+                api_key: "test-key",
+                model_id: "stub-model",
+                system_prompt: "system",
+                user_text: "hello",
+                cancel: &cancellation,
+                operation: "pdf_segment",
+                thinking_effort: &ThinkingEffort::None,
+            },
+            |delta| {
+                deltas.push(delta);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(result.content, "本地 Provider");
+        assert_eq!(
+            result.token_usage,
+            Some(crate::pdf_protocol::TokenUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(4),
+                total_tokens: Some(14),
+            })
+        );
+        assert_eq!(deltas, vec!["本地", " Provider"]);
+    }
+
     #[test]
     fn parses_openai_stream_delta() {
         assert_eq!(
@@ -436,6 +554,31 @@ mod tests {
     #[test]
     fn parses_done_marker_as_no_content() {
         assert_eq!(parse_sse_line("data: [DONE]").unwrap(), None);
+    }
+
+    #[test]
+    fn parses_usage_frame_without_content() {
+        let frame = parse_sse_details(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}"#,
+        )
+        .unwrap();
+        assert!(frame.content.is_none());
+        assert_eq!(
+            frame.token_usage,
+            Some(crate::pdf_protocol::TokenUsage {
+                prompt_tokens: Some(8),
+                completion_tokens: Some(3),
+                total_tokens: Some(11),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_sse_json() {
+        assert!(matches!(
+            parse_sse_details("data: {invalid-json}"),
+            Err(ProviderError::Protocol(_))
+        ));
     }
 
     #[test]

@@ -905,6 +905,18 @@ pub fn find_cache(
 }
 
 pub fn save_cache(connection: &Connection, record: &CacheRecord<'_>) -> Result<(), String> {
+    save_cache_record(connection, record, true)
+}
+
+pub fn save_pdf_cache(connection: &Connection, record: &CacheRecord<'_>) -> Result<(), String> {
+    save_cache_record(connection, record, false)
+}
+
+fn save_cache_record(
+    connection: &Connection,
+    record: &CacheRecord<'_>,
+    index_examples: bool,
+) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let byte_size = (record.source_text.len() + record.translated_text.len()) as i64;
     connection
@@ -931,7 +943,10 @@ pub fn save_cache(connection: &Connection, record: &CacheRecord<'_>) -> Result<(
             ],
         )
         .map_err(|error| format!("写入翻译缓存失败：{error}"))?;
-    mark_example_index_pending(connection, record.cache_key)
+    if index_examples {
+        mark_example_index_pending(connection, record.cache_key)?;
+    }
+    Ok(())
 }
 
 pub fn get_cache_stats(connection: &Connection, max_bytes: i64) -> Result<CacheStats, String> {
@@ -1730,6 +1745,32 @@ mod tests {
 
         prune_cache(&connection, 1).expect("cache pruning should succeed");
         assert_eq!(get_cache_stats(&connection, 1).unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn pdf_batch_cache_does_not_enter_example_index_queue() {
+        let connection = test_connection();
+        let provider = test_provider();
+        let record = CacheRecord {
+            cache_key: "pdf-batch-cache",
+            source_text: r#"[{"id":"p1-s1","input":"A sentence."}]"#,
+            translated_text: r#"[{"id":"p1-s1","output":"一句话。"}]"#,
+            source_language: "en",
+            target_language: "zh-CN",
+            provider: &provider,
+            prompt_id: DEFAULT_PROMPT_ID,
+            glossary_version: 1,
+        };
+
+        save_pdf_cache(&connection, &record).expect("PDF cache write should succeed");
+        let pending_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM translation_cache_example_index_state",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 0);
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod examples;
 mod glossary;
 mod icons;
 mod pdf;
+mod pdf_engine;
 mod pdf_jobs;
 pub mod pdf_protocol;
 pub mod pdf_worker;
@@ -1337,7 +1338,7 @@ fn schedule_pending_example_indexes(state: AppState) {
     });
 }
 
-fn schedule_example_index(state: &AppState, cache_key: &str) {
+pub(crate) fn schedule_example_index(state: &AppState, cache_key: &str) {
     let state = state.clone();
     let cache_key = cache_key.to_string();
     tauri::async_runtime::spawn(async move {
