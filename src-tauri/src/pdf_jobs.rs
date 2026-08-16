@@ -74,6 +74,16 @@ pub async fn start_pdf_translation(
     file_path: String,
     pdf_options: Value,
 ) -> Result<PdfTranslationStarted, String> {
+    let _engine_transition = state
+        .pdf_engine_transition
+        .lock()
+        .map_err(|_| "PDF Engine 切换状态锁已损坏".to_string())?;
+    if state
+        .pdf_engine_preparing
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err("PDF Engine 正在准备或更新，请稍候".to_string());
+    }
     let source = validate_input_pdf(&file_path)?;
     let options = normalize_pdf_options(pdf_options)?;
     let command = crate::pdf_engine::build_worker_command(&state.data_dir)?;
@@ -234,6 +244,7 @@ fn run_job_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_worker_message(
     app: &AppHandle,
     state: &AppState,

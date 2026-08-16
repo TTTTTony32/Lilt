@@ -279,6 +279,9 @@ export interface PdfEngineStatus {
   target: string | null;
   pythonVersion: string | null;
   babeldocVersion: string | null;
+  distributionVersion: string | null;
+  resourceSizeBytes: number | null;
+  updating: boolean;
   error: string | null;
 }
 
@@ -313,6 +316,7 @@ export type PdfEngineEvent =
     type: "prepareFailed";
     operationId: string | null;
     message: string;
+    status: PdfEngineStatus | null;
   };
 
 export interface PdfTranslationStarted {
@@ -452,6 +456,12 @@ function optionalNonNegativeIntegerField(record: Record<string, unknown>, ...nam
     : { valid: false, value: null };
 }
 
+function optionalBooleanField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: boolean } {
+  const raw = readField(record, ...names);
+  if (raw === undefined || raw === null) return { valid: true, value: false };
+  return typeof raw === "boolean" ? { valid: true, value: raw } : { valid: false, value: false };
+}
+
 function optionalFractionField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: number | null } {
   const raw = readField(record, ...names);
   if (raw === undefined || raw === null) return { valid: true, value: null };
@@ -481,14 +491,21 @@ function decodePdfEngineStatusPayload(value: unknown): PdfEngineStatus | null {
   const target = optionalStringField(value, "target", "architecture");
   const pythonVersion = optionalStringField(value, "pythonVersion", "python_version");
   const babeldocVersion = optionalStringField(value, "babeldocVersion", "babeldoc_version");
+  const distributionVersion = optionalStringField(value, "distributionVersion", "distribution_version");
+  const resourceSizeBytes = optionalNonNegativeIntegerField(value, "resourceSizeBytes", "resource_size_bytes", "resourceSize");
+  const updating = optionalBooleanField(value, "updating");
   const error = optionalStringField(value, "error", "message");
-  if (!engineVersion.valid || !target.valid || !pythonVersion.valid || !babeldocVersion.valid || !error.valid) return null;
+  if (!engineVersion.valid || !target.valid || !pythonVersion.valid || !babeldocVersion.valid
+    || !distributionVersion.valid || !resourceSizeBytes.valid || !updating.valid || !error.valid) return null;
   return {
     status,
     engineVersion: engineVersion.value,
     target: target.value,
     pythonVersion: pythonVersion.value,
     babeldocVersion: babeldocVersion.value,
+    distributionVersion: distributionVersion.value,
+    resourceSizeBytes: resourceSizeBytes.value,
+    updating: updating.value,
     error: error.value,
   };
 }
@@ -549,9 +566,17 @@ export function decodePdfEngineEvent(name: string, value: unknown): PdfEngineEve
 
   if (name === "pdf_engine_prepare_failed") {
     const message = nonEmptyString(readField(value, "message", "error"));
+    const statusValue = readField(value, "status");
+    const status = statusValue === undefined || statusValue === null
+      ? null
+      : typeof statusValue === "string"
+        ? decodePdfEngineStatus({ status: statusValue })
+        : decodePdfEngineStatus(statusValue);
     return message === null
       ? null
-      : { type: "prepareFailed", operationId: operationId.value, message };
+      : statusValue !== undefined && statusValue !== null && status === null
+        ? null
+        : { type: "prepareFailed", operationId: operationId.value, message, status };
   }
 
   return null;

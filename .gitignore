@@ -31,5 +31,10 @@ desktop.ini
 # 本地参考项目
 /reference-projects/
 
+# PDF Engine 构建缓存、暂存目录和 Release 工件
+/pdf-engine/build/
+/pdf-engine/dist/
+/pdf-engine/.cache/
+
 # 不随源码发布的早期设计文档
 /Lilt：产品与技术方案.md

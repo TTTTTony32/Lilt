@@ -76,6 +76,7 @@ export default function PdfView() {
   const prepareAttemptRef = useRef(0);
   const prepareOperationRef = useRef<string | null>(null);
   const prepareTimeoutRef = useRef<number | null>(null);
+  const preparePreviousStatusRef = useRef<PdfEngineStatus | null>(null);
   const preparingRef = useRef(false);
   const startAttemptRef = useRef<number | null>(null);
   const startAttemptSequenceRef = useRef(0);
@@ -161,7 +162,7 @@ export default function PdfView() {
       if (!next) throw new Error("PDF Engine 状态返回了无法识别的结果。");
       if (disposedRef.current || requestId !== engineStatusRequestRef.current) return;
       setEngineStatus(next);
-      setEngineError(next.status === "invalid" ? next.error : null);
+      setEngineError(next.error);
       if (next.status === "preparing") {
         preparingRef.current = true;
         setEnginePreparing(true);
@@ -180,6 +181,9 @@ export default function PdfView() {
         target: null,
         pythonVersion: null,
         babeldocVersion: null,
+        distributionVersion: null,
+        resourceSizeBytes: null,
+        updating: false,
         error: message,
       });
       setEngineError(message);
@@ -195,7 +199,7 @@ export default function PdfView() {
     switch (event.type) {
       case "status":
         setEngineStatus(event.status);
-        setEngineError(event.status.status === "invalid" ? event.status.error : null);
+        setEngineError(event.status.error);
         if (event.status.status !== "preparing") {
           preparingRef.current = false;
           clearPrepareTimeout();
@@ -225,38 +229,51 @@ export default function PdfView() {
         if (prepareOperationRef.current && event.operationId && prepareOperationRef.current !== event.operationId) return;
         preparingRef.current = false;
         prepareOperationRef.current = null;
+        preparePreviousStatusRef.current = null;
         clearPrepareTimeout();
         setEnginePreparing(false);
         setEngineProgress(null);
-        setEngineError(event.status?.status === "invalid" ? event.status.error : null);
+        setEngineError(event.status?.error ?? null);
         setEngineStatus((current) => event.status ?? (current ? { ...current, status: "ready", error: null } : {
           status: "ready",
           engineVersion: null,
           target: null,
           pythonVersion: null,
           babeldocVersion: null,
+          distributionVersion: null,
+          resourceSizeBytes: null,
+          updating: false,
           error: null,
         }));
         void refreshEngineStatus();
         break;
-      case "prepareFailed":
+      case "prepareFailed": {
         if (!preparingRef.current) return;
         if (prepareOperationRef.current && event.operationId && prepareOperationRef.current !== event.operationId) return;
         preparingRef.current = false;
         prepareOperationRef.current = null;
+        const failedStatus = event.status;
         clearPrepareTimeout();
         setEnginePreparing(false);
         setEngineProgress(null);
-        setEngineError(event.message);
-        setEngineStatus((current) => current ? { ...current, status: "invalid", error: event.message } : {
+        setEngineError(failedStatus?.error ?? event.message);
+        setEngineStatus((current) => failedStatus ?? (current ? {
+          ...current,
+          status: current.status === "ready" ? "ready" : "invalid",
+          error: event.message,
+        } : {
           status: "invalid",
           engineVersion: null,
           target: null,
           pythonVersion: null,
           babeldocVersion: null,
+          distributionVersion: null,
+          resourceSizeBytes: null,
+          updating: false,
           error: event.message,
-        });
+        }));
         break;
+      }
     }
   }, [clearPrepareTimeout, refreshEngineStatus]);
 
@@ -264,6 +281,7 @@ export default function PdfView() {
     if (preparingRef.current || engineStatus?.status === "preparing") return;
     const attempt = prepareAttemptRef.current + 1;
     prepareAttemptRef.current = attempt;
+    preparePreviousStatusRef.current = engineStatus;
     preparingRef.current = true;
     prepareOperationRef.current = null;
     clearPrepareTimeout();
@@ -281,12 +299,20 @@ export default function PdfView() {
       setEngineProgress(null);
       const message = "PDF Engine 准备超时，请检查运行环境后重试。";
       setEngineError(message);
-      setEngineStatus((current) => current ? { ...current, status: "invalid", error: message } : {
+      const previousStatus = preparePreviousStatusRef.current;
+      preparePreviousStatusRef.current = null;
+      setEngineStatus((current) => previousStatus?.status === "ready" ? {
+        ...previousStatus,
+        error: message,
+      } : current ? { ...current, status: "invalid", error: message } : {
         status: "invalid",
         engineVersion: null,
         target: null,
         pythonVersion: null,
         babeldocVersion: null,
+        distributionVersion: null,
+        resourceSizeBytes: null,
+        updating: false,
         error: message,
       });
     }, PDF_ENGINE_PREPARE_TIMEOUT_MS);
@@ -301,6 +327,7 @@ export default function PdfView() {
       if (next.status !== "preparing") {
         preparingRef.current = false;
         prepareOperationRef.current = null;
+        preparePreviousStatusRef.current = null;
         clearPrepareTimeout();
         setEnginePreparing(false);
         setEngineProgress(null);
@@ -314,16 +341,24 @@ export default function PdfView() {
       setEngineProgress(null);
       const message = describeError(reason, "准备 PDF Engine 失败");
       setEngineError(message);
-      setEngineStatus((current) => current ? { ...current, status: "invalid", error: message } : {
+      const previousStatus = preparePreviousStatusRef.current;
+      preparePreviousStatusRef.current = null;
+      setEngineStatus((current) => previousStatus?.status === "ready" ? {
+        ...previousStatus,
+        error: message,
+      } : current ? { ...current, status: "invalid", error: message } : {
         status: "invalid",
         engineVersion: null,
         target: null,
         pythonVersion: null,
         babeldocVersion: null,
+        distributionVersion: null,
+        resourceSizeBytes: null,
+        updating: false,
         error: message,
       });
     }
-  }, [clearPrepareTimeout, engineStatus?.status]);
+  }, [clearPrepareTimeout, engineStatus]);
 
   const matchesPdfTask = useCallback((taskId: string): boolean => {
     const activeTaskId = activeTaskIdRef.current;

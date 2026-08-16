@@ -1,0 +1,11 @@
+{
+  "target": "windows-aarch64",
+  "pythonVersion": "3.13.15",
+  "pythonVersionMajorMinor": "3.13",
+  "pythonUrl": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-arm64.zip",
+  "pythonSha256": "cd992cbfb33be433ff20f150691595efb2862e56f4f1bec684c6077d4775af8e",
+  "uvPlatform": "aarch64-pc-windows-msvc",
+  "babeldocVersion": "0.6.4",
+  "pdfmathtranslateRevision": "f8dffcf4c3a33b254391d43514439b975ce8d966",
+  "babeldocLicenseUrl": "https://raw.githubusercontent.com/funstory-ai/BabelDOC/v0.6.4/LICENSE"
+}

@@ -95,8 +95,21 @@ function progressPercent(progress: { fraction: number | null; current: number | 
   return null;
 }
 
+function formatBytes(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value) || value < 0) return null;
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = -1;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
 function engineStatusLabel(status: PdfEngineStatus | null, loading: boolean, preparing: boolean): string {
-  if (preparing || status?.status === "preparing") return "准备中";
+  if (preparing || status?.status === "preparing" || status?.updating) return status?.updating ? "更新中" : "准备中";
   if (loading) return "检查中";
   if (status?.status === "missing") return "未准备";
   if (status?.status === "ready") return "可用";
@@ -155,6 +168,8 @@ function PdfTaskPanel({
     engineStatus?.engineVersion ? `Engine ${engineStatus.engineVersion}` : null,
     engineStatus?.babeldocVersion ? `BabelDOC ${engineStatus.babeldocVersion}` : null,
     engineStatus?.pythonVersion ? `Python ${engineStatus.pythonVersion}` : null,
+    engineStatus?.distributionVersion ? `资源 ${engineStatus.distributionVersion}` : null,
+    formatBytes(engineStatus?.resourceSizeBytes ?? null),
     engineStatus?.target ?? null,
   ].filter((detail): detail is string => detail !== null);
 
