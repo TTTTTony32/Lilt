@@ -24,8 +24,7 @@ pub(crate) const BABELDOC_ENGINE_VERSION: &str = "babeldoc-0.6.4";
 const BABELDOC_VERSION: &str = "0.6.4";
 const SUPPORTED_ENGINE_TARGET: &str = "windows-x86_64";
 #[cfg(not(debug_assertions))]
-const RELEASE_INDEX_URL: &str =
-    "https://github.com/TTTTTony32/Lilt/releases/latest/download/pdf-engine-index.json";
+const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r1";
 #[cfg(not(debug_assertions))]
 const RELEASE_REPOSITORY_OWNER: &str = "TTTTTony32";
 #[cfg(not(debug_assertions))]
@@ -46,6 +45,13 @@ const ENGINE_MANIFEST_NAME: &str = "runtime.json";
 const ENGINE_PARENT: &str = "engines/pdf";
 #[cfg(debug_assertions)]
 const WORKER_RELATIVE_PATH: &str = "pdf-worker/worker.py";
+
+#[cfg(not(debug_assertions))]
+fn release_index_url() -> String {
+    format!(
+        "https://github.com/{RELEASE_REPOSITORY_OWNER}/{RELEASE_REPOSITORY_NAME}/releases/download/{PDF_ENGINE_RELEASE_TAG}/pdf-engine-index.json"
+    )
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -724,7 +730,7 @@ async fn prepare_release_engine(
 #[cfg(not(debug_assertions))]
 async fn fetch_release_index(client: &reqwest::Client) -> Result<PdfEngineIndex, String> {
     let response = client
-        .get(RELEASE_INDEX_URL)
+        .get(release_index_url())
         .send()
         .await
         .map_err(|error| format!("读取 PDF Engine 资源索引失败：{error}"))?;

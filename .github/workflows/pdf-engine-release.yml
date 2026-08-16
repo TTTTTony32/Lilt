@@ -1,0 +1,164 @@
+name: PDF Engine release
+
+on:
+  push:
+    tags:
+      - "lilt-pdf-engine-*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "用于手动构建标识的 Engine 标签"
+        required: true
+        default: lilt-pdf-engine-babeldoc-0.6.4-r1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdf-engine-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows x64 PDF Engine
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate Engine release tag
+        shell: pwsh
+        env:
+          ENGINE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: |
+          if ($env:ENGINE_TAG -notmatch '^lilt-pdf-engine-babeldoc-0\.6\.4-r[1-9][0-9]*$') {
+            throw "Engine Release 标签格式无效：$env:ENGINE_TAG，应使用 lilt-pdf-engine-babeldoc-0.6.4-rN"
+          }
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.5
+
+      - name: Build PDF Engine
+        shell: pwsh
+        env:
+          ENGINE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: |
+          $distributionVersion = "$env:ENGINE_TAG-$env:GITHUB_SHA"
+          & .\pdf-engine\scripts\build-engine.ps1 `
+            -Architecture amd64 `
+            -DistributionVersion $distributionVersion
+
+      - name: Validate and stage Engine assets
+        shell: pwsh
+        run: |
+          $distPath = (Resolve-Path 'pdf-engine/dist').Path
+          $expectedNames = @(
+            'babeldoc-0.6.4-windows-x86_64.zip',
+            'engine-metadata-windows-x86_64.json'
+          )
+          $distFiles = @(Get-ChildItem -LiteralPath $distPath -File)
+          if ($distFiles.Count -ne $expectedNames.Count) {
+            throw "PDF Engine dist 文件数量异常：$($distFiles.Count)"
+          }
+          foreach ($name in $expectedNames) {
+            if (-not (Test-Path -LiteralPath (Join-Path $distPath $name) -PathType Leaf)) {
+              throw "缺少预期的 PDF Engine 资产：$name"
+            }
+          }
+
+          $stagingPath = 'engine-staging'
+          New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
+          foreach ($name in $expectedNames) {
+            Copy-Item -LiteralPath (Join-Path $distPath $name) -Destination (Join-Path $stagingPath $name)
+          }
+          Write-Host "已暂存 PDF Engine 资产：$($expectedNames -join ', ')"
+
+      - name: Upload Engine workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pdf-engine-windows-x86_64
+          path: engine-staging/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-draft:
+    name: Create PDF Engine Draft Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/lilt-pdf-engine-')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download Engine artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pdf-engine-windows-x86_64
+          path: release-assets
+
+      - name: Validate Engine release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print)
+          if [[ "${#assets[@]}" -ne 2 ]]; then
+            echo "期望两个 Windows x64 PDF Engine 资产，实际找到 ${#assets[@]} 个"
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+          mapfile -t archives < <(find release-assets -maxdepth 1 -type f -name 'babeldoc-0.6.4-windows-x86_64.zip' -print)
+          mapfile -t metadata < <(find release-assets -maxdepth 1 -type f -name 'engine-metadata-windows-x86_64.json' -print)
+          if [[ "${#archives[@]}" -ne 1 || "${#metadata[@]}" -ne 1 ]]; then
+            echo "PDF Engine x64 ZIP 或元数据文件缺失或重复"
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+
+      - name: Create PDF Engine resource index
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          & ./pdf-engine/scripts/create-release-index.ps1 -AssetsDirectory 'release-assets' -ReleaseTag $env:RELEASE_TAG -OutputPath (Join-Path (Resolve-Path 'release-assets') 'pdf-engine-index.json')
+
+      - name: Create or reuse Draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^lilt-pdf-engine-babeldoc-0\.6\.4-r[1-9][0-9]*$ ]]; then
+            echo "Engine Release 标签格式无效：$RELEASE_TAG"
+            exit 1
+          fi
+          if release_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$release_draft" != 'true' ]]; then
+              echo "标签 $RELEASE_TAG 已对应正式 Release，停止修改已发布内容"
+              exit 1
+            fi
+            echo "复用已有 Draft Release：$RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$RELEASE_SHA" \
+              --title "Lilt PDF Engine $RELEASE_TAG" \
+              --draft \
+              --generate-notes \
+              --notes 'PDF Engine 独立资源，仅提供 Windows x64 工件；正式客户端按需下载。'
+          fi
+
+      - name: Upload Engine release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber

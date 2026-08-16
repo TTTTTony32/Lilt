@@ -147,22 +147,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: 0.12.5
-
-      - name: Build PDF Engine
-        shell: pwsh
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          $package = Get-Content package.json -Raw | ConvertFrom-Json
-          $distributionVersion = "$($package.version)-$env:GITHUB_SHA"
-          & .\pdf-engine\scripts\build-engine.ps1 `
-            -Architecture $env:ARCH `
-            -DistributionVersion $distributionVersion
-
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v0.6.2
         with:
@@ -188,17 +172,6 @@ jobs:
           New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
           $destination = Join-Path $stagingPath "Lilt_$($package.version)_windows_$env:ARCH`_setup.exe"
           Copy-Item -LiteralPath $installers[0].FullName -Destination $destination
-          $engineTarget = 'windows-x86_64'
-          $engineZip = Join-Path "pdf-engine/dist" "babeldoc-0.6.4-$engineTarget.zip"
-          $engineMetadata = Join-Path "pdf-engine/dist" "engine-metadata-$engineTarget.json"
-          if (-not (Test-Path -LiteralPath $engineZip -PathType Leaf)) {
-            throw "未找到 PDF Engine 压缩包：$engineZip"
-          }
-          if (-not (Test-Path -LiteralPath $engineMetadata -PathType Leaf)) {
-            throw "未找到 PDF Engine 元数据：$engineMetadata"
-          }
-          Copy-Item -LiteralPath $engineZip -Destination (Join-Path $stagingPath (Split-Path $engineZip -Leaf))
-          Copy-Item -LiteralPath $engineMetadata -Destination (Join-Path $stagingPath (Split-Path $engineMetadata -Leaf))
           Write-Host "已暂存安装包：$destination"
 
       - name: Upload workflow artifact
@@ -239,24 +212,6 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${assets[@]}" | grep -q 'windows_amd64_setup\.exe$'
-          mapfile -t engines < <(find release-assets -maxdepth 1 -type f -name 'babeldoc-0.6.4-windows-*.zip' -print)
-          if [[ "${#engines[@]}" -ne 1 ]]; then
-            echo "期望一个 Windows x64 PDF Engine 压缩包，实际找到 ${#engines[@]} 个"
-            printf '%s\n' "${engines[@]}"
-            exit 1
-          fi
-          printf '%s\n' "${engines[@]}" | grep -q 'windows-x86_64\.zip$'
-
-      - name: Create PDF Engine resource index
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          & .\pdf-engine\scripts\create-release-index.ps1 `
-            -AssetsDirectory 'release-assets' `
-            -ReleaseTag $env:RELEASE_TAG `
-            -OutputPath (Join-Path (Resolve-Path 'release-assets') 'pdf-engine-index.json')
-
       - name: Create or reuse Draft Release
         env:
           GH_TOKEN: ${{ github.token }}

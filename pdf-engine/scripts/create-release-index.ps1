@@ -6,6 +6,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($ReleaseTag -notmatch '^lilt-pdf-engine-babeldoc-0\.6\.4-r[1-9][0-9]*$') {
+    throw "Engine Release 标签格式无效：$ReleaseTag，应使用 lilt-pdf-engine-babeldoc-0.6.4-rN"
+}
+
 $metadataFiles = @(Get-ChildItem -LiteralPath $AssetsDirectory -Filter "engine-metadata-*.json" -File)
 if ($metadataFiles.Count -ne 1) {
     throw "期望一个 Windows x64 PDF Engine 元数据文件，实际找到 $($metadataFiles.Count) 个"
@@ -19,6 +23,9 @@ if ($engineVersions.Count -ne 1 -or $engineVersions[0] -ne "babeldoc-0.6.4") {
 }
 if ($distributionVersions.Count -ne 1) {
     throw "Engine 分发修订号不一致"
+}
+if ([string]$distributionVersions[0] -notlike "$ReleaseTag-*") {
+    throw "Engine 分发修订号与 Release 标签不一致"
 }
 
 $assets = [ordered]@{}

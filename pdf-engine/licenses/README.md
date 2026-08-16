@@ -7,4 +7,4 @@ Engine 构建脚本会把以下许可证文本复制到每个架构的发布包�
 - BabelDOC 依赖：来自 PyPI 的运行时依赖。构建过程会把已解析的发行包名称和版本写入 `THIRD-PARTY-SOURCES.txt`；各依赖的许可证仍以其发行包附带文本和上游项目声明为准。
 - 离线字体、模型、CMap 与 OCR 资源：由 BabelDOC 0.6.4 的离线资源命令生成，具体来源和许可证以资源包内的元数据及 BabelDOC 上游声明为准。
 
-Engine 资源由 Lilt Release 单独托管，不写入 NSIS 安装包。再分发时应同时保留这些许可证文本和资源索引中的来源信息。
+Engine 资源由独立的 PDF Engine Release 托管，不写入 NSIS 安装包。再分发时应同时保留这些许可证文本和资源索引中的来源信息。

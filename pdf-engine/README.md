@@ -1,6 +1,6 @@
 # PDF Engine 构建目录
 
-这里保存 PDF Engine 的构建输入和发布脚本。Engine 不进入 Lilt 安装包，GitHub Actions 为 Windows x64 生成一个自包含 ZIP，并将 ZIP 与资源索引上传到同一 Release。
+这里保存 PDF Engine 的构建输入和发布脚本。Engine 不进入 Lilt 安装包，GitHub Actions 为 Windows x64 生成一个自包含 ZIP，并将 ZIP、元数据和资源索引上传到独立的 Engine Release。
 
 构建结果位于 `build/` 和 `dist/`，这两个目录只保存 CI 或本地构建产物，已加入 `.gitignore`。正式运行时，Lilt 将 Engine 解压到：
 
@@ -34,6 +34,28 @@ pdf-engine/dist/engine-metadata-windows-x86_64.json
 ```
 
 元数据文件供发布作业生成 `pdf-engine-index.json`，其中包含 ZIP 摘要、大小和 `runtime.json` 摘要。资源索引不写入源码仓库。
+
+## GitHub Actions 发布
+
+Engine 使用 `.github/workflows/pdf-engine-release.yml` 独立构建和发布，应用安装包工作流不再重复构建 Engine。
+
+首个不可变标签为：
+
+```text
+lilt-pdf-engine-babeldoc-0.6.4-r1
+```
+
+推送该标签后，工作流在 Windows x64 上构建 Engine，先生成 Actions Artifact，再创建 Draft Release。Draft 中包含：
+
+```text
+babeldoc-0.6.4-windows-x86_64.zip
+engine-metadata-windows-x86_64.json
+pdf-engine-index.json
+```
+
+`pdf-engine-index.json` 中的 ZIP 地址固定指向当前 Engine 标签。手动运行工作流只用于验证构建并保留 Actions Artifact，不会创建 Release。确认 Engine Draft 后再推送应用版本标签 `v<version>`，应用 Release 只包含 NSIS 安装包。
+
+Engine 资源需要更新时递增标签末尾的修订号，例如 `lilt-pdf-engine-babeldoc-0.6.4-r2`。先发布新的 Engine Release，再修改客户端的固定标签并发布新的 Lilt 版本；已经发布的标签不移动、不覆盖。
 
 ## 发布约束
 
