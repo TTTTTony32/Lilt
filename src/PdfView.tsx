@@ -377,8 +377,15 @@ export default function PdfView() {
           warnings: current.warnings.includes(event.message) ? current.warnings : [...current.warnings, event.message],
         }));
         break;
-      case "finished":
+      case "finished": {
         clearPdfTaskRefs();
+        const translatedFile = validatePdfPath(event.outputPdf);
+        if (translatedFile) {
+          setSelectedFile(translatedFile);
+          setError(null);
+        } else {
+          setError("翻译已完成，但输出 PDF 路径无效。请从任务面板检查输出文件。");
+        }
         updatePdfJob((current) => ({
           ...current,
           taskId: event.taskId,
@@ -393,6 +400,7 @@ export default function PdfView() {
           code: null,
         }));
         break;
+      }
       case "cancelled":
         clearPdfTaskRefs();
         updatePdfJob((current) => ({
