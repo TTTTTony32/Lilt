@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BookOpen,
   ChevronLeft,
   ChevronRight,
   FileType2,
-  FolderOpen,
   Maximize2,
   RotateCcw,
   Trash2,
@@ -50,7 +48,6 @@ interface PdfReaderProps {
   onStartTranslation: () => void;
   onCancelTranslation: () => void;
   onOpenOutputDirectory: (path: string) => void;
-  onOpenOutputInReader: (path: string) => void;
 }
 
 interface PdfPageProps {
@@ -114,7 +111,6 @@ interface PdfTaskPanelProps {
   onStartTranslation: () => void;
   onCancelTranslation: () => void;
   onOpenOutputDirectory: (path: string) => void;
-  onOpenOutputInReader: (path: string) => void;
 }
 
 function PdfTaskPanel({
@@ -126,7 +122,6 @@ function PdfTaskPanel({
   onStartTranslation,
   onCancelTranslation,
   onOpenOutputDirectory,
-  onOpenOutputInReader,
 }: PdfTaskPanelProps) {
   const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
   const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
@@ -172,18 +167,15 @@ function PdfTaskPanel({
         {job.status === "completed" && job.outputPdf && (
           <div className="pdf-task-output">
             <strong>输出已生成</strong>
-            <span>{job.outputPdf}</span>
+            <button
+              className="pdf-task-output-path"
+              type="button"
+              onClick={() => onOpenOutputDirectory(job.outputPdf!)}
+              title="打开文件所在目录"
+            >
+              {job.outputPdf}
+            </button>
             <small>{[job.outputMode, job.pageCount === null ? null : `${job.pageCount} 页`].filter((item): item is string => item !== null).join(" · ")}</small>
-            <div className="pdf-task-output-actions">
-              <button className="secondary-button small-button" type="button" onClick={() => onOpenOutputDirectory(job.outputPdf!)}>
-                <FolderOpen size={14} />
-                打开文件目录
-              </button>
-              <button className="primary-button small-button" type="button" onClick={() => onOpenOutputInReader(job.outputPdf!)}>
-                <BookOpen size={14} />
-                软件内 PDF 阅读器打开
-              </button>
-            </div>
           </div>
         )}
         {job.warnings.length > 0 && (
@@ -363,7 +355,6 @@ export default function PdfReader({
   onStartTranslation,
   onCancelTranslation,
   onOpenOutputDirectory,
-  onOpenOutputInReader,
 }: PdfReaderProps) {
   const [status, setStatus] = useState<PdfReaderStatus>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -567,7 +558,6 @@ export default function PdfReader({
         onStartTranslation={onStartTranslation}
         onCancelTranslation={onCancelTranslation}
         onOpenOutputDirectory={onOpenOutputDirectory}
-        onOpenOutputInReader={onOpenOutputInReader}
       />
 
       {status === "loading" && (

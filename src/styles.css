@@ -242,10 +242,9 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-task-progress-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
 .pdf-task-error { margin: 8px 0 0; color: #a25e53; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .pdf-task-output { margin-top: 9px; padding: 8px 10px; display: grid; gap: 3px; border: 1px solid #d9e3d6; border-radius: 6px; color: #627365; background: #eef4eb; font-size: 11px; }
-.pdf-task-output span { overflow-wrap: anywhere; color: #708076; font-size: 10px; }
+.pdf-task-output-path { margin: 0; padding: 0; border: 0; color: #708076; background: transparent; font: inherit; font-size: 10px; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.pdf-task-output-path:hover { color: #4f6855; text-decoration: underline; }
 .pdf-task-output small { color: #93a094; font-size: 10px; }
-.pdf-task-output-actions { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 7px; }
-.pdf-task-output-actions button { gap: 6px; }
 .pdf-task-warnings { margin: 8px 0 0; padding-left: 17px; color: #937e5e; font-size: 10px; line-height: 1.55; }
 .pdf-task-warnings li + li { margin-top: 3px; }
 .pdf-reader-file { min-width: 0; flex: 1 1 180px; display: flex; align-items: center; gap: 8px; color: #536456; font-size: 12px; font-weight: 600; }

@@ -59,7 +59,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 export default function PdfView() {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
-  const [readerReloadToken, setReaderReloadToken] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -700,17 +699,6 @@ export default function PdfView() {
     }
   }, []);
 
-  const openOutputInReader = useCallback((path: string) => {
-    const file = validatePdfPath(path);
-    if (!file) {
-      setError("翻译输出文件不存在，无法在软件内打开。请检查输出目录。");
-      return;
-    }
-    setError(null);
-    setSelectedFile(file);
-    setReaderReloadToken((current) => current + 1);
-  }, []);
-
   return (
     <section className={`page-section pdf-page ${selectedFile ? "pdf-reader-page" : ""}`}>
       {!selectedFile && (
@@ -728,7 +716,6 @@ export default function PdfView() {
           {dragging && <div className="pdf-reader-drop-notice"><Upload size={14} />松开以替换当前 PDF</div>}
           <Suspense fallback={<div className="pdf-reader-shell"><div className="pdf-reader-state"><span>正在加载 PDF 阅读器</span></div></div>}>
             <PdfReader
-              key={`${selectedFile.path}-${readerReloadToken}`}
               file={selectedFile}
               onReplace={() => void chooseFile()}
               onRemove={removeFile}
@@ -739,7 +726,6 @@ export default function PdfView() {
               onStartTranslation={() => void startPdfTranslation()}
               onCancelTranslation={() => void cancelPdfTranslation()}
               onOpenOutputDirectory={(path) => void openOutputDirectory(path)}
-              onOpenOutputInReader={openOutputInReader}
             />
           </Suspense>
           {error && <p className="error-message pdf-reader-external-error" role="alert">{error}</p>}
