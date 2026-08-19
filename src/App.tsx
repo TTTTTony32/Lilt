@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Check, ChevronDown, Copy, FileText, FileType2, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
@@ -9,6 +9,20 @@ import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput }
 import type { DictionaryOpenRequest } from "./DictionaryView";
 import PdfView from "./PdfView";
 import PersonalDictionaryView from "./PersonalDictionaryView";
+import { AnimatedOverlay } from "./components/AnimatedOverlay";
+import { usePrefersReducedMotion } from "./components/usePrefersReducedMotion";
+import { DownloadActivityStack } from "./components/DownloadActivityStack";
+import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./components/ResourceDownloadDialog";
+import {
+  downloadActivityKey,
+  downloadActivityReducer,
+  initialDownloadActivityState,
+  listDownloadActivities,
+  normalizeStagePercent,
+  selectDownloadActivity,
+  type DownloadActivity,
+  type ResourceDownloadPromptRequest,
+} from "./lib/download-activity";
 import {
   DEFAULT_SNAPSHOT,
   type AppSettings,
@@ -41,6 +55,9 @@ import {
   decodeGlossaryExportResult,
   decodeGlossaryImportResult,
   decodePersonalDictionaryExportResult,
+  decodePdfEngineEvent,
+  PDF_ENGINE_EVENT_NAMES,
+  type PdfEngineEvent,
 } from "./types/contracts";
 import {
   decodeDictionaryCommandResult,
@@ -113,27 +130,6 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
-const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
-
-function usePrefersReducedMotion(): boolean {
-  const [reducedMotion, setReducedMotion] = useState(() => (
-    typeof window !== "undefined"
-    && typeof window.matchMedia === "function"
-    && window.matchMedia(REDUCED_MOTION_QUERY).matches
-  ));
-
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const mediaQuery = window.matchMedia(REDUCED_MOTION_QUERY);
-    const update = () => setReducedMotion(mediaQuery.matches);
-    update();
-    mediaQuery.addEventListener("change", update);
-    return () => mediaQuery.removeEventListener("change", update);
-  }, []);
-
-  return reducedMotion;
-}
-
 interface PageTransitionLayer {
   id: number;
   node: ReactNode;
@@ -194,77 +190,8 @@ function PageTransition({ activeKey, children }: { activeKey: string; children: 
   );
 }
 
-type OverlayPhase = "opening" | "open" | "closing";
-
 type DataTransferMode = "personalExport" | "glossaryExport" | "glossaryImport";
 type DataTransferStatus = "selecting" | "processing" | "success" | "empty" | "cancelled" | "error";
-
-function AnimatedOverlay({
-  open,
-  className,
-  children,
-  onClosed,
-  onBackdropClick,
-}: {
-  open: boolean;
-  className: string;
-  children: ReactNode;
-  onClosed: () => void;
-  onBackdropClick?: (event: ReactMouseEvent<HTMLDivElement>) => void;
-}) {
-  const reducedMotion = usePrefersReducedMotion();
-  const [phase, setPhase] = useState<OverlayPhase>(open ? "opening" : "closing");
-  const closeNotifiedRef = useRef(false);
-  const overlayRef = useRef<HTMLDivElement | null>(null);
-
-  const notifyClosed = useCallback(() => {
-    if (closeNotifiedRef.current) return;
-    closeNotifiedRef.current = true;
-    onClosed();
-  }, [onClosed]);
-
-  useEffect(() => {
-    if (open) {
-      closeNotifiedRef.current = false;
-      setPhase("opening");
-      if (reducedMotion) {
-        setPhase("open");
-        return;
-      }
-      return undefined;
-    }
-
-    setPhase("closing");
-    const activeElement = document.activeElement;
-    if (activeElement instanceof HTMLElement && overlayRef.current?.contains(activeElement)) {
-      activeElement.blur();
-    }
-    if (reducedMotion) notifyClosed();
-    return undefined;
-  }, [notifyClosed, open, reducedMotion]);
-
-  const handleAnimationEnd = useCallback((event: ReactAnimationEvent<HTMLDivElement>) => {
-    if (event.target !== event.currentTarget) return;
-    if (open && phase === "opening") {
-      setPhase("open");
-      return;
-    }
-    if (!open && phase === "closing") notifyClosed();
-  }, [notifyClosed, open, phase]);
-
-  return (
-    <div
-      ref={overlayRef}
-      className={`${className} overlay-phase-${phase}`}
-      role="presentation"
-      aria-hidden={phase === "closing"}
-      onClick={onBackdropClick}
-      onAnimationEnd={handleAnimationEnd}
-    >
-      {children}
-    </div>
-  );
-}
 
 function FeedbackMessage({
   message,
@@ -344,6 +271,7 @@ function FeedbackMessage({
 
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(DEFAULT_SNAPSHOT);
+  const [snapshotReady, setSnapshotReady] = useState(false);
   const [tab, setTab] = useState<AppTab>("translate");
   const [sourceText, setSourceText] = useState("");
   const [translatedText, setTranslatedText] = useState("");
@@ -369,9 +297,18 @@ function App() {
   const [dataTransferOverlayMounted, setDataTransferOverlayMounted] = useState(false);
   const [dataTransferMode, setDataTransferMode] = useState<DataTransferMode>("personalExport");
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
+  const [downloadActivityState, dispatchDownloadActivity] = useReducer(
+    downloadActivityReducer,
+    initialDownloadActivityState,
+  );
+  const [resourceDownloadPrompt, setResourceDownloadPrompt] = useState<ResourceDownloadPromptRequest | null>(null);
+  const [resourceDownloadDialogOpen, setResourceDownloadDialogOpen] = useState(false);
+  const [resourceDownloadDialogMounted, setResourceDownloadDialogMounted] = useState(false);
+  const [resourceDownloadTerminalState, setResourceDownloadTerminalState] = useState<Partial<Record<DownloadActivity["resource"], ResourceDownloadDialogStatus>>>({});
   const activeRequestId = useRef<string | null>(null);
   const translationStartedAt = useRef<number | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
+  const activePdfEngineOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
   const settingsDialogRef = useRef<HTMLDivElement | null>(null);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -379,6 +316,57 @@ function App() {
   const historyReturnFocusRef = useRef<HTMLElement | null>(null);
   const dataTransferReturnFocusRef = useRef<HTMLElement | null>(null);
   const closeDialogReturnFocusRef = useRef<HTMLElement | null>(null);
+  const downloadActivityTimersRef = useRef(new Map<string, number>());
+
+  const scheduleDownloadActivityRemoval = useCallback((resource: DownloadActivity["resource"], operationId: string, delayMs: number) => {
+    const key = downloadActivityKey(resource, operationId);
+    const previousTimer = downloadActivityTimersRef.current.get(key);
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+    const timer = window.setTimeout(() => {
+      downloadActivityTimersRef.current.delete(key);
+      dispatchDownloadActivity({ type: "removed", resource, operationId });
+    }, delayMs);
+    downloadActivityTimersRef.current.set(key, timer);
+  }, []);
+
+  const openResourceDownloadPrompt = useCallback((request: ResourceDownloadPromptRequest) => {
+    setResourceDownloadPrompt(request);
+    setResourceDownloadDialogMounted(true);
+    setResourceDownloadDialogOpen(true);
+  }, []);
+
+  const requestResourceDownloadClose = useCallback(() => {
+    setResourceDownloadDialogOpen(false);
+  }, []);
+
+  const handleResourceDownloadClosed = useCallback(() => {
+    setResourceDownloadDialogMounted(false);
+    setResourceDownloadPrompt(null);
+  }, []);
+
+  const clearResourceDownloadTerminal = useCallback((resource: DownloadActivity["resource"]) => {
+    setResourceDownloadTerminalState((current) => {
+      if (!(resource in current)) return current;
+      const next = { ...current };
+      delete next[resource];
+      return next;
+    });
+  }, []);
+
+  const markResourceDownloadTerminal = useCallback((resource: DownloadActivity["resource"], status: Extract<ResourceDownloadDialogStatus, "completed" | "failed">) => {
+    setResourceDownloadTerminalState((current) => current[resource] === status ? current : { ...current, [resource]: status });
+  }, []);
+
+  const startResourceDownload = useCallback(() => {
+    if (!resourceDownloadPrompt) return;
+    clearResourceDownloadTerminal(resourceDownloadPrompt.resource);
+    resourceDownloadPrompt.onStart();
+  }, [clearResourceDownloadTerminal, resourceDownloadPrompt]);
+
+  useEffect(() => () => {
+    downloadActivityTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    downloadActivityTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     const window = getCurrentWindow();
@@ -519,6 +507,7 @@ function App() {
     try {
       const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
       setSnapshot(next);
+      setSnapshotReady(true);
     } catch (reason) {
       setError(describeError(reason, "无法读取应用配置"));
     }
@@ -839,8 +828,139 @@ function App() {
     };
   }, [handleWordExampleEvent]);
 
+  const handlePdfEngineActivityEvent = useCallback((event: PdfEngineEvent) => {
+    if (event.type === "prepareStarted") {
+      if (!event.operationId) return;
+      clearResourceDownloadTerminal("pdf-engine");
+      activePdfEngineOperationId.current = event.operationId;
+      dispatchDownloadActivity({
+        type: "started",
+        resource: "pdf-engine",
+        operationId: event.operationId,
+        phase: "index",
+        message: "正在准备 PDF Engine",
+      });
+      return;
+    }
+    if (event.type === "prepareProgress") {
+      const operationId = event.progress.operationId;
+      if (!operationId) return;
+      if (activePdfEngineOperationId.current && activePdfEngineOperationId.current !== operationId) return;
+      dispatchDownloadActivity({
+        type: "progress",
+        resource: "pdf-engine",
+        operationId,
+        phase: event.progress.stage,
+        stagePercent: normalizeStagePercent(event.progress.current, event.progress.total, event.progress.fraction),
+        message: event.progress.message,
+      });
+      return;
+    }
+    if (event.type === "prepareCompleted") {
+      if (!event.operationId) return;
+      if (activePdfEngineOperationId.current && activePdfEngineOperationId.current !== event.operationId) return;
+      dispatchDownloadActivity({
+        type: "completed",
+        resource: "pdf-engine",
+        operationId: event.operationId,
+        message: "PDF Engine 已准备完成",
+      });
+      markResourceDownloadTerminal("pdf-engine", "completed");
+      activePdfEngineOperationId.current = null;
+      scheduleDownloadActivityRemoval("pdf-engine", event.operationId, 2600);
+      return;
+    }
+    if (event.type === "prepareFailed") {
+      if (!event.operationId) return;
+      if (activePdfEngineOperationId.current && activePdfEngineOperationId.current !== event.operationId) return;
+      dispatchDownloadActivity({
+        type: "failed",
+        resource: "pdf-engine",
+        operationId: event.operationId,
+        error: event.message,
+      });
+      markResourceDownloadTerminal("pdf-engine", "failed");
+      activePdfEngineOperationId.current = null;
+      scheduleDownloadActivityRemoval("pdf-engine", event.operationId, 9000);
+    }
+  }, [clearResourceDownloadTerminal, markResourceDownloadTerminal, scheduleDownloadActivityRemoval]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const initialisePdfEngineListeners = async () => {
+      const results = await Promise.allSettled(PDF_ENGINE_EVENT_NAMES.map((name) => (
+        listenTo<unknown>(name, (payload) => {
+          if (disposed) return;
+          const event = decodePdfEngineEvent(name, payload);
+          if (event) handlePdfEngineActivityEvent(event);
+        })
+      )));
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        if (disposed) result.value();
+        else unlisteners.push(result.value);
+      }
+    };
+    void initialisePdfEngineListeners();
+    return () => {
+      disposed = true;
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
+    };
+  }, [handlePdfEngineActivityEvent]);
+
   const handleDictionaryEvent = useCallback((event: DictionaryUpdateEvent) => {
     if (event.type === "started") {
+      clearResourceDownloadTerminal("dictionary");
+      dispatchDownloadActivity({
+        type: "started",
+        resource: "dictionary",
+        operationId: event.operationId,
+        phase: "download",
+        message: "正在下载词典",
+      });
+    } else if (event.type === "downloadProgress") {
+      dispatchDownloadActivity({
+        type: "progress",
+        resource: "dictionary",
+        operationId: event.operationId,
+        phase: "download",
+        stagePercent: normalizeStagePercent(event.downloadedBytes, event.totalBytes),
+      });
+    } else if (event.type === "verifyProgress") {
+      dispatchDownloadActivity({
+        type: "progress",
+        resource: "dictionary",
+        operationId: event.operationId,
+        phase: "verify",
+        stagePercent: normalizeStagePercent(event.current, event.total),
+      });
+    } else if (event.type === "extractProgress") {
+      dispatchDownloadActivity({
+        type: "progress",
+        resource: "dictionary",
+        operationId: event.operationId,
+        phase: "extract",
+        stagePercent: normalizeStagePercent(event.current, event.total),
+      });
+    } else if (event.type === "completed") {
+      dispatchDownloadActivity({
+        type: "completed",
+        resource: "dictionary",
+        operationId: event.operationId,
+        message: "词典已准备完成",
+      });
+    } else {
+      dispatchDownloadActivity({
+        type: "failed",
+        resource: "dictionary",
+        operationId: event.operationId,
+        error: event.message,
+      });
+    }
+
+    if (event.type === "started") {
+      if (activeDictionaryOperationId.current && activeDictionaryOperationId.current !== event.operationId) return;
       activeDictionaryOperationId.current = event.operationId;
       setDictionaryProgress(null);
       setSnapshot((current) => ({ ...current, dictionary: event.state }));
@@ -887,6 +1007,8 @@ function App() {
         activeDictionaryOperationId.current = null;
         setDictionaryProgress(null);
         setSnapshot((current) => ({ ...current, dictionary: event.state }));
+        markResourceDownloadTerminal("dictionary", "completed");
+        scheduleDownloadActivityRemoval("dictionary", event.operationId, 2600);
         void refreshSnapshot();
         break;
       case "failed":
@@ -896,9 +1018,11 @@ function App() {
           ...current,
           dictionary: { ...current.dictionary, status: "failed", error: event.message },
         }));
+        markResourceDownloadTerminal("dictionary", "failed");
+        scheduleDownloadActivityRemoval("dictionary", event.operationId, 9000);
         break;
     }
-  }, [refreshSnapshot]);
+  }, [clearResourceDownloadTerminal, markResourceDownloadTerminal, refreshSnapshot, scheduleDownloadActivityRemoval]);
 
   useEffect(() => {
     let disposed = false;
@@ -1025,6 +1149,23 @@ function App() {
     const known = snapshot.models.find((model) => model.id === snapshot.provider.modelId);
     return known?.label ?? snapshot.provider.modelId;
   }, [snapshot.models, snapshot.provider.modelId]);
+  const resourceDownloadActivity = resourceDownloadPrompt
+    ? selectDownloadActivity(downloadActivityState, resourceDownloadPrompt.resource)
+    : null;
+  const resourceDownloadStatus: ResourceDownloadDialogStatus = resourceDownloadActivity?.status
+    ?? (resourceDownloadPrompt ? resourceDownloadTerminalState[resourceDownloadPrompt.resource] : undefined)
+    ?? (resourceDownloadPrompt?.resource === "dictionary" && dictionaryProgress !== null
+      ? "running"
+      : resourceDownloadPrompt?.resource === "dictionary" && snapshot.dictionary.status === "updating"
+        ? "running"
+        : resourceDownloadPrompt?.resource === "dictionary" && snapshot.dictionary.status === "failed"
+          ? "failed"
+          : "missing");
+  const resourceDownloadError = resourceDownloadActivity?.error
+    ?? (resourceDownloadPrompt?.resource === "dictionary" && snapshot.dictionary.status === "failed"
+      ? snapshot.dictionary.error
+      : null);
+  const downloadActivities = listDownloadActivities(downloadActivityState);
 
   const handleTranslate = async () => {
     if (!translationEventsReady) {
@@ -1168,6 +1309,7 @@ function App() {
                 state={snapshot.dictionary}
                 history={snapshot.dictionaryHistory}
                 progress={dictionaryProgress}
+                snapshotReady={snapshotReady}
                 targetLanguage={targetLanguage}
                 wordExample={wordExample}
                 onUpdate={handleDictionaryUpdate}
@@ -1176,13 +1318,14 @@ function App() {
                 onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
                 onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
                 personalDictionary={snapshot.personalDictionary}
+                onResourceDownloadPrompt={openResourceDownloadPrompt}
                 openRequest={dictionaryOpenRequest}
                 onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
                 onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
                 onOpenPersonalDictionary={openPersonalDictionary}
               />
             )}
-            {tab === "pdf" && <PdfView />}
+            {tab === "pdf" && <PdfView onResourceDownloadPrompt={openResourceDownloadPrompt} />}
             {tab === "personal" && (
               <PersonalDictionaryView
                 entries={snapshot.personalDictionary}
@@ -1266,6 +1409,24 @@ function App() {
           onClosed={handleDataTransferClosed}
         />
       )}
+      {resourceDownloadDialogMounted && resourceDownloadPrompt && (
+        <ResourceDownloadDialog
+          open={resourceDownloadDialogOpen}
+          resource={resourceDownloadPrompt.resource}
+          title={resourceDownloadPrompt.title}
+          description={resourceDownloadPrompt.description}
+          status={resourceDownloadStatus}
+          phase={resourceDownloadActivity?.phase ?? null}
+          stagePercent={resourceDownloadActivity?.stagePercent ?? null}
+          overallPercent={resourceDownloadActivity?.overallPercent ?? null}
+          message={resourceDownloadActivity?.message ?? null}
+          error={resourceDownloadError}
+          startLabel={resourceDownloadPrompt.startLabel}
+          onStart={startResourceDownload}
+          onRequestClose={requestResourceDownloadClose}
+          onClosed={handleResourceDownloadClosed}
+        />
+      )}
       {closeDialogMounted && (
         <CloseBehaviorDialog
           open={closeDialogOpen}
@@ -1273,6 +1434,7 @@ function App() {
           onClosed={handleCloseDialogClosed}
         />
       )}
+      <DownloadActivityStack activities={downloadActivities} />
     </div>
   );
 }

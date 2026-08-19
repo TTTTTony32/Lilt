@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Bookmark, Download, LoaderCircle, Search } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand } from "./lib/tauri";
+import type { ResourceDownloadPromptRequest } from "./lib/download-activity";
 import {
   decodeDictionaryLookupCommandResult,
   collectPronunciations,
@@ -30,9 +31,11 @@ interface DictionaryViewProps {
   state: DictionaryState;
   history: DictionaryHistoryEntry[];
   progress: DictionaryProgress | null;
+  snapshotReady: boolean;
   targetLanguage: string;
   wordExample: WordExampleState;
   onUpdate: () => Promise<void>;
+  onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
   onHistoryChanged: (history: DictionaryHistoryEntry[]) => void;
   onSnapshotChanged: () => Promise<void>;
   onWordExampleRequested: (request: WordExampleRequestInput | null) => void;
@@ -80,9 +83,11 @@ export default function DictionaryView({
   state,
   history,
   progress,
+  snapshotReady,
   targetLanguage,
   wordExample,
   onUpdate,
+  onResourceDownloadPrompt,
   onHistoryChanged,
   onSnapshotChanged,
   onWordExampleRequested,
@@ -103,7 +108,20 @@ export default function DictionaryView({
   const [queryError, setQueryError] = useState<string | null>(null);
   const [savingFavorite, setSavingFavorite] = useState(false);
   const lastOpenRequestId = useRef<string | null>(null);
+  const downloadPromptShownRef = useRef(false);
   const updating = state.status === "updating" || progress !== null;
+
+  useEffect(() => {
+    if (!snapshotReady || updating || state.status !== "notInstalled" || downloadPromptShownRef.current) return;
+    downloadPromptShownRef.current = true;
+    onResourceDownloadPrompt({
+      resource: "dictionary",
+      title: "准备离线词典",
+      description: "词典数据保存在本地，首次使用需要单独下载。",
+      startLabel: "下载词典",
+      onStart: () => { void onUpdate(); },
+    });
+  }, [onResourceDownloadPrompt, onUpdate, snapshotReady, state.status, updating]);
 
   const query = useCallback(async (candidate: string, selectedCanonicalWord?: string) => {
     const trimmed = candidate.trim();

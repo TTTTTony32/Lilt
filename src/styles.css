@@ -396,6 +396,42 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .data-transfer-skipped li + li { margin-top: 4px; }
 .data-transfer-error { margin: 0; line-height: 1.7; }
 
+.resource-download-card { width: min(500px, calc(100vw - 48px)); }
+.resource-download-body { min-height: 106px; margin-top: 19px; color: #70796f; font-size: 12px; line-height: 1.7; }
+.resource-download-status { min-height: 42px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.resource-download-status-completed { color: #61816a; }
+.resource-download-status-failed { color: #a25e53; }
+.resource-download-progress { margin-top: 12px; }
+.resource-download-progress-label { margin-bottom: 7px; display: flex; justify-content: space-between; gap: 12px; color: #858f85; font-size: 10px; }
+.resource-download-progress-label span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resource-download-progress-track { height: 6px; overflow: hidden; border-radius: 6px; background: #e1e5de; }
+.resource-download-progress-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
+.resource-download-stage-percent { display: block; margin-top: 6px; color: #a1a39a; font-size: 10px; }
+.resource-download-error { margin: 12px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
+.resource-download-running-hint { margin-right: auto; color: #9a9f96; font-size: 10px; }
+
+.download-activity-stack { position: fixed; z-index: 20; right: 18px; bottom: 18px; width: min(300px, calc(100vw - 36px)); display: grid; gap: 9px; pointer-events: none; }
+.download-activity-item { position: relative; overflow: hidden; padding: 11px 12px 10px; border: 1px solid #d8ded5; border-radius: 8px; background: rgba(251, 250, 247, .97); box-shadow: 0 10px 25px rgba(48, 61, 50, .14); animation: download-activity-in var(--motion-standard-duration) var(--motion-ease) both; }
+.download-activity-item-completed { border-color: #c7dbc7; animation: download-activity-complete-out 2.6s var(--motion-ease) both; }
+.download-activity-item-failed { border-color: #e1c7c1; }
+.download-activity-heading { min-width: 0; display: flex; align-items: center; gap: 7px; color: #536456; font-size: 11px; }
+.download-activity-icon { width: 16px; height: 16px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; color: #6e8a72; }
+.download-activity-item-failed .download-activity-icon { color: #a25e53; }
+.download-activity-item-completed .download-activity-icon { color: #61816a; }
+.download-activity-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.download-activity-progress { height: 5px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: #e1e5de; }
+.download-activity-progress span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
+.download-activity-item-completed .download-activity-progress span { background: #78a07d; }
+.download-activity-error { display: block; margin-top: 6px; overflow: hidden; color: #a25e53; font-size: 10px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes download-activity-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes download-activity-complete-out {
+  0%, 65% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(4px); }
+}
+
 .settings-overlay { position: fixed; z-index: 10; inset: 0; padding: 32px; display: grid; place-items: center; background: rgba(44, 53, 45, .24); }
 .settings-dialog { width: min(960px, calc(100vw - 64px)); height: min(760px, calc(100vh - 64px)); min-height: 0; display: flex; flex-direction: column; overflow: hidden; outline: none; border: 1px solid #d8d9d0; border-radius: 14px; background: #f7f6f1; box-shadow: 0 22px 58px rgba(43, 53, 44, .2); }
 .settings-overlay.overlay-phase-opening .settings-dialog { animation: overlay-panel-in var(--motion-overlay-enter-duration) var(--motion-ease) both; }
@@ -491,6 +527,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .pdf-file-card { align-items: flex-start; flex-direction: column; }
   .pdf-file-summary { width: 100%; }
   .pdf-file-summary strong { max-width: 100%; }
+  .download-activity-stack { right: 12px; bottom: 12px; width: min(300px, calc(100vw - 24px)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

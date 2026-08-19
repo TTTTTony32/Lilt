@@ -5,6 +5,7 @@ import { FileType2, Upload } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { type PdfFile, validatePdfPath } from "./lib/pdf";
 import { invokeCommand, listenTo } from "./lib/tauri";
+import type { ResourceDownloadPromptRequest } from "./lib/download-activity";
 import { PdfEnginePanel } from "./PdfEnginePanel";
 import {
   PDF_ENGINE_EVENT_NAMES,
@@ -57,7 +58,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
-export default function PdfView() {
+export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void }) {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +80,7 @@ export default function PdfView() {
   const prepareTimeoutRef = useRef<number | null>(null);
   const preparePreviousStatusRef = useRef<PdfEngineStatus | null>(null);
   const preparingRef = useRef(false);
+  const enginePromptShownRef = useRef(false);
   const startAttemptRef = useRef<number | null>(null);
   const startAttemptSequenceRef = useRef(0);
   const activeTaskIdRef = useRef<string | null>(null);
@@ -626,6 +628,18 @@ export default function PdfView() {
   useEffect(() => {
     void refreshEngineStatus();
   }, [refreshEngineStatus]);
+
+  useEffect(() => {
+    if (engineStatusLoading || !engineStatus || enginePromptShownRef.current || engineStatus.status !== "missing") return;
+    enginePromptShownRef.current = true;
+    onResourceDownloadPrompt({
+      resource: "pdf-engine",
+      title: "准备 PDF Engine",
+      description: "PDF 全文翻译依赖本地 PDF Engine，首次使用需要准备运行环境。",
+      startLabel: "开始准备",
+      onStart: () => { void preparePdfEngine(); },
+    });
+  }, [engineStatus, engineStatusLoading, onResourceDownloadPrompt, preparePdfEngine]);
 
   useEffect(() => {
     let disposed = false;
