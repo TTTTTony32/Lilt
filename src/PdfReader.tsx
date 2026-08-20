@@ -31,6 +31,7 @@ import {
   type RenderTask,
 } from "./lib/pdf-reader";
 import { invokeCommand } from "./lib/tauri";
+import { createEmptyPdfPreflightState } from "./lib/pdf-preflight";
 import type {
   DocumentContext,
   PdfJobUiState,
@@ -109,24 +110,18 @@ function jobStatusLabel(status: PdfJobUiState["status"]): string {
 
 function preflightStatusLabel(preflight: PdfPreflightState): string {
   switch (preflight.status) {
-    case "running": return "正在分析文档";
+    case "running":
+      switch (preflight.responsePhase) {
+        case "waiting": return "等待模型响应";
+        case "thinking": return "模型思考中";
+        case "streaming": return "正在生成预检结果";
+        default: return "正在分析文档";
+      }
     case "completed": return "预检完成";
     case "degraded": return "已降级应用";
     case "failed": return "预检失败，继续翻译";
     default: return "等待预检";
   }
-}
-
-function emptyPdfPreflight(): PdfPreflightState {
-  return {
-    status: "idle",
-    schemaVersion: null,
-    context: null,
-    contextHash: null,
-    warnings: [],
-    applied: false,
-    message: null,
-  };
 }
 
 function diagnosticSeverityLabel(severity: PdfQualityDiagnostic["severity"]): string {
@@ -235,13 +230,18 @@ function PdfTaskPanel({
   const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
   const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
   const jobProgressValue = progressPercent(job.progress);
-  const preflight = job.preflight ?? emptyPdfPreflight();
+  const preflight = job.preflight ?? createEmptyPdfPreflightState();
   const context = job.documentContext ?? preflight.context;
   const diagnostics = job.diagnostics ?? [];
+  const [detailsOpen, setDetailsOpen] = useState(true);
 
   return (
-    <div className="pdf-task-panel">
-      <div className="pdf-task-panel-section pdf-task-job-section">
+    <details
+      className="pdf-task-panel"
+      open={detailsOpen}
+      onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
+    >
+      <summary className="pdf-task-panel-summary">
         <div className="pdf-task-panel-heading">
           <div>
             <span className="pdf-task-panel-kicker">PDF TRANSLATION</span>
@@ -249,11 +249,30 @@ function PdfTaskPanel({
           </div>
           <div className="pdf-task-panel-actions">
             {jobBusy && job.status !== "cancelling" && (
-              <button className="secondary-button small-button" type="button" onClick={onCancelTranslation} disabled={!job.taskId}>
-                取消任务
+              <button
+                className="secondary-button small-button"
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onCancelTranslation();
+                }}
+                disabled={!job.taskId}
+              >
+                停止翻译
               </button>
             )}
-            {job.status === "cancelling" && <span className="pdf-task-action-status">正在等待取消确认</span>}
+            {job.status === "cancelling" && <span className="pdf-task-action-status">正在停止翻译</span>}
+          </div>
+        </div>
+      </summary>
+      <div className="pdf-task-panel-section pdf-task-job-section">
+        <div className="pdf-task-panel-heading">
+          <div>
+            <span className="pdf-task-panel-kicker">TRANSLATION DETAILS</span>
+            <strong>任务详情</strong>
+          </div>
+          <div className="pdf-task-panel-actions">
             {!jobBusy && (
               <button className="primary-button small-button" type="button" onClick={onStartTranslation} disabled={!canStart}>
                 {job.status === "completed" ? "再次翻译" : "开始翻译"}
@@ -328,7 +347,7 @@ function PdfTaskPanel({
         )}
       </div>
       <PdfQualityDiagnostics diagnostics={diagnostics} />
-    </div>
+    </details>
   );
 }
 

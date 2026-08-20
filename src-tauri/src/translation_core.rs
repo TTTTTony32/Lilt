@@ -75,6 +75,33 @@ impl TranslationCore {
         )
         .await
     }
+
+    pub async fn stream_with_usage_and_activity<F, A>(
+        request: StreamRequest<'_>,
+        on_delta: F,
+        on_activity: A,
+    ) -> Result<provider::ProviderStreamResult, ProviderError>
+    where
+        F: FnMut(String) -> Result<(), ProviderError>,
+        A: FnMut(provider::ProviderStreamActivity),
+    {
+        provider::stream_chat_completion_with_usage_and_activity(
+            provider::ChatStreamRequest {
+                request_id: request.request_id,
+                base_url: request.base_url,
+                api_key: request.api_key,
+                model_id: request.model_id,
+                system_prompt: request.system_prompt,
+                user_text: request.user_text,
+                cancel: request.cancel,
+                operation: request.mode.provider_operation(),
+                thinking_effort: request.thinking_effort,
+            },
+            on_delta,
+            on_activity,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

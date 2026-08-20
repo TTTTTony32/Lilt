@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use thiserror::Error;
 
-pub const PDF_WORKER_PROTOCOL_VERSION: u32 = 1;
+pub const PDF_WORKER_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -35,6 +35,8 @@ pub enum RustToWorkerMessage {
     TranslateResponse(TranslateResponseMessage),
     #[serde(rename = "DOCUMENT_PREFLIGHT_RESPONSE")]
     DocumentPreflightResponse(DocumentPreflightResponseMessage),
+    #[serde(rename = "DOCUMENT_PREFLIGHT_ACTIVITY")]
+    DocumentPreflightActivity(DocumentPreflightActivityMessage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -94,6 +96,21 @@ pub struct DocumentPreflightResponseMessage {
     pub error: Option<ProtocolErrorPayload>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct DocumentPreflightActivityMessage {
+    pub task_id: String,
+    pub preflight_request_id: String,
+    pub phase: DocumentPreflightActivityPhase,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentPreflightActivityPhase {
+    Thinking,
+    Streaming,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TranslationResponseOutcome {
@@ -122,6 +139,10 @@ pub enum WorkerToRustMessage {
     TranslateRequest(TranslateRequestMessage),
     #[serde(rename = "DOCUMENT_PREFLIGHT_REQUEST")]
     DocumentPreflightRequest(DocumentPreflightRequestMessage),
+    #[serde(rename = "DOCUMENT_PREFLIGHT_TIMEOUT")]
+    DocumentPreflightTimeout(DocumentPreflightTimeoutMessage),
+    #[serde(rename = "DOCUMENT_PREFLIGHT_ACCEPTED")]
+    DocumentPreflightAccepted(DocumentPreflightAcceptedMessage),
     #[serde(rename = "TOKEN_USAGE")]
     TokenUsage(TokenUsageMessage),
     #[serde(rename = "WARNING")]
@@ -205,6 +226,21 @@ pub struct DocumentPreflightRequestMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct DocumentPreflightTimeoutMessage {
+    pub task_id: String,
+    pub preflight_request_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct DocumentPreflightAcceptedMessage {
+    pub task_id: String,
+    pub preflight_request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct TranslationSegment {
     pub segment_id: String,
     pub source_text: String,
@@ -238,6 +274,8 @@ pub struct WarningMessage {
     pub task_id: String,
     #[serde(default)]
     pub translation_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_request_id: Option<String>,
     pub code: String,
     pub message: String,
 }
@@ -354,10 +392,12 @@ pub fn decode_worker_message(line: &str) -> Result<WorkerToRustMessage, Protocol
 #[cfg(test)]
 mod tests {
     use super::{
-        CancelJobMessage, DocumentPreflightRequestMessage, DocumentPreflightResponseMessage,
-        FinishedMessage, JobStartedMessage, MAX_PROTOCOL_LINE_BYTES, PDF_WORKER_PROTOCOL_VERSION,
-        ProtocolError, ProtocolErrorPayload, RustToWorkerMessage, StartJobMessage, TokenUsage,
-        TokenUsageMessage, TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
+        CancelJobMessage, DocumentPreflightAcceptedMessage, DocumentPreflightActivityMessage,
+        DocumentPreflightActivityPhase, DocumentPreflightRequestMessage,
+        DocumentPreflightResponseMessage, DocumentPreflightTimeoutMessage, FinishedMessage,
+        JobStartedMessage, MAX_PROTOCOL_LINE_BYTES, PDF_WORKER_PROTOCOL_VERSION, ProtocolError,
+        ProtocolErrorPayload, RustToWorkerMessage, StartJobMessage, TokenUsage, TokenUsageMessage,
+        TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
         TranslationResponseOutcome, TranslationSegment, WarningMessage, WorkerToRustMessage,
         decode_rust_message, decode_worker_message, encode_rust_message, encode_worker_message,
     };
@@ -484,13 +524,51 @@ mod tests {
     }
 
     #[test]
+    fn preflight_activity_and_timeout_round_trip_with_request_identity() {
+        let activity =
+            RustToWorkerMessage::DocumentPreflightActivity(DocumentPreflightActivityMessage {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                phase: DocumentPreflightActivityPhase::Thinking,
+            });
+        let decoded_activity = decode_rust_message(
+            &encode_rust_message(&activity).expect("activity should serialize"),
+        )
+        .expect("activity should deserialize");
+        assert_eq!(decoded_activity, activity);
+
+        let timeout =
+            WorkerToRustMessage::DocumentPreflightTimeout(DocumentPreflightTimeoutMessage {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                reason: "no_response".to_string(),
+            });
+        let decoded_timeout = decode_worker_message(
+            &encode_worker_message(&timeout).expect("timeout should serialize"),
+        )
+        .expect("timeout should deserialize");
+        assert_eq!(decoded_timeout, timeout);
+
+        let accepted =
+            WorkerToRustMessage::DocumentPreflightAccepted(DocumentPreflightAcceptedMessage {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+            });
+        let decoded_accepted = decode_worker_message(
+            &encode_worker_message(&accepted).expect("accepted should serialize"),
+        )
+        .expect("accepted should deserialize");
+        assert_eq!(decoded_accepted, accepted);
+    }
+
+    #[test]
     fn optional_worker_fields_can_be_omitted() {
-        let line = r#"{"type":"JOB_STARTED","protocol_version":1,"task_id":"task-1"}"#;
+        let line = r#"{"type":"JOB_STARTED","protocol_version":2,"task_id":"task-1"}"#;
         let decoded = decode_worker_message(line).expect("optional fields should default");
         assert_eq!(
             decoded,
             WorkerToRustMessage::JobStarted(JobStartedMessage {
-                protocol_version: 1,
+                protocol_version: PDF_WORKER_PROTOCOL_VERSION,
                 task_id: "task-1".to_string(),
                 worker_version: None,
             })
@@ -545,10 +623,10 @@ mod tests {
 
     #[test]
     fn decoder_rejects_unknown_protocol_versions() {
-        let line = r#"{"type":"JOB_STARTED","protocol_version":2,"task_id":"task-1"}"#;
+        let line = r#"{"type":"JOB_STARTED","protocol_version":3,"task_id":"task-1"}"#;
         assert_eq!(
             decode_worker_message(line).expect_err("unknown protocol must be rejected"),
-            ProtocolError::UnsupportedProtocolVersion(2)
+            ProtocolError::UnsupportedProtocolVersion(3)
         );
     }
 
@@ -557,12 +635,24 @@ mod tests {
         let message = WorkerToRustMessage::Warning(WarningMessage {
             task_id: "task-1".to_string(),
             translation_request_id: Some("request-1".to_string()),
+            preflight_request_id: None,
             code: "placeholder_mismatch".to_string(),
             message: "占位符不匹配".to_string(),
         });
         let line = encode_worker_message(&message).expect("warning should serialize");
         assert!(line.contains("\"translation_request_id\""));
         assert!(!line.contains("translationRequestId"));
+
+        let preflight_warning = WorkerToRustMessage::Warning(WarningMessage {
+            task_id: "task-1".to_string(),
+            translation_request_id: None,
+            preflight_request_id: Some("preflight-1".to_string()),
+            code: "preflight_timeout".to_string(),
+            message: "预检无响应".to_string(),
+        });
+        let preflight_line =
+            encode_worker_message(&preflight_warning).expect("preflight warning should serialize");
+        assert!(preflight_line.contains("\"preflight_request_id\":\"preflight-1\""));
 
         let finished = WorkerToRustMessage::Finished(FinishedMessage {
             task_id: "task-1".to_string(),

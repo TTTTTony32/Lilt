@@ -15,6 +15,7 @@ from worker import (
     DocumentPreflightCoordinator,
     MAX_LINE_BYTES,
     LiltTranslator,
+    PREFLIGHT_TIMEOUT_SECONDS,
     ResponseRouter,
     WorkerCancelled,
     WorkerEngineUnavailable,
@@ -347,6 +348,183 @@ class DocumentPreflightTests(unittest.TestCase):
         thread.join(timeout=1)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result["value"], "你好")
+        self.assertEqual(warning["preflight_request_id"], preflight["preflight_request_id"])
+
+    def test_default_preflight_timeout_is_sixty_seconds(self):
+        self.assertEqual(PREFLIGHT_TIMEOUT_SECONDS, 60.0)
+
+    def test_no_response_timeout_notifies_rust_and_degrades(self):
+        emitted = []
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=threading.Event(),
+            timeout_seconds=0.1,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "state",
+                coordinator.ensure([{"segment_id": "p1-s1", "source_text": "hello"}]),
+            )
+        )
+        thread.start()
+        request = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result["state"].fallback)
+
+        timeout = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_TIMEOUT")
+        self.assertEqual(timeout["task_id"], "task-1")
+        self.assertEqual(timeout["preflight_request_id"], request["preflight_request_id"])
+        self.assertEqual(timeout["reason"], "no_response")
+        warning = self._wait_for_type(emitted, "WARNING")
+        self.assertEqual(warning["code"], "document_preflight_timeout")
+        self.assertEqual(warning["preflight_request_id"], request["preflight_request_id"])
+
+    def test_activity_disables_no_response_timeout_until_terminal_response(self):
+        emitted = []
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=threading.Event(),
+            timeout_seconds=0.1,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "state",
+                coordinator.ensure([{"segment_id": "p1-s1", "source_text": "hello"}]),
+            )
+        )
+        thread.start()
+        request = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        activity = {
+            "type": "DOCUMENT_PREFLIGHT_ACTIVITY",
+            "task_id": "task-1",
+            "preflight_request_id": request["preflight_request_id"],
+            "phase": "thinking",
+        }
+        coordinator.mark_activity(activity)
+        time.sleep(0.2)
+        self.assertTrue(thread.is_alive())
+        self.assertFalse(any(event["type"] == "DOCUMENT_PREFLIGHT_TIMEOUT" for event in emitted))
+
+        coordinator.mark_activity({**activity, "phase": "streaming"})
+        coordinator.resolve(
+            {
+                "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                "task_id": "task-1",
+                "preflight_request_id": request["preflight_request_id"],
+                "outcome": "completed",
+                "document_context": {"title": "A paper"},
+                "context_hash": "ctx-activity",
+                "warnings": [],
+                "error": None,
+            }
+        )
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["state"].document_context["title"], "A paper")
+        self.assertFalse(any(event["type"] == "DOCUMENT_PREFLIGHT_TIMEOUT" for event in emitted))
+
+    def test_late_activity_and_response_are_ignored_after_timeout(self):
+        emitted = []
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=threading.Event(),
+            timeout_seconds=0.1,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "state",
+                coordinator.ensure([{"segment_id": "p1-s1", "source_text": "hello"}]),
+            )
+        )
+        thread.start()
+        request = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        event_count = len(emitted)
+
+        late_response = {
+            "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+            "task_id": "task-1",
+            "preflight_request_id": request["preflight_request_id"],
+            "outcome": "completed",
+            "document_context": {"title": "late"},
+            "context_hash": "late-context",
+            "warnings": [],
+            "error": None,
+        }
+        coordinator.mark_activity(
+            {
+                "type": "DOCUMENT_PREFLIGHT_ACTIVITY",
+                "task_id": "task-1",
+                "preflight_request_id": request["preflight_request_id"],
+                "phase": "streaming",
+            }
+        )
+        coordinator.resolve(late_response)
+        coordinator.resolve(late_response)
+        self.assertEqual(len(emitted), event_count)
+        self.assertEqual(result["state"].document_context, {})
+        self.assertTrue(result["state"].fallback)
+
+    def test_worker_routes_preflight_activity_messages(self):
+        emitted = []
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=threading.Event(),
+            timeout_seconds=1,
+        )
+        worker = BabelDocWorker(emit=emitted.append)
+        worker._document_preflight = coordinator
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "state",
+                coordinator.ensure([{"segment_id": "p1-s1", "source_text": "hello"}]),
+            )
+        )
+        thread.start()
+        request = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        worker.handle(
+            {
+                "type": "DOCUMENT_PREFLIGHT_ACTIVITY",
+                "task_id": "task-1",
+                "preflight_request_id": request["preflight_request_id"],
+                "phase": "thinking",
+            }
+        )
+        worker.handle(
+            {
+                "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                "task_id": "task-1",
+                "preflight_request_id": request["preflight_request_id"],
+                "outcome": "completed",
+                "document_context": {},
+                "warnings": [],
+                "error": None,
+            }
+        )
+        accepted = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_ACCEPTED")
+        self.assertEqual(accepted["task_id"], "task-1")
+        self.assertEqual(accepted["preflight_request_id"], request["preflight_request_id"])
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result["state"].fallback)
 
     def test_preflight_wait_is_cancelled(self):
         emitted = []
@@ -383,7 +561,7 @@ class DocumentPreflightTests(unittest.TestCase):
 def _start_job_message(input_pdf: pathlib.Path, output_dir: pathlib.Path) -> dict:
     return {
         "type": "START_JOB",
-        "protocol_version": 1,
+        "protocol_version": 2,
         "task_id": "task-1",
         "input_pdf": str(input_pdf),
         "output_dir": str(output_dir),

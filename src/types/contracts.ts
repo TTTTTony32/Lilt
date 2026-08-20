@@ -375,7 +375,11 @@ export type PdfDocumentContext = DocumentContext;
 
 export type PdfPreflightStatus = "idle" | "running" | "completed" | "degraded" | "failed";
 
+export type PdfPreflightResponsePhase = "waiting" | "thinking" | "streaming";
+
 export interface PdfPreflightState {
+  requestId: string | null;
+  responsePhase: PdfPreflightResponsePhase | null;
   status: PdfPreflightStatus;
   schemaVersion: number | null;
   context: DocumentContext | null;
@@ -452,6 +456,7 @@ export type PdfJobEvent =
     taskId: string;
     code: string;
     message: string;
+    preflightRequestId?: string | null;
     diagnostic?: PdfQualityDiagnostic;
   } & PdfJobContextMetadata
   | {
@@ -484,24 +489,36 @@ export type PdfPreflightEvent =
   | {
     type: "preflightStarted";
     taskId: string;
+    preflightRequestId: string | null;
+    preflight: PdfPreflightState;
+    diagnostics?: PdfQualityDiagnostic[];
+  }
+  | {
+    type: "preflightActivity";
+    taskId: string;
+    preflightRequestId: string | null;
+    phase: Exclude<PdfPreflightResponsePhase, "waiting">;
     preflight: PdfPreflightState;
     diagnostics?: PdfQualityDiagnostic[];
   }
   | {
     type: "preflightCompleted";
     taskId: string;
+    preflightRequestId: string | null;
     preflight: PdfPreflightState;
     diagnostics?: PdfQualityDiagnostic[];
   }
   | {
     type: "preflightDegraded";
     taskId: string;
+    preflightRequestId: string | null;
     preflight: PdfPreflightState;
     diagnostics?: PdfQualityDiagnostic[];
   }
   | {
     type: "preflightFailed";
     taskId: string;
+    preflightRequestId: string | null;
     preflight: PdfPreflightState;
     diagnostics?: PdfQualityDiagnostic[];
   };
@@ -524,6 +541,7 @@ export const PDF_JOB_EVENT_NAMES = [
   "pdf_translation_cancelled",
   "pdf_translation_failed",
   "pdf_translation_preflight_started",
+  "pdf_translation_preflight_activity",
   "pdf_translation_preflight_completed",
   "pdf_translation_preflight_degraded",
   "pdf_translation_preflight_warning",
@@ -557,6 +575,13 @@ function optionalStringField(record: Record<string, unknown>, ...names: string[]
   if (raw === undefined || raw === null) return { valid: true, value: null };
   const value = stringValue(raw);
   return value === null ? { valid: false, value: null } : { valid: true, value };
+}
+
+function optionalNonEmptyStringField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: string | null } {
+  const result = optionalStringField(record, ...names);
+  return result.value !== null && result.value.trim().length === 0
+    ? { valid: false, value: null }
+    : result;
 }
 
 function optionalNonNegativeIntegerField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: number | null } {
@@ -855,6 +880,15 @@ function decodePdfPreflightStatus(value: unknown, fallback: PdfPreflightStatus):
   return fallback;
 }
 
+function decodePdfPreflightResponsePhase(value: unknown): PdfPreflightResponsePhase | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.toLowerCase();
+  if (normalized === "waiting" || normalized === "pending") return "waiting";
+  if (normalized === "thinking" || normalized === "reasoning") return "thinking";
+  if (normalized === "streaming" || normalized === "content" || normalized === "generating") return "streaming";
+  return null;
+}
+
 function decodePdfContextFromPayload(value: Record<string, unknown>): DocumentContext | null {
   const rawContext = readField(value, "documentContext", "document_context", "context");
   if (rawContext !== undefined && rawContext !== null) return decodeDocumentContext(rawContext);
@@ -877,6 +911,16 @@ export function decodePdfPreflightState(value: unknown, fallbackStatus: PdfPrefl
   const contextWasProvided = hasField(payload, "documentContext", "document_context", "context", "title", "abstract", "summary", "documentType", "document_type", "domain", "headings", "keyTerms", "key_terms", "abbreviations", "translationNotes", "translation_notes", "contextHash", "context_hash");
   if (contextWasProvided && context === null && readField(payload, "context", "documentContext", "document_context") !== null) return null;
 
+  const requestIdRaw = readField(payload, "preflightRequestId", "preflight_request_id", "requestId", "request_id")
+    ?? (payload === value ? undefined : readField(value, "preflightRequestId", "preflight_request_id", "requestId", "request_id"));
+  const requestId = requestIdRaw === undefined || requestIdRaw === null
+    ? { valid: true, value: null }
+    : optionalNonEmptyStringField({ requestId: requestIdRaw }, "requestId");
+  const responsePhaseRaw = readField(payload, "responsePhase", "response_phase", "activityPhase", "activity_phase");
+  const responsePhase = responsePhaseRaw === undefined || responsePhaseRaw === null
+    ? null
+    : decodePdfPreflightResponsePhase(responsePhaseRaw);
+
   const schemaVersionRaw = readField(payload, "schemaVersion", "schema_version");
   const schemaVersion = schemaVersionRaw === undefined || schemaVersionRaw === null
     ? context?.schemaVersion ?? null
@@ -890,6 +934,8 @@ export function decodePdfPreflightState(value: unknown, fallbackStatus: PdfPrefl
   const degraded = readField(payload, "degraded", "fallback");
   if (
     (schemaVersionRaw !== undefined && schemaVersion === null) ||
+    !requestId.valid ||
+    (responsePhaseRaw !== undefined && responsePhaseRaw !== null && responsePhase === null) ||
     !contextHash.valid ||
     warnings === null ||
     !message.valid ||
@@ -902,6 +948,8 @@ export function decodePdfPreflightState(value: unknown, fallbackStatus: PdfPrefl
     : context;
   const isDegraded = degraded === true || status === "degraded";
   return {
+    requestId: requestId.value,
+    responsePhase,
     status: isDegraded ? "degraded" : status,
     schemaVersion,
     context: normalizedContext,
@@ -975,7 +1023,12 @@ export function decodePdfPreflightEvent(name: string, value: unknown): PdfPrefli
   const taskId = nonEmptyString(readField(value, "taskId", "task_id"));
   if (taskId === null) return null;
 
-  const eventType = name.includes("started")
+  const requestIdField = optionalNonEmptyStringField(value, "preflightRequestId", "preflight_request_id", "requestId", "request_id");
+  if (!requestIdField.valid) return null;
+
+  const eventType = name.includes("activity")
+    ? "preflightActivity"
+    : name.includes("started")
     ? "preflightStarted"
     : name.includes("completed")
       ? "preflightCompleted"
@@ -987,6 +1040,8 @@ export function decodePdfPreflightEvent(name: string, value: unknown): PdfPrefli
   if (eventType === null) return null;
   const fallbackStatus = eventType === "preflightStarted"
     ? "running"
+    : eventType === "preflightActivity"
+      ? "running"
     : eventType === "preflightCompleted"
       ? "completed"
       : eventType === "preflightDegraded"
@@ -994,17 +1049,65 @@ export function decodePdfPreflightEvent(name: string, value: unknown): PdfPrefli
         : "failed";
   const preflight = decodePdfPreflightState(value, fallbackStatus);
   if (preflight === null) return null;
+  const preflightRequestId = requestIdField.value ?? preflight.requestId;
+  if (requestIdField.value !== null && preflight.requestId !== null && requestIdField.value !== preflight.requestId) return null;
+
+  let normalizedPreflight: PdfPreflightState = {
+    ...preflight,
+    requestId: preflightRequestId,
+    responsePhase: null,
+  };
+  if (eventType === "preflightStarted") {
+    normalizedPreflight = { ...normalizedPreflight, status: "running", responsePhase: "waiting" };
+  } else if (eventType === "preflightActivity") {
+    const phase = decodePdfPreflightResponsePhase(readField(value, "phase", "responsePhase", "response_phase"));
+    if (phase === null || phase === "waiting") return null;
+    normalizedPreflight = { ...normalizedPreflight, status: "running", responsePhase: phase };
+  } else {
+    normalizedPreflight = {
+      ...normalizedPreflight,
+      status: eventType === "preflightCompleted"
+        ? normalizedPreflight.status === "degraded" ? "degraded" : "completed"
+        : eventType === "preflightDegraded" ? "degraded" : "failed",
+      responsePhase: null,
+    };
+  }
   const rawDiagnostics = readField(value, "diagnostics", "qualityDiagnostics", "quality_diagnostics");
   const diagnostics = rawDiagnostics === undefined || rawDiagnostics === null
     ? undefined
     : Array.isArray(rawDiagnostics) ? rawDiagnostics.map(decodePdfQualityDiagnostic) : null;
   if (diagnostics === null || diagnostics?.some((diagnostic) => diagnostic === null)) return null;
-  const normalizedEventType: PdfPreflightEvent["type"] = eventType === "preflightCompleted" && preflight.status === "degraded"
+  const normalizedEventType: PdfPreflightEvent["type"] = eventType === "preflightCompleted" && normalizedPreflight.status === "degraded"
     ? "preflightDegraded"
     : eventType;
+  const base = {
+    taskId,
+    preflightRequestId,
+    preflight: normalizedPreflight,
+  } as const;
+  if (normalizedEventType === "preflightActivity") {
+    return diagnostics === undefined
+      ? { ...base, type: "preflightActivity", phase: normalizedPreflight.responsePhase as Exclude<PdfPreflightResponsePhase, "waiting"> }
+      : { ...base, type: "preflightActivity", phase: normalizedPreflight.responsePhase as Exclude<PdfPreflightResponsePhase, "waiting">, diagnostics: diagnostics as PdfQualityDiagnostic[] };
+  }
+  if (normalizedEventType === "preflightStarted") {
+    return diagnostics === undefined
+      ? { ...base, type: "preflightStarted" }
+      : { ...base, type: "preflightStarted", diagnostics: diagnostics as PdfQualityDiagnostic[] };
+  }
+  if (normalizedEventType === "preflightCompleted") {
+    return diagnostics === undefined
+      ? { ...base, type: "preflightCompleted" }
+      : { ...base, type: "preflightCompleted", diagnostics: diagnostics as PdfQualityDiagnostic[] };
+  }
+  if (normalizedEventType === "preflightDegraded") {
+    return diagnostics === undefined
+      ? { ...base, type: "preflightDegraded" }
+      : { ...base, type: "preflightDegraded", diagnostics: diagnostics as PdfQualityDiagnostic[] };
+  }
   return diagnostics === undefined
-    ? { type: normalizedEventType, taskId, preflight }
-    : { type: normalizedEventType, taskId, preflight, diagnostics: diagnostics as PdfQualityDiagnostic[] };
+    ? { ...base, type: "preflightFailed" }
+    : { ...base, type: "preflightFailed", diagnostics: diagnostics as PdfQualityDiagnostic[] };
 }
 
 export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | null {
@@ -1050,6 +1153,11 @@ export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | n
     const code = nonEmptyString(readField(value, "code"));
     const message = nonEmptyString(readField(value, "message"));
     if (code === null || message === null) return null;
+    const preflightRequestIdField = optionalNonEmptyStringField(value, "preflightRequestId", "preflight_request_id");
+    if (!preflightRequestIdField.valid) return null;
+    const preflightRequestMetadata = hasField(value, "preflightRequestId", "preflight_request_id")
+      ? { preflightRequestId: preflightRequestIdField.value }
+      : {};
     const rawDiagnostic = readField(value, "diagnostic", "qualityDiagnostic", "quality_diagnostic");
     const diagnostic = rawDiagnostic === undefined
       ? hasField(value, "severity", "level") ? decodePdfQualityDiagnostic(value) : undefined
@@ -1057,8 +1165,8 @@ export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | n
     return rawDiagnostic !== undefined && diagnostic === null || diagnostic === null
       ? null
       : diagnostic
-        ? { type: "warning", taskId, code, message, diagnostic, ...metadata }
-        : { type: "warning", taskId, code, message, ...metadata };
+        ? { type: "warning", taskId, code, message, diagnostic, ...preflightRequestMetadata, ...metadata }
+        : { type: "warning", taskId, code, message, ...preflightRequestMetadata, ...metadata };
   }
 
   if (name === "pdf_translation_finished") {

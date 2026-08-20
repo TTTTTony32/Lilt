@@ -8,6 +8,13 @@ import { invokeCommand, listenTo } from "./lib/tauri";
 import type { ResourceDownloadPromptRequest } from "./lib/download-activity";
 import { PdfEnginePanel } from "./PdfEnginePanel";
 import {
+  createEmptyPdfPreflightState,
+  markPdfPreflightRunning,
+  mergePdfPreflightState,
+  reducePdfPreflightEvent,
+  reducePdfPreflightWarning,
+} from "./lib/pdf-preflight";
+import {
   PDF_ENGINE_EVENT_NAMES,
   PDF_JOB_EVENT_NAMES,
   decodePdfEngineEvent,
@@ -15,8 +22,6 @@ import {
   decodePdfJobEvent,
   decodePdfTranslationCancelResult,
   decodePdfTranslationStartResult,
-  type PdfPreflightEvent,
-  type PdfPreflightState,
   type PdfQualityDiagnostic,
   type PdfEngineEvent,
   type PdfEngineProgress,
@@ -34,18 +39,6 @@ const PDF_ENGINE_PREPARE_TIMEOUT_MS = 600_000;
 const PDF_TRANSLATION_START_TIMEOUT_MS = 30_000;
 const PDF_TRANSLATION_CANCEL_TIMEOUT_MS = 10_000;
 
-function emptyPdfPreflight(): PdfPreflightState {
-  return {
-    status: "idle",
-    schemaVersion: null,
-    context: null,
-    contextHash: null,
-    warnings: [],
-    applied: false,
-    message: null,
-  };
-}
-
 function emptyPdfJob(): PdfJobUiState {
   return {
     taskId: null,
@@ -60,7 +53,7 @@ function emptyPdfJob(): PdfJobUiState {
     tokenUsage: null,
     code: null,
     message: null,
-    preflight: emptyPdfPreflight(),
+    preflight: createEmptyPdfPreflightState(),
     documentContext: null,
     diagnostics: [],
   };
@@ -92,53 +85,17 @@ function appendUniqueDiagnostics(current: PdfQualityDiagnostic[], additions: Pdf
 
 function mergePdfJobEventMetadata(current: PdfJobUiState, event: PdfJobEvent): PdfJobUiState {
   let next = current;
-  if ("preflight" in event && event.preflight) {
-    next = {
-      ...next,
-      preflight: event.preflight,
-      documentContext: event.preflight.context ?? next.documentContext ?? null,
-      warnings: appendUniqueStrings(next.warnings, event.preflight.warnings),
-    };
+  const hasPreflightMetadata = "preflight" in event && Boolean(event.preflight);
+  if (hasPreflightMetadata) {
+    next = mergePdfPreflightState(next, event.preflight!);
   }
-  if ("documentContext" in event && event.documentContext) {
+  if ("documentContext" in event && event.documentContext && (!hasPreflightMetadata || next !== current)) {
     next = { ...next, documentContext: event.documentContext };
   }
-  if ("diagnostics" in event && event.diagnostics) {
+  if ("diagnostics" in event && event.diagnostics && (!hasPreflightMetadata || next !== current)) {
     next = { ...next, diagnostics: appendUniqueDiagnostics(next.diagnostics ?? [], event.diagnostics) };
   }
   return next;
-}
-
-function mergePdfPreflight(current: PdfJobUiState, event: PdfPreflightEvent): PdfJobUiState {
-  const withMetadata = mergePdfJobEventMetadata({
-    ...current,
-    taskId: event.taskId,
-    preflight: event.preflight,
-    documentContext: event.preflight.context ?? current.documentContext ?? null,
-    warnings: appendUniqueStrings(current.warnings, event.preflight.warnings),
-  }, event);
-  const message = event.preflight.message;
-  return message && event.preflight.status !== "running"
-    ? { ...withMetadata, warnings: appendUniqueStrings(withMetadata.warnings, [message]) }
-    : withMetadata;
-}
-
-function mergePdfPreflightWarning(current: PdfJobUiState, code: string, message: string): PdfJobUiState {
-  if (!code.toLowerCase().includes("preflight")) return current;
-  const preflight = current.preflight ?? emptyPdfPreflight();
-  const failed = code.toLowerCase().includes("failed") || code.toLowerCase().includes("error");
-  const status = failed ? "failed" : "degraded";
-  return {
-    ...current,
-    preflight: {
-      ...preflight,
-      status,
-      message,
-      applied: preflight.applied && !failed,
-      warnings: appendUniqueStrings(preflight.warnings, [message]),
-    },
-    warnings: appendUniqueStrings(current.warnings, [message]),
-  };
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -470,10 +427,11 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
     if (disposedRef.current || !matchesPdfTask(event.taskId)) return;
     switch (event.type) {
       case "preflightStarted":
+      case "preflightActivity":
       case "preflightCompleted":
       case "preflightDegraded":
       case "preflightFailed":
-        updatePdfJob((current) => mergePdfPreflight(current, event));
+        updatePdfJob((current) => reducePdfPreflightEvent(current, event));
         break;
       case "diagnostic":
         updatePdfJob((current) => mergePdfJobEventMetadata({
@@ -501,10 +459,7 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
             stage: event.stage,
             message: null,
           }, event);
-          const preflight = next.preflight ?? emptyPdfPreflight();
-          return /preflight/i.test(event.stage) && preflight.status === "idle"
-            ? { ...next, preflight: { ...preflight, status: "running", message: null } }
-            : next;
+          return /preflight/i.test(event.stage) ? markPdfPreflightRunning(next) : next;
         });
         break;
       case "progress":
@@ -517,25 +472,24 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
             progress: event.progress,
             message: event.progress.message ?? current.message,
           }, event);
-          const preflight = next.preflight ?? emptyPdfPreflight();
-          return /preflight/i.test(event.progress.stage) && preflight.status === "idle"
-            ? { ...next, preflight: { ...preflight, status: "running", message: null } }
-            : next;
+          return /preflight/i.test(event.progress.stage) ? markPdfPreflightRunning(next) : next;
         });
         break;
       case "tokenUsage":
         updatePdfJob((current) => mergePdfJobEventMetadata({ ...current, tokenUsage: event.usage }, event));
         break;
       case "warning":
-        updatePdfJob((current) => {
-          const next = mergePdfPreflightWarning(mergePdfJobEventMetadata({
-            ...current,
-            warnings: appendUniqueStrings(current.warnings, [event.message]),
-          }, event), event.code, event.message);
-          return event.diagnostic
-            ? { ...next, diagnostics: appendUniqueDiagnostics(next.diagnostics ?? [], [event.diagnostic]) }
-            : next;
-        });
+        updatePdfJob((current) => event.code.toLowerCase().includes("preflight")
+          ? reducePdfPreflightWarning(current, event)
+          : (() => {
+            const next = mergePdfJobEventMetadata({
+              ...current,
+              warnings: appendUniqueStrings(current.warnings, [event.message]),
+            }, event);
+            return event.diagnostic
+              ? { ...next, diagnostics: appendUniqueDiagnostics(next.diagnostics ?? [], [event.diagnostic]) }
+              : next;
+          })());
         break;
       case "finished": {
         clearPdfTaskRefs();
@@ -575,18 +529,23 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
       case "failed":
         clearPdfTaskRefs();
         updatePdfJob((current) => {
+          const preflightState = event.code.toLowerCase().includes("preflight")
+            ? reducePdfPreflightWarning(current, {
+              type: "warning",
+              taskId: event.taskId,
+              code: event.code,
+              message: event.message,
+            })
+            : current;
           const next = mergePdfJobEventMetadata({
-            ...current,
+            ...preflightState,
             taskId: event.taskId,
             status: "failed",
             code: event.code,
             message: event.message,
             outputPdf: null,
           }, event);
-          const preflight = next.preflight ?? emptyPdfPreflight();
-          return event.code.toLowerCase().includes("preflight")
-            ? { ...next, preflight: { ...preflight, status: "failed", message: event.message, applied: false }, warnings: appendUniqueStrings(next.warnings, [event.message]) }
-            : next;
+          return next;
         });
         break;
     }

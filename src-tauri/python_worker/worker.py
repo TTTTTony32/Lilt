@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAX_LINE_BYTES = 8 * 1024 * 1024
 ENGINE_VERSION = "babeldoc-0.6.4"
 PREFLIGHT_MAX_SAMPLES = 8
@@ -31,7 +31,7 @@ PREFLIGHT_MAX_SAMPLE_CHARS = 12_000
 PREFLIGHT_MAX_CONTEXT_SEGMENTS = 3
 PREFLIGHT_MAX_CONTEXT_CHARS = 4_000
 PREFLIGHT_MAX_CONSTRAINT_ITEMS = 64
-PREFLIGHT_TIMEOUT_SECONDS = 5.0
+PREFLIGHT_TIMEOUT_SECONDS = 60.0
 TASK_CONSTRAINT_MIN_CONFIDENCE = 0.6
 
 logger = logging.getLogger("lilt.pdf_worker")
@@ -226,6 +226,13 @@ class DocumentPreflightResponse:
     degraded: bool = False
 
 
+@dataclass
+class _PendingPreflightRequest:
+    response_queue: queue.Queue[DocumentPreflightResponse]
+    response_started: bool = False
+    terminal: bool = False
+
+
 class DocumentPreflightCoordinator:
     """Coordinate one optional preflight exchange for the current PDF task.
 
@@ -264,7 +271,7 @@ class DocumentPreflightCoordinator:
         self._timeout_seconds = max(0.1, min(float(timeout_seconds), 60.0))
         self._on_state = on_state
         self._pending_lock = threading.Lock()
-        self._pending: dict[str, queue.Queue[DocumentPreflightResponse]] = {}
+        self._pending: dict[str, _PendingPreflightRequest] = {}
         self._ensure_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._initialized = False
@@ -290,7 +297,7 @@ class DocumentPreflightCoordinator:
             request_id = str(uuid.uuid4())
             response_queue: queue.Queue[DocumentPreflightResponse] = queue.Queue(maxsize=1)
             with self._pending_lock:
-                self._pending[request_id] = response_queue
+                self._pending[request_id] = _PendingPreflightRequest(response_queue)
             request = {
                 "type": "DOCUMENT_PREFLIGHT_REQUEST",
                 "task_id": self.task_id,
@@ -309,32 +316,58 @@ class DocumentPreflightCoordinator:
                 with self._pending_lock:
                     self._pending.pop(request_id, None)
                 return self._finish_fallback(
-                    f"发送文档预检请求失败：{str(exc).splitlines()[0][:300]}"
+                    f"发送文档预检请求失败：{str(exc).splitlines()[0][:300]}",
+                    preflight_request_id=request_id,
                 )
 
             expires_at = time.monotonic() + self._timeout_seconds
             try:
                 while True:
                     if self._cancel_event.is_set():
+                        self._terminate(request_id)
                         raise WorkerCancelled("用户取消了 PDF 翻译")
-                    remaining = expires_at - time.monotonic()
-                    if remaining <= 0:
-                        return self._finish_fallback("文档预检响应超时，已使用空上下文继续翻译")
+
+                    with self._pending_lock:
+                        pending = self._pending.get(request_id)
+                        response_started = (
+                            pending is not None
+                            and (pending.response_started or pending.terminal)
+                        )
+                    if response_started:
+                        wait_timeout = 0.1
+                    else:
+                        remaining = expires_at - time.monotonic()
+                        if remaining <= 0:
+                            if self._mark_timeout(request_id):
+                                self._emit_timeout(request_id)
+                                return self._finish_fallback(
+                                    "文档预检响应超时，已使用空上下文继续翻译",
+                                    preflight_request_id=request_id,
+                                    warning_code="document_preflight_timeout",
+                                )
+                            continue
+                        wait_timeout = min(0.1, remaining)
                     try:
-                        response = response_queue.get(timeout=min(0.1, remaining))
+                        response = response_queue.get(timeout=wait_timeout)
                     except queue.Empty:
                         continue
                     if response.outcome == "cancelled":
                         raise WorkerCancelled("Rust 文档预检已取消")
                     if response.outcome != "completed":
                         error_message = _preflight_error_message(response)
-                        return self._finish_fallback(error_message)
+                        return self._finish_fallback(
+                            error_message,
+                            preflight_request_id=request_id,
+                        )
                     if (
                         not response.context_valid
                         or not isinstance(response.document_context, dict)
                     ):
-                        return self._finish_fallback("文档预检响应缺少有效的 document_context")
-                    return self._finish_response(response)
+                        return self._finish_fallback(
+                            "文档预检响应缺少有效的 document_context",
+                            preflight_request_id=request_id,
+                        )
+                    return self._finish_response(response, preflight_request_id=request_id)
             finally:
                 with self._pending_lock:
                     self._pending.pop(request_id, None)
@@ -345,22 +378,97 @@ class DocumentPreflightCoordinator:
         request_id = message.get("preflight_request_id")
         if not isinstance(request_id, str) or not request_id:
             raise WorkerProtocolError("DOCUMENT_PREFLIGHT_RESPONSE 缺少 preflight_request_id")
+        accepted = False
         with self._pending_lock:
-            response_queue = self._pending.get(request_id)
-        if response_queue is None:
-            # A late response after the bounded fallback is harmless and must
-            # not turn a recoverable preflight timeout into a failed PDF job.
-            return
-        response = _document_preflight_response(message)
-        try:
-            response_queue.put_nowait(response)
-        except queue.Full:
-            return
+            pending = self._pending.get(request_id)
+            if pending is None or pending.terminal:
+                # A late response after the bounded fallback, cancellation, or
+                # an already accepted terminal response is harmless and must
+                # not turn a recoverable preflight result into a failed PDF job.
+                return
+            response = _document_preflight_response(message)
+            try:
+                pending.response_queue.put_nowait(response)
+            except queue.Full:
+                return
+            pending.terminal = True
+            accepted = True
+        if accepted:
+            try:
+                self._emit(
+                    {
+                        "type": "DOCUMENT_PREFLIGHT_ACCEPTED",
+                        "task_id": self.task_id,
+                        "preflight_request_id": request_id,
+                    }
+                )
+            except Exception:  # noqa: BLE001 - acceptance must not block Worker progress
+                logger.exception("Unable to emit document preflight acceptance")
 
-    def _finish_response(self, response: DocumentPreflightResponse) -> DocumentContextState:
+    def mark_activity(self, message: dict[str, Any]) -> None:
+        if message.get("task_id") != self.task_id:
+            raise WorkerProtocolError(
+                "DOCUMENT_PREFLIGHT_ACTIVITY 的 task_id 与当前任务不匹配"
+            )
+        request_id = message.get("preflight_request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise WorkerProtocolError("DOCUMENT_PREFLIGHT_ACTIVITY 缺少 preflight_request_id")
+        phase = message.get("phase")
+        with self._pending_lock:
+            pending = self._pending.get(request_id)
+            if pending is None or pending.terminal:
+                # Activity can arrive after timeout, cancellation, or a
+                # terminal response. It must not reopen that request.
+                return
+            if not isinstance(phase, str) or phase not in {"thinking", "streaming"}:
+                raise WorkerProtocolError(
+                    "DOCUMENT_PREFLIGHT_ACTIVITY 的 phase 必须是 thinking 或 streaming"
+                )
+            pending.response_started = True
+
+    def _terminate(self, request_id: str) -> bool:
+        with self._pending_lock:
+            pending = self._pending.get(request_id)
+            if pending is None or pending.terminal:
+                return False
+            pending.terminal = True
+            self._pending.pop(request_id, None)
+            return True
+
+    def _mark_timeout(self, request_id: str) -> bool:
+        with self._pending_lock:
+            pending = self._pending.get(request_id)
+            if pending is None or pending.terminal or pending.response_started:
+                return False
+            pending.terminal = True
+            self._pending.pop(request_id, None)
+            return True
+
+    def _emit_timeout(self, request_id: str) -> None:
+        try:
+            self._emit(
+                {
+                    "type": "DOCUMENT_PREFLIGHT_TIMEOUT",
+                    "task_id": self.task_id,
+                    "preflight_request_id": request_id,
+                    "reason": "no_response",
+                }
+            )
+        except Exception:  # noqa: BLE001 - timeout fallback must still proceed
+            logger.exception("Unable to emit document preflight timeout")
+
+    def _finish_response(
+        self,
+        response: DocumentPreflightResponse,
+        *,
+        preflight_request_id: str | None = None,
+    ) -> DocumentContextState:
         context = _sanitize_json_value(response.document_context)
         if not isinstance(context, dict):
-            return self._finish_fallback("文档预检响应的 document_context 无法序列化")
+            return self._finish_fallback(
+                "文档预检响应的 document_context 无法序列化",
+                preflight_request_id=preflight_request_id,
+            )
         if response.context_hash:
             context["context_hash"] = response.context_hash
         task_terms = response.task_terms or _list_field(context, "task_terms")
@@ -384,10 +492,20 @@ class DocumentPreflightCoordinator:
         )
         self._set_state(state)
         for warning in state.warnings:
-            self._emit_warning("document_preflight_warning", warning)
+            self._emit_warning(
+                "document_preflight_warning",
+                warning,
+                preflight_request_id=preflight_request_id,
+            )
         return self.state
 
-    def _finish_fallback(self, message: str) -> DocumentContextState:
+    def _finish_fallback(
+        self,
+        message: str,
+        *,
+        preflight_request_id: str | None = None,
+        warning_code: str = "document_preflight_failed",
+    ) -> DocumentContextState:
         state = DocumentContextState(
             document_context={},
             context_hash=None,
@@ -399,7 +517,11 @@ class DocumentPreflightCoordinator:
             fallback=True,
         )
         self._set_state(state)
-        self._emit_warning("document_preflight_failed", message)
+        self._emit_warning(
+            warning_code,
+            message,
+            preflight_request_id=preflight_request_id,
+        )
         return self.state
 
     def _set_state(self, state: DocumentContextState) -> None:
@@ -409,16 +531,23 @@ class DocumentPreflightCoordinator:
         if self._on_state is not None:
             self._on_state(copy.deepcopy(state))
 
-    def _emit_warning(self, code: str, message: str) -> None:
+    def _emit_warning(
+        self,
+        code: str,
+        message: str,
+        *,
+        preflight_request_id: str | None = None,
+    ) -> None:
         try:
-            self._emit(
-                {
-                    "type": "WARNING",
-                    "task_id": self.task_id,
-                    "code": code,
-                    "message": message[:500],
-                }
-            )
+            warning = {
+                "type": "WARNING",
+                "task_id": self.task_id,
+                "code": code,
+                "message": message[:500],
+            }
+            if preflight_request_id:
+                warning["preflight_request_id"] = preflight_request_id
+            self._emit(warning)
         except Exception:  # noqa: BLE001 - warning must not block translation
             logger.exception("Unable to emit document preflight warning")
 
@@ -648,6 +777,11 @@ class BabelDocWorker:
             if self._document_preflight is None:
                 raise WorkerProtocolError("当前任务没有等待中的文档预检")
             self._document_preflight.resolve(message)
+            return
+        if message_type == "DOCUMENT_PREFLIGHT_ACTIVITY":
+            if self._document_preflight is None:
+                raise WorkerProtocolError("当前任务没有等待中的文档预检")
+            self._document_preflight.mark_activity(message)
             return
         raise WorkerProtocolError(f"未知的 Rust → Worker 消息类型：{message_type}")
 

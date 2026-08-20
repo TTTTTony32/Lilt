@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn reader_routes_valid_worker_messages() {
-        let input = br#"{"type":"JOB_STARTED","protocol_version":1,"task_id":"task-1"}
+        let input = br#"{"type":"JOB_STARTED","protocol_version":2,"task_id":"task-1"}
 {"type":"STAGE_CHANGED","task_id":"task-1","stage":"parse"}
 "#;
         let (events_tx, events_rx) = mpsc::channel();
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn reader_rejects_a_mismatched_started_task() {
-        let input = br#"{"type":"JOB_STARTED","protocol_version":1,"task_id":"other-task"}
+        let input = br#"{"type":"JOB_STARTED","protocol_version":2,"task_id":"other-task"}
 "#;
         let (events_tx, events_rx) = mpsc::channel();
         read_loop(Cursor::new(input), events_tx, "task-1".to_string());

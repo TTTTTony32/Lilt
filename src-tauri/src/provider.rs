@@ -61,6 +61,12 @@ pub struct ProviderStreamResult {
     pub token_usage: Option<crate::pdf_protocol::TokenUsage>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderStreamActivity {
+    Thinking,
+    Content,
+}
+
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>, ProviderError> {
     let endpoint = endpoint(base_url, "models")?;
     let started_at = Instant::now();
@@ -120,10 +126,22 @@ fn parse_model_payload(payload: &Value) -> Result<Vec<ModelInfo>, ProviderError>
 
 pub async fn stream_chat_completion_with_usage<F>(
     request: ChatStreamRequest<'_>,
-    mut on_delta: F,
+    on_delta: F,
 ) -> Result<ProviderStreamResult, ProviderError>
 where
     F: FnMut(String) -> Result<(), ProviderError>,
+{
+    stream_chat_completion_with_usage_and_activity(request, on_delta, |_| {}).await
+}
+
+pub async fn stream_chat_completion_with_usage_and_activity<F, A>(
+    request: ChatStreamRequest<'_>,
+    mut on_delta: F,
+    mut on_activity: A,
+) -> Result<ProviderStreamResult, ProviderError>
+where
+    F: FnMut(String) -> Result<(), ProviderError>,
+    A: FnMut(ProviderStreamActivity),
 {
     let endpoint = endpoint(request.base_url, "chat/completions")?;
     let mut attempt = 0;
@@ -137,7 +155,15 @@ where
             safe_endpoint_origin(&endpoint),
             request.model_id
         ));
-        match stream_once(&request, &endpoint, &mut started, &mut on_delta).await {
+        match stream_once(
+            &request,
+            &endpoint,
+            &mut started,
+            &mut on_delta,
+            &mut on_activity,
+        )
+        .await
+        {
             Ok(result) => {
                 diagnostics::info(format!(
                     "provider.{}.completed request_id={} attempt={} output_chars={}",
@@ -171,6 +197,7 @@ async fn stream_once(
     endpoint: &str,
     started: &mut bool,
     on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
+    on_activity: &mut impl FnMut(ProviderStreamActivity),
 ) -> Result<ProviderStreamResult, ProviderError> {
     if request.cancel.is_cancelled() {
         return Err(ProviderError::Cancelled);
@@ -214,11 +241,16 @@ async fn stream_once(
             if let Some(usage) = parsed.token_usage {
                 token_usage = Some(usage);
             }
+            for activity in parsed.activities {
+                *started = true;
+                on_activity(activity);
+            }
             if let Some(content) = parsed.content {
                 if content.is_empty() {
                     continue;
                 }
                 *started = true;
+                on_activity(ProviderStreamActivity::Content);
                 translated.push_str(&content);
                 on_delta(content)?;
             }
@@ -229,9 +261,14 @@ async fn stream_once(
         if let Some(usage) = parsed.token_usage {
             token_usage = Some(usage);
         }
+        for activity in parsed.activities {
+            *started = true;
+            on_activity(activity);
+        }
         if let Some(content) = parsed.content {
             if !content.is_empty() {
                 *started = true;
+                on_activity(ProviderStreamActivity::Content);
                 translated.push_str(&content);
                 on_delta(content)?;
             }
@@ -267,6 +304,7 @@ fn parse_sse_line(line: &str) -> Result<Option<String>, ProviderError> {
 struct ParsedSseLine {
     content: Option<String>,
     token_usage: Option<crate::pdf_protocol::TokenUsage>,
+    activities: Vec<ProviderStreamActivity>,
 }
 
 fn parse_sse_details(line: &str) -> Result<ParsedSseLine, ProviderError> {
@@ -274,6 +312,7 @@ fn parse_sse_details(line: &str) -> Result<ParsedSseLine, ProviderError> {
         return Ok(ParsedSseLine {
             content: None,
             token_usage: None,
+            activities: Vec::new(),
         });
     };
     let payload = payload.trim();
@@ -281,37 +320,67 @@ fn parse_sse_details(line: &str) -> Result<ParsedSseLine, ProviderError> {
         return Ok(ParsedSseLine {
             content: None,
             token_usage: None,
+            activities: Vec::new(),
         });
     }
     let value: Value = serde_json::from_str(payload)
         .map_err(|error| ProviderError::Protocol(format!("JSON 解析失败：{error}")))?;
     let token_usage = value.get("usage").and_then(parse_token_usage);
-    let content = value
+    let delta = value
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")))
-        .and_then(|delta| delta.get("content"));
-    match content {
-        Some(Value::String(text)) => Ok(ParsedSseLine {
-            content: Some(text.clone()),
-            token_usage,
-        }),
-        Some(Value::Array(parts)) => {
-            let text = parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<String>();
-            Ok(ParsedSseLine {
-                content: Some(text),
-                token_usage,
-            })
-        }
-        Some(_) | None => Ok(ParsedSseLine {
+        .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")));
+
+    let Some(delta) = delta else {
+        return Ok(ParsedSseLine {
             content: None,
             token_usage,
-        }),
+            activities: Vec::new(),
+        });
+    };
+
+    let mut activities = Vec::new();
+    for field in ["reasoning_content", "reasoning", "thinking"] {
+        if delta.get(field).and_then(non_empty_stream_text).is_some()
+            && !activities.contains(&ProviderStreamActivity::Thinking)
+        {
+            activities.push(ProviderStreamActivity::Thinking);
+        }
     }
+    let content = delta.get("content").and_then(stream_text);
+    Ok(ParsedSseLine {
+        content,
+        token_usage,
+        activities,
+    })
+}
+
+fn stream_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    part.as_str()
+                        .or_else(|| part.get("text").and_then(Value::as_str))
+                        .or_else(|| part.get("content").and_then(Value::as_str))
+                })
+                .collect::<String>();
+            Some(text)
+        }
+        Value::Object(object) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn non_empty_stream_text(value: &Value) -> Option<String> {
+    stream_text(value).filter(|text| !text.is_empty())
 }
 
 fn parse_token_usage(value: &Value) -> Option<crate::pdf_protocol::TokenUsage> {
@@ -394,8 +463,9 @@ fn ensure_success(response: &reqwest::Response) -> Result<(), ProviderError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatStreamRequest, ProviderError, normalize_base_url, parse_model_payload,
-        parse_sse_details, parse_sse_line, stream_chat_completion_with_usage,
+        ChatStreamRequest, ProviderError, ProviderStreamActivity, normalize_base_url,
+        parse_model_payload, parse_sse_details, parse_sse_line, stream_chat_completion_with_usage,
+        stream_chat_completion_with_usage_and_activity,
     };
     use crate::contracts::ThinkingEffort;
     use serde_json::json;
@@ -543,6 +613,63 @@ mod tests {
         assert_eq!(deltas, vec!["本地", " Provider"]);
     }
 
+    #[tokio::test]
+    async fn reports_reasoning_and_content_activity_without_changing_deltas() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先分析\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"结果\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut activities = Vec::new();
+        let mut deltas = Vec::new();
+        let result = stream_chat_completion_with_usage_and_activity(
+            ChatStreamRequest {
+                request_id: "preflight-1",
+                base_url: &format!("http://{address}/v1"),
+                api_key: "test-key",
+                model_id: "stub-model",
+                system_prompt: "system",
+                user_text: "hello",
+                cancel: &cancellation,
+                operation: "pdf_preflight",
+                thinking_effort: &ThinkingEffort::None,
+            },
+            |delta| {
+                deltas.push(delta);
+                Ok(())
+            },
+            |activity| activities.push(activity),
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(result.content, "结果");
+        assert_eq!(deltas, vec!["结果"]);
+        assert_eq!(
+            activities,
+            vec![
+                ProviderStreamActivity::Thinking,
+                ProviderStreamActivity::Content
+            ]
+        );
+    }
+
     #[test]
     fn parses_openai_stream_delta() {
         assert_eq!(
@@ -571,6 +698,25 @@ mod tests {
                 total_tokens: Some(11),
             })
         );
+    }
+
+    #[test]
+    fn parses_reasoning_fields_as_thinking_activity_without_leaking_text() {
+        let frame =
+            parse_sse_details(r#"data: {"choices":[{"delta":{"reasoning_content":"先分析"}}]}"#)
+                .unwrap();
+        assert!(frame.content.is_none());
+        assert_eq!(frame.activities, vec![ProviderStreamActivity::Thinking]);
+    }
+
+    #[test]
+    fn parses_reasoning_and_content_activities_in_one_frame() {
+        let frame = parse_sse_details(
+            r#"data: {"choices":[{"delta":{"thinking":"分析","content":"结果"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(frame.content.as_deref(), Some("结果"));
+        assert_eq!(frame.activities, vec![ProviderStreamActivity::Thinking]);
     }
 
     #[test]

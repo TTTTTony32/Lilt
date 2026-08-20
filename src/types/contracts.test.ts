@@ -16,6 +16,11 @@ import {
   decodePdfPreflightEvent,
   decodePdfQualityDiagnostic,
 } from "./contracts";
+import {
+  createEmptyPdfPreflightState,
+  reducePdfPreflightEvent,
+  reducePdfPreflightWarning,
+} from "../lib/pdf-preflight";
 
 describe("selection contract", () => {
   it("decodes notices, requests, and runtime status", () => {
@@ -304,6 +309,7 @@ describe("PDF document context and quality contracts", () => {
   it("decodes preflight completion and keeps degraded results non-blocking", () => {
     expect(decodePdfPreflightEvent("pdf_translation_preflight_completed", {
       task_id: "task-1",
+      preflight_request_id: "preflight-1",
       schema_version: 1,
       document_context: { title: "标题", key_terms: [], abbreviations: [] },
       context_hash: "ctx-2",
@@ -311,7 +317,10 @@ describe("PDF document context and quality contracts", () => {
     })).toEqual({
       type: "preflightCompleted",
       taskId: "task-1",
+      preflightRequestId: "preflight-1",
       preflight: {
+        requestId: "preflight-1",
+        responsePhase: null,
         status: "completed",
         schemaVersion: 1,
         context: {
@@ -339,6 +348,7 @@ describe("PDF document context and quality contracts", () => {
     })?.type).toBe("preflightDegraded");
     const degraded = decodePdfPreflightEvent("pdf_translation_preflight_completed", {
       taskId: "task-1",
+      preflightRequestId: "preflight-1",
       context: { title: "标题", key_terms: [], abbreviations: [] },
       context_hash: "ctx-3",
       warnings: ["Provider 未返回完整结构"],
@@ -346,6 +356,69 @@ describe("PDF document context and quality contracts", () => {
     });
     expect(degraded?.preflight.status).toBe("degraded");
     expect(degraded?.preflight.applied).toBe(false);
+  });
+
+  it("decodes preflight activity phases and protects terminal state from late events", () => {
+    const started = decodePdfPreflightEvent("pdf_translation_preflight_started", {
+      taskId: "task-1",
+      preflightRequestId: "preflight-1",
+    });
+    const activity = decodePdfPreflightEvent("pdf_translation_preflight_activity", {
+      task_id: "task-1",
+      preflight_request_id: "preflight-1",
+      phase: "thinking",
+    });
+    const degraded = decodePdfPreflightEvent("pdf_translation_preflight_degraded", {
+      taskId: "task-1",
+      preflightRequestId: "preflight-1",
+      warnings: ["未收到完整预检结果"],
+      degraded: true,
+    });
+    const lateCompleted = decodePdfPreflightEvent("pdf_translation_preflight_completed", {
+      taskId: "task-1",
+      preflightRequestId: "preflight-1",
+      documentContext: { title: "迟到上下文", key_terms: [], abbreviations: [] },
+      applied: true,
+    });
+    expect(started?.preflight.responsePhase).toBe("waiting");
+    expect(activity).toMatchObject({
+      type: "preflightActivity",
+      preflightRequestId: "preflight-1",
+      phase: "thinking",
+      preflight: { requestId: "preflight-1", status: "running", responsePhase: "thinking" },
+    });
+    expect(degraded).not.toBeNull();
+    expect(lateCompleted).not.toBeNull();
+
+    const initialJob = {
+      taskId: "task-1",
+      status: "running" as const,
+      stage: null,
+      progress: null,
+      workerVersion: null,
+      outputPdf: null,
+      outputMode: null,
+      pageCount: null,
+      warnings: [],
+      tokenUsage: null,
+      code: null,
+      message: null,
+      preflight: createEmptyPdfPreflightState(),
+      documentContext: null,
+      diagnostics: [],
+    };
+    const runningJob = reducePdfPreflightEvent(initialJob, started!);
+    const thinkingJob = reducePdfPreflightEvent(runningJob, activity!);
+    const degradedJob = reducePdfPreflightEvent(thinkingJob, degraded!);
+    expect(thinkingJob.preflight?.responsePhase).toBe("thinking");
+    expect(degradedJob.preflight?.status).toBe("degraded");
+    expect(reducePdfPreflightWarning(thinkingJob, {
+      type: "warning",
+      taskId: "task-1",
+      code: "document_preflight_warning",
+      message: "旧协议警告",
+    })).toBe(thinkingJob);
+    expect(reducePdfPreflightEvent(degradedJob, lateCompleted!)).toBe(degradedJob);
   });
 
   it("decodes diagnostics and preserves old PDF events without new fields", () => {

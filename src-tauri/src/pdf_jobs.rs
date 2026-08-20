@@ -1,7 +1,9 @@
 use crate::contracts::TranslationRequest;
 use crate::diagnostics;
 use crate::pdf_protocol::{
-    DocumentPreflightRequestMessage, DocumentPreflightResponseMessage, PDF_WORKER_PROTOCOL_VERSION,
+    DocumentPreflightAcceptedMessage, DocumentPreflightActivityMessage,
+    DocumentPreflightActivityPhase, DocumentPreflightRequestMessage,
+    DocumentPreflightResponseMessage, DocumentPreflightTimeoutMessage, PDF_WORKER_PROTOCOL_VERSION,
     ProtocolErrorPayload, RustToWorkerMessage, TranslateRequestMessage, TranslateResponseMessage,
     TranslatedSegment, TranslationResponseOutcome, WorkerToRustMessage,
 };
@@ -22,10 +24,114 @@ use uuid::Uuid;
 
 const WORKER_EXIT_GRACE_PERIOD: Duration = Duration::from_secs(3);
 
+type PreflightActivityHandler =
+    Box<dyn FnMut(crate::provider::ProviderStreamActivity) + Send + 'static>;
+
 #[derive(Clone)]
 pub(crate) struct PdfJobHandle {
     pub(crate) session: Arc<WorkerSession>,
     pub(crate) cancellation: CancellationToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PreflightKey {
+    task_id: String,
+    preflight_request_id: String,
+}
+
+struct PreflightEntry {
+    cancellation: CancellationToken,
+    terminal: bool,
+    completion: Option<PreflightCompletion>,
+}
+
+struct PreflightCompletion {
+    event_name: &'static str,
+    event: PdfPreflightCompletedEvent,
+}
+
+#[derive(Clone, Default)]
+struct PreflightRegistry {
+    entries: Arc<Mutex<HashMap<PreflightKey, PreflightEntry>>>,
+}
+
+impl PreflightRegistry {
+    fn register(&self, key: PreflightKey, cancellation: CancellationToken) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        if entries.contains_key(&key) {
+            return false;
+        }
+        entries.insert(
+            key,
+            PreflightEntry {
+                cancellation,
+                terminal: false,
+                completion: None,
+            },
+        );
+        true
+    }
+
+    fn invalidate(&self, key: &PreflightKey) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let Some(entry) = entries.get_mut(key) else {
+            return false;
+        };
+        if entry.terminal {
+            return false;
+        }
+        entry.terminal = true;
+        entry.cancellation.cancel();
+        true
+    }
+
+    fn store_completion(
+        &self,
+        key: &PreflightKey,
+        event_name: &'static str,
+        event: PdfPreflightCompletedEvent,
+    ) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let Some(entry) = entries.get_mut(key) else {
+            return false;
+        };
+        if entry.terminal || entry.completion.is_some() {
+            return false;
+        }
+        entry.completion = Some(PreflightCompletion { event_name, event });
+        true
+    }
+
+    fn accept_completion(&self, key: &PreflightKey) -> Option<PreflightCompletion> {
+        let Ok(mut entries) = self.entries.lock() else {
+            return None;
+        };
+        let entry = entries.get_mut(key)?;
+        if entry.terminal {
+            return None;
+        }
+        let completion = entry.completion.take()?;
+        entry.terminal = true;
+        Some(completion)
+    }
+
+    fn invalidate_all(&self) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        for entry in entries.values_mut() {
+            if !entry.terminal {
+                entry.terminal = true;
+                entry.cancellation.cancel();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,10 +160,14 @@ struct PdfTranslationRequestResult {
 #[serde(rename_all = "camelCase")]
 struct PdfPreflightCompletedEvent {
     task_id: String,
+    preflight_request_id: String,
     context: Value,
     context_hash: Option<String>,
     warnings: Vec<String>,
     degraded: bool,
+    applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,6 +310,7 @@ fn run_job_loop(
     persistence: Arc<Mutex<Vec<PdfTranslationPersistence>>>,
 ) {
     let mut keep_output = false;
+    let preflight_registry = PreflightRegistry::default();
     loop {
         match session.recv_timeout(Duration::from_millis(100)) {
             Ok(WorkerSessionEvent::Message(message)) => {
@@ -211,6 +322,7 @@ fn run_job_loop(
                     &cancellation,
                     &job_dir,
                     &persistence,
+                    &preflight_registry,
                     message,
                 ) {
                     keep_output = should_keep_output;
@@ -246,6 +358,7 @@ fn run_job_loop(
     }
 
     cancellation.cancel();
+    preflight_registry.invalidate_all();
     session.close_writer();
     wait_for_worker_exit(&session);
     if !keep_output {
@@ -265,6 +378,7 @@ fn handle_worker_message(
     cancellation: &CancellationToken,
     job_dir: &Path,
     persistence: &Arc<Mutex<Vec<PdfTranslationPersistence>>>,
+    preflight_registry: &PreflightRegistry,
     message: WorkerToRustMessage,
 ) -> Option<bool> {
     match message {
@@ -278,33 +392,139 @@ fn handle_worker_message(
             let _ = app.emit("pdf_translation_progress", progress);
         }
         WorkerToRustMessage::DocumentPreflightRequest(request) => {
+            if request.task_id != task_id {
+                diagnostics::warn(format!(
+                    "pdf.preflight.request_ignored task_id={} request_task_id={} preflight_request_id={} reason=task_mismatch",
+                    task_id, request.task_id, request.preflight_request_id
+                ));
+                return None;
+            }
+            let request_id = request.preflight_request_id.clone();
+            let key = PreflightKey {
+                task_id: request.task_id.clone(),
+                preflight_request_id: request_id.clone(),
+            };
+            let cancellation = cancellation.child_token();
+            if !preflight_registry.register(key.clone(), cancellation.clone()) {
+                emit_preflight_diagnostic(
+                    app,
+                    &key.task_id,
+                    &key.preflight_request_id,
+                    "preflight_duplicate_request",
+                    "重复的 PDF 预检请求已忽略",
+                );
+                return None;
+            }
             let _ = app.emit(
                 "pdf_translation_preflight_started",
                 json!({
                     "taskId": request.task_id,
-                    "preflightRequestId": request.preflight_request_id,
+                    "preflightRequestId": request_id,
                 }),
             );
             let state = state.clone();
             let session = session.clone();
             let app = app.clone();
-            let cancellation = cancellation.child_token();
+            let registry = preflight_registry.clone();
+            let activity_task_id = task_id.to_string();
+            let activity_request_id = request.preflight_request_id.clone();
+            let activity_session = session.clone();
+            let activity_app = app.clone();
+            let mut last_phase = None;
+            let activity_handler: PreflightActivityHandler = Box::new(move |activity| {
+                let phase = match activity {
+                    crate::provider::ProviderStreamActivity::Thinking => {
+                        DocumentPreflightActivityPhase::Thinking
+                    }
+                    crate::provider::ProviderStreamActivity::Content => {
+                        DocumentPreflightActivityPhase::Streaming
+                    }
+                };
+                if last_phase == Some(phase) {
+                    return;
+                }
+                last_phase = Some(phase);
+                let message = RustToWorkerMessage::DocumentPreflightActivity(
+                    DocumentPreflightActivityMessage {
+                        task_id: activity_task_id.clone(),
+                        preflight_request_id: activity_request_id.clone(),
+                        phase,
+                    },
+                );
+                if let Err(error) = activity_session.send(message) {
+                    diagnostics::warn(format!(
+                        "pdf.preflight_activity.send_failed task_id={} preflight_request_id={} phase={:?} error={error}",
+                        activity_task_id, activity_request_id, phase
+                    ));
+                }
+                let phase_name = match phase {
+                    DocumentPreflightActivityPhase::Thinking => "thinking",
+                    DocumentPreflightActivityPhase::Streaming => "streaming",
+                };
+                let _ = activity_app.emit(
+                    "pdf_translation_preflight_activity",
+                    json!({
+                        "taskId": activity_task_id,
+                        "preflightRequestId": activity_request_id,
+                        "phase": phase_name,
+                    }),
+                );
+            });
             tauri::async_runtime::spawn(async move {
-                let result = translate_pdf_preflight_for_job(&state, request, cancellation).await;
+                let result = translate_pdf_preflight_for_job(
+                    &state,
+                    request,
+                    cancellation,
+                    Some(activity_handler),
+                )
+                .await;
+                let result_key = PreflightKey {
+                    task_id: result.task_id.clone(),
+                    preflight_request_id: result.preflight_request_id.clone(),
+                };
                 let event = PdfPreflightCompletedEvent {
                     task_id: result.task_id.clone(),
+                    preflight_request_id: result.preflight_request_id.clone(),
                     context: result.document_context.clone(),
                     context_hash: result.context_hash.clone(),
                     warnings: result.warnings.clone(),
                     degraded: result.degraded,
+                    applied: !result.degraded
+                        && result.outcome == TranslationResponseOutcome::Completed,
+                    message: result.warnings.first().cloned(),
                 };
-                let _ = app.emit("pdf_translation_preflight_completed", event);
+                let event_name = match result.outcome {
+                    TranslationResponseOutcome::Completed if result.degraded => {
+                        "pdf_translation_preflight_degraded"
+                    }
+                    TranslationResponseOutcome::Completed => "pdf_translation_preflight_completed",
+                    TranslationResponseOutcome::Cancelled | TranslationResponseOutcome::Failed => {
+                        "pdf_translation_preflight_failed"
+                    }
+                };
+                if !registry.store_completion(&result_key, event_name, event) {
+                    emit_preflight_diagnostic(
+                        &app,
+                        &result_key.task_id,
+                        &result_key.preflight_request_id,
+                        "preflight_late_response",
+                        "已失效的 PDF 预检响应被忽略",
+                    );
+                    return;
+                }
                 if let Err(error) =
                     session.send(RustToWorkerMessage::DocumentPreflightResponse(result))
                 {
+                    registry.invalidate(&result_key);
                     diagnostics::warn(format!("pdf.preflight_response.send_failed error={error}"));
                 }
             });
+        }
+        WorkerToRustMessage::DocumentPreflightTimeout(timeout) => {
+            handle_preflight_timeout(app, task_id, preflight_registry, timeout);
+        }
+        WorkerToRustMessage::DocumentPreflightAccepted(accepted) => {
+            handle_preflight_accepted(app, task_id, preflight_registry, accepted);
         }
         WorkerToRustMessage::TranslateRequest(request) => {
             let state = state.clone();
@@ -344,7 +564,22 @@ fn handle_worker_message(
             let _ = app.emit("pdf_translation_token_usage", usage);
         }
         WorkerToRustMessage::Warning(warning) => {
-            let _ = app.emit("pdf_translation_warning", warning);
+            if let Some(preflight_request_id) = warning.preflight_request_id.clone() {
+                let warning_message = warning.message;
+                let _ = app.emit(
+                    "pdf_translation_preflight_warning",
+                    json!({
+                        "taskId": warning.task_id,
+                        "preflightRequestId": preflight_request_id,
+                        "warnings": [warning_message.clone()],
+                        "degraded": true,
+                        "applied": false,
+                        "message": warning_message,
+                    }),
+                );
+            } else {
+                let _ = app.emit("pdf_translation_warning", warning);
+            }
         }
         WorkerToRustMessage::Finished(finished) => {
             if validate_output_pdf(&finished.output_pdf, job_dir).is_err() {
@@ -401,6 +636,121 @@ fn handle_worker_message(
     None
 }
 
+fn handle_preflight_timeout(
+    app: &AppHandle,
+    task_id: &str,
+    registry: &PreflightRegistry,
+    timeout: DocumentPreflightTimeoutMessage,
+) {
+    if timeout.task_id != task_id {
+        diagnostics::warn(format!(
+            "pdf.preflight.timeout_ignored task_id={} timeout_task_id={} preflight_request_id={} reason=task_mismatch",
+            task_id, timeout.task_id, timeout.preflight_request_id
+        ));
+        return;
+    }
+    if timeout.reason != "no_response" {
+        emit_preflight_diagnostic(
+            app,
+            &timeout.task_id,
+            &timeout.preflight_request_id,
+            "preflight_invalid_timeout_reason",
+            "PDF 预检超时原因无法识别，已忽略通知",
+        );
+        return;
+    }
+    let key = PreflightKey {
+        task_id: timeout.task_id.clone(),
+        preflight_request_id: timeout.preflight_request_id.clone(),
+    };
+    if !registry.invalidate(&key) {
+        emit_preflight_diagnostic(
+            app,
+            &key.task_id,
+            &key.preflight_request_id,
+            "preflight_late_timeout",
+            "已结束的 PDF 预检超时通知被忽略",
+        );
+        return;
+    }
+
+    let context = crate::pdf_context::DocumentContext::empty();
+    let warning = "PDF 预检在模型产生响应前超时，已使用空文档上下文继续翻译";
+    let _ = app.emit(
+        "pdf_translation_preflight_degraded",
+        PdfPreflightCompletedEvent {
+            task_id: key.task_id.clone(),
+            preflight_request_id: key.preflight_request_id.clone(),
+            context: context.to_value(),
+            context_hash: Some(context.hash().to_string()),
+            warnings: vec![warning.to_string()],
+            degraded: true,
+            applied: false,
+            message: Some(warning.to_string()),
+        },
+    );
+    emit_preflight_diagnostic(
+        app,
+        &key.task_id,
+        &key.preflight_request_id,
+        "preflight_timeout",
+        "PDF 预检无响应超时，已取消对应 Provider 请求",
+    );
+}
+
+fn handle_preflight_accepted(
+    app: &AppHandle,
+    task_id: &str,
+    registry: &PreflightRegistry,
+    accepted: DocumentPreflightAcceptedMessage,
+) {
+    if accepted.task_id != task_id {
+        diagnostics::warn(format!(
+            "pdf.preflight.accepted_ignored task_id={} accepted_task_id={} preflight_request_id={} reason=task_mismatch",
+            task_id, accepted.task_id, accepted.preflight_request_id
+        ));
+        return;
+    }
+    let key = PreflightKey {
+        task_id: accepted.task_id.clone(),
+        preflight_request_id: accepted.preflight_request_id.clone(),
+    };
+    let Some(completion) = registry.accept_completion(&key) else {
+        emit_preflight_diagnostic(
+            app,
+            &key.task_id,
+            &key.preflight_request_id,
+            "preflight_late_acceptance",
+            "已结束的 PDF 预检响应确认被忽略",
+        );
+        return;
+    };
+    let _ = app.emit(completion.event_name, completion.event);
+}
+
+fn emit_preflight_diagnostic(
+    app: &AppHandle,
+    task_id: &str,
+    preflight_request_id: &str,
+    rule_id: &str,
+    message: &str,
+) {
+    diagnostics::warn(format!(
+        "pdf.preflight.diagnostic task_id={} preflight_request_id={} rule_id={} reason={}",
+        task_id, preflight_request_id, rule_id, message
+    ));
+    let _ = app.emit(
+        "pdf_translation_diagnostic",
+        json!({
+            "taskId": task_id,
+            "preflightRequestId": preflight_request_id,
+            "severity": "warning",
+            "ruleId": rule_id,
+            "message": message,
+        }),
+    );
+}
+
 async fn translate_pdf_request_for_job(
     state: &AppState,
     request: TranslateRequestMessage,
@@ -413,8 +763,9 @@ async fn translate_pdf_preflight_for_job(
     state: &AppState,
     request: DocumentPreflightRequestMessage,
     cancellation: CancellationToken,
+    activity_handler: Option<PreflightActivityHandler>,
 ) -> DocumentPreflightResponseMessage {
-    translate_pdf_preflight_inner(state, request, cancellation, None).await
+    translate_pdf_preflight_inner(state, request, cancellation, None, activity_handler).await
 }
 
 #[cfg(test)]
@@ -424,7 +775,7 @@ async fn translate_pdf_preflight_with_api_key(
     cancellation: CancellationToken,
     api_key: String,
 ) -> DocumentPreflightResponseMessage {
-    translate_pdf_preflight_inner(state, request, cancellation, Some(api_key)).await
+    translate_pdf_preflight_inner(state, request, cancellation, Some(api_key), None).await
 }
 
 async fn translate_pdf_preflight_inner(
@@ -432,6 +783,7 @@ async fn translate_pdf_preflight_inner(
     request: DocumentPreflightRequestMessage,
     cancellation: CancellationToken,
     api_key_override: Option<String>,
+    mut activity_handler: Option<PreflightActivityHandler>,
 ) -> DocumentPreflightResponseMessage {
     let task_id = request.task_id.clone();
     let request_id = request.preflight_request_id.clone();
@@ -522,7 +874,7 @@ async fn translate_pdf_preflight_inner(
         "{}\n\n你正在执行 PDF 文档预检。只返回 JSON 对象，不要返回 Markdown。字段必须包括 schema_version、title、abstract、document_type、domain、headings、key_terms、abbreviations、translation_notes。key_terms 的元素使用 source、target、source_kind、confidence、note；abbreviations 的元素使用 abbreviation、expanded、target、confidence。无法确认的字段使用 null 或空数组。",
         prepared.system_prompt
     );
-    let translated = TranslationCore::stream_with_usage(
+    let translated = TranslationCore::stream_with_usage_and_activity(
         crate::translation_core::StreamRequest {
             request_id: &request.preflight_request_id,
             base_url: &prepared.provider.base_url,
@@ -535,6 +887,11 @@ async fn translate_pdf_preflight_inner(
             thinking_effort: &prepared.provider.thinking_effort,
         },
         |_| Ok(()),
+        |activity| {
+            if let Some(handler) = activity_handler.as_mut() {
+                handler(activity);
+            }
+        },
     )
     .await;
     let translated = match translated {
@@ -1155,10 +1512,11 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_translation_response, commit_pdf_persistence, constrained_abbreviation_pairs,
-        normalize_pdf_options, quality_warnings, request_source_text,
-        translate_pdf_preflight_with_api_key, translate_pdf_request_inner,
-        translate_pdf_request_with_api_key, validate_input_pdf, validate_output_pdf,
+        PdfPreflightCompletedEvent, PreflightKey, PreflightRegistry, build_translation_response,
+        commit_pdf_persistence, constrained_abbreviation_pairs, normalize_pdf_options,
+        quality_warnings, request_source_text, translate_pdf_preflight_with_api_key,
+        translate_pdf_request_inner, translate_pdf_request_with_api_key, validate_input_pdf,
+        validate_output_pdf,
     };
     use crate::AppState;
     use crate::StartupRuntime;
@@ -1170,7 +1528,7 @@ mod tests {
     };
     use crate::pdf_worker::{WorkerSession, WorkerSessionEvent};
     use rusqlite::Connection;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
@@ -1181,6 +1539,83 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn preflight_registry_matches_task_and_request_and_blocks_late_claims() {
+        let registry = PreflightRegistry::default();
+        let first_key = PreflightKey {
+            task_id: "task-1".to_string(),
+            preflight_request_id: "preflight-1".to_string(),
+        };
+        let first_cancellation = CancellationToken::new();
+        assert!(registry.register(first_key.clone(), first_cancellation.clone()));
+        assert!(!registry.register(first_key.clone(), CancellationToken::new()));
+
+        assert!(registry.invalidate(&first_key));
+        assert!(first_cancellation.is_cancelled());
+        assert!(!registry.store_completion(
+            &first_key,
+            "pdf_translation_preflight_completed",
+            PdfPreflightCompletedEvent {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                context: Value::Null,
+                context_hash: None,
+                warnings: Vec::new(),
+                degraded: false,
+                applied: true,
+                message: None,
+            },
+        ));
+
+        let second_key = PreflightKey {
+            task_id: "task-2".to_string(),
+            preflight_request_id: "preflight-1".to_string(),
+        };
+        let second_cancellation = CancellationToken::new();
+        assert!(registry.register(second_key.clone(), second_cancellation.clone()));
+        assert!(registry.store_completion(
+            &second_key,
+            "pdf_translation_preflight_completed",
+            PdfPreflightCompletedEvent {
+                task_id: "task-2".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                context: Value::Null,
+                context_hash: None,
+                warnings: Vec::new(),
+                degraded: false,
+                applied: true,
+                message: None,
+            },
+        ));
+        assert!(registry.accept_completion(&second_key).is_some());
+        assert!(!second_cancellation.is_cancelled());
+        assert!(!registry.invalidate(&second_key));
+
+        let late_key = PreflightKey {
+            task_id: "task-3".to_string(),
+            preflight_request_id: "preflight-1".to_string(),
+        };
+        let late_cancellation = CancellationToken::new();
+        assert!(registry.register(late_key.clone(), late_cancellation.clone()));
+        assert!(registry.store_completion(
+            &late_key,
+            "pdf_translation_preflight_completed",
+            PdfPreflightCompletedEvent {
+                task_id: "task-3".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                context: Value::Null,
+                context_hash: None,
+                warnings: Vec::new(),
+                degraded: false,
+                applied: true,
+                message: None,
+            },
+        ));
+        assert!(registry.invalidate(&late_key));
+        assert!(late_cancellation.is_cancelled());
+        assert!(registry.accept_completion(&late_key).is_none());
+    }
 
     fn request(segments: Vec<TranslationSegment>) -> TranslateRequestMessage {
         TranslateRequestMessage {
