@@ -339,6 +339,68 @@ export interface PdfJobTokenUsage {
 
 export type PdfJobStatus = "idle" | "starting" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
 
+export interface DocumentTerm {
+  source: string;
+  target: string | null;
+  sourceKind: string | null;
+  confidence: number | null;
+  note: string | null;
+}
+
+export type PdfTaskTerm = DocumentTerm;
+
+export interface Abbreviation {
+  abbreviation: string;
+  expanded: string | null;
+  target: string | null;
+  confidence: number | null;
+}
+
+export type PdfTaskAbbreviation = Abbreviation;
+
+export interface DocumentContext {
+  schemaVersion: number;
+  title: string | null;
+  abstract: string | null;
+  documentType: string | null;
+  domain: string | null;
+  headings: string[];
+  keyTerms: DocumentTerm[];
+  abbreviations: Abbreviation[];
+  translationNotes: string[];
+  contextHash: string | null;
+}
+
+export type PdfDocumentContext = DocumentContext;
+
+export type PdfPreflightStatus = "idle" | "running" | "completed" | "degraded" | "failed";
+
+export interface PdfPreflightState {
+  status: PdfPreflightStatus;
+  schemaVersion: number | null;
+  context: DocumentContext | null;
+  contextHash: string | null;
+  warnings: string[];
+  applied: boolean;
+  message: string | null;
+}
+
+export type PdfPreflightUiState = PdfPreflightState;
+
+export type PdfQualityDiagnosticSeverity = "info" | "warning" | "error";
+
+export interface PdfQualityDiagnostic {
+  severity: PdfQualityDiagnosticSeverity;
+  ruleId: string | null;
+  message: string;
+  taskId: string | null;
+  translationRequestId: string | null;
+  segmentId: string | null;
+  pageNumber: number | null;
+}
+
+export type QualityDiagnostic = PdfQualityDiagnostic;
+
 export interface PdfJobUiState {
   taskId: string | null;
   status: PdfJobStatus;
@@ -352,6 +414,15 @@ export interface PdfJobUiState {
   tokenUsage: PdfJobTokenUsage | null;
   code: string | null;
   message: string | null;
+  preflight?: PdfPreflightState;
+  documentContext?: DocumentContext | null;
+  diagnostics?: PdfQualityDiagnostic[];
+}
+
+export interface PdfJobContextMetadata {
+  preflight?: PdfPreflightState;
+  documentContext?: DocumentContext | null;
+  diagnostics?: PdfQualityDiagnostic[];
 }
 
 export type PdfJobEvent =
@@ -359,29 +430,30 @@ export type PdfJobEvent =
     type: "started";
     taskId: string;
     workerVersion: string | null;
-  }
+  } & PdfJobContextMetadata
   | {
     type: "stage";
     taskId: string;
     stage: string;
-  }
+  } & PdfJobContextMetadata
   | {
     type: "progress";
     taskId: string;
     progress: PdfJobProgress;
-  }
+  } & PdfJobContextMetadata
   | {
     type: "tokenUsage";
     taskId: string;
     translationRequestId: string | null;
     usage: PdfJobTokenUsage;
-  }
+  } & PdfJobContextMetadata
   | {
     type: "warning";
     taskId: string;
     code: string;
     message: string;
-  }
+    diagnostic?: PdfQualityDiagnostic;
+  } & PdfJobContextMetadata
   | {
     type: "finished";
     taskId: string;
@@ -389,17 +461,49 @@ export type PdfJobEvent =
     outputMode: string | null;
     pageCount: number | null;
     warnings: string[];
-  }
+  } & PdfJobContextMetadata
   | {
     type: "cancelled";
     taskId: string;
     reason: string | null;
-  }
+  } & PdfJobContextMetadata
   | {
     type: "failed";
     taskId: string;
     code: string;
     message: string;
+  } & PdfJobContextMetadata
+  | PdfPreflightEvent
+  | {
+    type: "diagnostic";
+    taskId: string;
+    diagnostic: PdfQualityDiagnostic;
+  } & PdfJobContextMetadata;
+
+export type PdfPreflightEvent =
+  | {
+    type: "preflightStarted";
+    taskId: string;
+    preflight: PdfPreflightState;
+    diagnostics?: PdfQualityDiagnostic[];
+  }
+  | {
+    type: "preflightCompleted";
+    taskId: string;
+    preflight: PdfPreflightState;
+    diagnostics?: PdfQualityDiagnostic[];
+  }
+  | {
+    type: "preflightDegraded";
+    taskId: string;
+    preflight: PdfPreflightState;
+    diagnostics?: PdfQualityDiagnostic[];
+  }
+  | {
+    type: "preflightFailed";
+    taskId: string;
+    preflight: PdfPreflightState;
+    diagnostics?: PdfQualityDiagnostic[];
   };
 
 export const PDF_ENGINE_EVENT_NAMES = [
@@ -419,6 +523,13 @@ export const PDF_JOB_EVENT_NAMES = [
   "pdf_translation_finished",
   "pdf_translation_cancelled",
   "pdf_translation_failed",
+  "pdf_translation_preflight_started",
+  "pdf_translation_preflight_completed",
+  "pdf_translation_preflight_degraded",
+  "pdf_translation_preflight_warning",
+  "pdf_translation_preflight_failed",
+  "pdf_translation_diagnostic",
+  "pdf_translation_quality_diagnostic",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -632,30 +743,299 @@ function decodeStringArrayField(value: unknown): string[] | null {
     : null;
 }
 
+function decodeStringList(value: unknown, allowScalar = false): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (Array.isArray(value)) return value.every((item) => typeof item === "string") ? value : null;
+  return allowScalar && typeof value === "string" ? [value] : null;
+}
+
+function optionalConfidenceField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: number | null } {
+  const raw = readField(record, ...names);
+  if (raw === undefined || raw === null) return { valid: true, value: null };
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1
+    ? { valid: true, value: raw }
+    : { valid: false, value: null };
+}
+
+function hasField(record: Record<string, unknown>, ...names: string[]): boolean {
+  return names.some((name) => name in record);
+}
+
+function decodeDocumentTerm(value: unknown): DocumentTerm | null {
+  if (!isRecord(value)) return null;
+  const source = nonEmptyString(readField(value, "source", "original", "term", "text"));
+  const target = optionalStringField(value, "target", "translation", "suggestedTranslation", "suggested_translation");
+  const sourceKind = optionalStringField(value, "sourceKind", "source_kind", "origin", "sourceType", "source_type");
+  const confidence = optionalConfidenceField(value, "confidence", "score");
+  const note = optionalStringField(value, "note", "reason");
+  return source === null || !target.valid || !sourceKind.valid || !confidence.valid || !note.valid
+    ? null
+    : { source, target: target.value, sourceKind: sourceKind.value, confidence: confidence.value, note: note.value };
+}
+
+function decodeAbbreviation(value: unknown): Abbreviation | null {
+  if (!isRecord(value)) return null;
+  const abbreviation = nonEmptyString(readField(value, "abbreviation", "short", "shortForm", "short_form"));
+  const expanded = optionalStringField(value, "expanded", "expansion", "expandedForm", "expanded_form");
+  const target = optionalStringField(value, "target", "translation", "suggestedTranslation", "suggested_translation");
+  const confidence = optionalConfidenceField(value, "confidence", "score");
+  return abbreviation === null || !expanded.valid || !target.valid || !confidence.valid
+    ? null
+    : {
+      abbreviation,
+      expanded: expanded.value,
+      target: target.value,
+      confidence: confidence.value,
+    };
+}
+
+export function decodeDocumentContext(value: unknown): DocumentContext | null {
+  if (!isRecord(value)) return null;
+
+  const rawSchemaVersion = readField(value, "schemaVersion", "schema_version", "version");
+  const schemaVersion = rawSchemaVersion === undefined || rawSchemaVersion === null
+    ? 1
+    : typeof rawSchemaVersion === "number" && Number.isInteger(rawSchemaVersion) && rawSchemaVersion >= 1
+      ? rawSchemaVersion
+      : null;
+  const title = optionalStringField(value, "title");
+  const abstract = optionalStringField(value, "abstract", "summary");
+  const documentType = optionalStringField(value, "documentType", "document_type", "type");
+  const domain = optionalStringField(value, "domain", "field");
+  const headings = decodeStringList(readField(value, "headings", "headingLevels", "heading_levels"));
+  const rawTerms = readField(value, "keyTerms", "key_terms", "terms");
+  const keyTerms = rawTerms === undefined || rawTerms === null
+    ? []
+    : Array.isArray(rawTerms) ? rawTerms.map(decodeDocumentTerm) : null;
+  const rawAbbreviations = readField(value, "abbreviations", "abbreviationList", "abbreviation_list");
+  const abbreviations = rawAbbreviations === undefined || rawAbbreviations === null
+    ? []
+    : Array.isArray(rawAbbreviations) ? rawAbbreviations.map(decodeAbbreviation) : null;
+  const translationNotes = decodeStringList(readField(value, "translationNotes", "translation_notes", "notes"), true);
+  const contextHash = optionalStringField(value, "contextHash", "context_hash", "hash");
+
+  if (
+    schemaVersion === null ||
+    !title.valid ||
+    !abstract.valid ||
+    !documentType.valid ||
+    !domain.valid ||
+    headings === null ||
+    keyTerms === null ||
+    keyTerms.some((term) => term === null) ||
+    abbreviations === null ||
+    abbreviations.some((item) => item === null) ||
+    translationNotes === null ||
+    !contextHash.valid
+  ) {
+    return null;
+  }
+
+  return {
+    schemaVersion,
+    title: title.value,
+    abstract: abstract.value,
+    documentType: documentType.value,
+    domain: domain.value,
+    headings,
+    keyTerms: keyTerms as DocumentTerm[],
+    abbreviations: abbreviations as Abbreviation[],
+    translationNotes,
+    contextHash: contextHash.value,
+  };
+}
+
+function decodePdfPreflightStatus(value: unknown, fallback: PdfPreflightStatus): PdfPreflightStatus {
+  const normalized = typeof value === "string" ? value.toLowerCase() : value;
+  if (normalized === "idle") return "idle";
+  if (normalized === "running" || normalized === "pending" || normalized === "started" || normalized === "in_progress") return "running";
+  if (normalized === "completed" || normalized === "complete" || normalized === "success" || normalized === "applied") return "completed";
+  if (normalized === "degraded" || normalized === "fallback" || normalized === "warning" || normalized === "partial") return "degraded";
+  if (normalized === "failed" || normalized === "error") return "failed";
+  return fallback;
+}
+
+function decodePdfContextFromPayload(value: Record<string, unknown>): DocumentContext | null {
+  const rawContext = readField(value, "documentContext", "document_context", "context");
+  if (rawContext !== undefined && rawContext !== null) return decodeDocumentContext(rawContext);
+  if (rawContext === null) return null;
+  if (!hasField(value, "title", "abstract", "summary", "documentType", "document_type", "domain", "headings", "keyTerms", "key_terms", "abbreviations", "translationNotes", "translation_notes", "contextHash", "context_hash")) {
+    return null;
+  }
+  return decodeDocumentContext(value);
+}
+
+export function decodePdfPreflightState(value: unknown, fallbackStatus: PdfPreflightStatus = "running"): PdfPreflightState | null {
+  if (!isRecord(value)) return null;
+  const nested = readField(value, "preflight", "preflightState", "preflight_state");
+  const payload = isRecord(nested) ? nested : value;
+  const status = decodePdfPreflightStatus(
+    readField(payload, "status", "state", "phase", "outcome", "preflightStatus", "preflight_status"),
+    fallbackStatus,
+  );
+  const context = decodePdfContextFromPayload(payload);
+  const contextWasProvided = hasField(payload, "documentContext", "document_context", "context", "title", "abstract", "summary", "documentType", "document_type", "domain", "headings", "keyTerms", "key_terms", "abbreviations", "translationNotes", "translation_notes", "contextHash", "context_hash");
+  if (contextWasProvided && context === null && readField(payload, "context", "documentContext", "document_context") !== null) return null;
+
+  const schemaVersionRaw = readField(payload, "schemaVersion", "schema_version");
+  const schemaVersion = schemaVersionRaw === undefined || schemaVersionRaw === null
+    ? context?.schemaVersion ?? null
+    : typeof schemaVersionRaw === "number" && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+      ? schemaVersionRaw
+      : null;
+  const contextHash = optionalStringField(payload, "contextHash", "context_hash", "hash");
+  const warnings = decodeStringList(readField(payload, "warnings", "warning"), true);
+  const message = optionalStringField(payload, "message", "error", "reason");
+  const applied = optionalBooleanField(payload, "applied", "autoApplied", "auto_applied");
+  const degraded = readField(payload, "degraded", "fallback");
+  if (
+    (schemaVersionRaw !== undefined && schemaVersion === null) ||
+    !contextHash.valid ||
+    warnings === null ||
+    !message.valid ||
+    !applied.valid ||
+    (degraded !== undefined && degraded !== null && typeof degraded !== "boolean")
+  ) return null;
+
+  const normalizedContext = context && context.contextHash === null && contextHash.value !== null
+    ? { ...context, contextHash: contextHash.value }
+    : context;
+  const isDegraded = degraded === true || status === "degraded";
+  return {
+    status: isDegraded ? "degraded" : status,
+    schemaVersion,
+    context: normalizedContext,
+    contextHash: contextHash.value ?? normalizedContext?.contextHash ?? null,
+    warnings,
+    applied: applied.value || status === "completed" && !isDegraded && normalizedContext !== null,
+    message: message.value,
+  };
+}
+
+function decodePdfJobContextMetadata(value: Record<string, unknown>): PdfJobContextMetadata | null {
+  const hasPreflight = hasField(value, "preflight", "preflightState", "preflight_state")
+    || hasField(value, "documentContext", "document_context", "context")
+    || hasField(value, "preflightStatus", "preflight_status", "preflightState", "preflight_state");
+  const preflight = hasPreflight ? decodePdfPreflightState(value) : null;
+  if (hasPreflight && preflight === null) return null;
+
+  const hasContext = hasField(value, "documentContext", "document_context", "context");
+  const documentContext = hasContext ? decodePdfContextFromPayload(value) : null;
+  if (hasContext && documentContext === null && readField(value, "documentContext", "document_context", "context") !== null) return null;
+
+  const hasDiagnostics = hasField(value, "diagnostics", "qualityDiagnostics", "quality_diagnostics");
+  const rawDiagnostics = readField(value, "diagnostics", "qualityDiagnostics", "quality_diagnostics");
+  const diagnostics = hasDiagnostics
+    ? (rawDiagnostics === null || rawDiagnostics === undefined
+      ? []
+      : Array.isArray(rawDiagnostics) ? rawDiagnostics.map(decodePdfQualityDiagnostic) : null)
+    : [];
+  if (diagnostics === null || diagnostics.some((diagnostic) => diagnostic === null)) return null;
+
+  const metadata: PdfJobContextMetadata = {};
+  if (preflight) metadata.preflight = preflight;
+  if (documentContext || (hasContext && readField(value, "documentContext", "document_context", "context") === null)) metadata.documentContext = documentContext;
+  if (hasDiagnostics) metadata.diagnostics = diagnostics as PdfQualityDiagnostic[];
+  return metadata;
+}
+
+function decodePdfDiagnosticSeverity(value: unknown): PdfQualityDiagnosticSeverity | null {
+  if (value === "info" || value === "notice") return "info";
+  if (value === "warning" || value === "warn") return "warning";
+  if (value === "error" || value === "critical" || value === "fatal") return "error";
+  return null;
+}
+
+export function decodePdfQualityDiagnostic(value: unknown): PdfQualityDiagnostic | null {
+  if (!isRecord(value)) return null;
+  const nested = readField(value, "diagnostic", "qualityDiagnostic", "quality_diagnostic");
+  const payload = isRecord(nested) ? nested : value;
+  const severity = decodePdfDiagnosticSeverity(readField(payload, "severity", "level"));
+  const ruleId = optionalStringField(payload, "ruleId", "rule_id", "code", "kind");
+  const message = nonEmptyString(readField(payload, "message", "description", "detail", "reason"));
+  const taskId = optionalStringField(payload, "taskId", "task_id");
+  const translationRequestId = optionalStringField(payload, "translationRequestId", "translation_request_id");
+  const segmentId = optionalStringField(payload, "segmentId", "segment_id");
+  const pageNumber = optionalNonNegativeIntegerField(payload, "pageNumber", "page_number", "page");
+  return severity === null || message === null || !ruleId.valid || !taskId.valid || !translationRequestId.valid || !segmentId.valid || !pageNumber.valid
+    ? null
+    : {
+      severity,
+      ruleId: ruleId.value,
+      message,
+      taskId: taskId.value,
+      translationRequestId: translationRequestId.value,
+      segmentId: segmentId.value,
+      pageNumber: pageNumber.value,
+    };
+}
+
+export function decodePdfPreflightEvent(name: string, value: unknown): PdfPreflightEvent | null {
+  if (!isRecord(value)) return null;
+  const taskId = nonEmptyString(readField(value, "taskId", "task_id"));
+  if (taskId === null) return null;
+
+  const eventType = name.includes("started")
+    ? "preflightStarted"
+    : name.includes("completed")
+      ? "preflightCompleted"
+      : name.includes("degraded") || name.includes("warning")
+        ? "preflightDegraded"
+        : name.includes("failed")
+          ? "preflightFailed"
+          : null;
+  if (eventType === null) return null;
+  const fallbackStatus = eventType === "preflightStarted"
+    ? "running"
+    : eventType === "preflightCompleted"
+      ? "completed"
+      : eventType === "preflightDegraded"
+        ? "degraded"
+        : "failed";
+  const preflight = decodePdfPreflightState(value, fallbackStatus);
+  if (preflight === null) return null;
+  const rawDiagnostics = readField(value, "diagnostics", "qualityDiagnostics", "quality_diagnostics");
+  const diagnostics = rawDiagnostics === undefined || rawDiagnostics === null
+    ? undefined
+    : Array.isArray(rawDiagnostics) ? rawDiagnostics.map(decodePdfQualityDiagnostic) : null;
+  if (diagnostics === null || diagnostics?.some((diagnostic) => diagnostic === null)) return null;
+  const normalizedEventType: PdfPreflightEvent["type"] = eventType === "preflightCompleted" && preflight.status === "degraded"
+    ? "preflightDegraded"
+    : eventType;
+  return diagnostics === undefined
+    ? { type: normalizedEventType, taskId, preflight }
+    : { type: normalizedEventType, taskId, preflight, diagnostics: diagnostics as PdfQualityDiagnostic[] };
+}
+
 export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | null {
   if (!isRecord(value)) return null;
   const taskId = nonEmptyString(readField(value, "taskId", "task_id"));
   if (taskId === null) return null;
 
+  if (name.includes("preflight")) return decodePdfPreflightEvent(name, value);
+
+  const metadata = decodePdfJobContextMetadata(value);
+  if (metadata === null) return null;
+
   if (name === "pdf_translation_started") {
     const workerVersion = optionalStringField(value, "workerVersion", "worker_version");
     return workerVersion.valid
-      ? { type: "started", taskId, workerVersion: workerVersion.value }
+      ? { type: "started", taskId, workerVersion: workerVersion.value, ...metadata }
       : null;
   }
 
   if (name === "pdf_translation_stage") {
     const stage = nonEmptyString(readField(value, "stage"));
-    if (stage !== null) return { type: "stage", taskId, stage };
+    if (stage !== null) return { type: "stage", taskId, stage, ...metadata };
     const workerVersion = optionalStringField(value, "workerVersion", "worker_version");
     return workerVersion.valid
-      ? { type: "started", taskId, workerVersion: workerVersion.value }
+      ? { type: "started", taskId, workerVersion: workerVersion.value, ...metadata }
       : null;
   }
 
   if (name === "pdf_translation_progress") {
     const progress = decodePdfJobProgress(value);
-    return progress === null ? null : { type: "progress", taskId, progress };
+    return progress === null ? null : { type: "progress", taskId, progress, ...metadata };
   }
 
   if (name === "pdf_translation_token_usage") {
@@ -663,13 +1043,22 @@ export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | n
     const usage = decodePdfJobTokenUsage(readField(value, "usage"));
     return !translationRequestId.valid || usage === null
       ? null
-      : { type: "tokenUsage", taskId, translationRequestId: translationRequestId.value, usage };
+      : { type: "tokenUsage", taskId, translationRequestId: translationRequestId.value, usage, ...metadata };
   }
 
   if (name === "pdf_translation_warning") {
     const code = nonEmptyString(readField(value, "code"));
     const message = nonEmptyString(readField(value, "message"));
-    return code === null || message === null ? null : { type: "warning", taskId, code, message };
+    if (code === null || message === null) return null;
+    const rawDiagnostic = readField(value, "diagnostic", "qualityDiagnostic", "quality_diagnostic");
+    const diagnostic = rawDiagnostic === undefined
+      ? hasField(value, "severity", "level") ? decodePdfQualityDiagnostic(value) : undefined
+      : decodePdfQualityDiagnostic(rawDiagnostic);
+    return rawDiagnostic !== undefined && diagnostic === null || diagnostic === null
+      ? null
+      : diagnostic
+        ? { type: "warning", taskId, code, message, diagnostic, ...metadata }
+        : { type: "warning", taskId, code, message, ...metadata };
   }
 
   if (name === "pdf_translation_finished") {
@@ -685,18 +1074,25 @@ export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | n
       outputMode: outputMode.value,
       pageCount: pageCount.value,
       warnings,
+      ...metadata,
     };
   }
 
   if (name === "pdf_translation_cancelled") {
     const reason = optionalStringField(value, "reason");
-    return reason.valid ? { type: "cancelled", taskId, reason: reason.value } : null;
+    return reason.valid ? { type: "cancelled", taskId, reason: reason.value, ...metadata } : null;
   }
 
   if (name === "pdf_translation_failed") {
     const code = nonEmptyString(readField(value, "code"));
     const message = nonEmptyString(readField(value, "message"));
-    return code === null || message === null ? null : { type: "failed", taskId, code, message };
+    return code === null || message === null ? null : { type: "failed", taskId, code, message, ...metadata };
+  }
+
+  if (name === "pdf_translation_diagnostic" || name === "pdf_translation_quality_diagnostic") {
+    const rawDiagnostic = readField(value, "diagnostic", "qualityDiagnostic", "quality_diagnostic");
+    const diagnostic = rawDiagnostic === undefined ? decodePdfQualityDiagnostic(value) : decodePdfQualityDiagnostic(rawDiagnostic);
+    return diagnostic === null ? null : { type: "diagnostic", taskId, diagnostic, ...metadata };
   }
 
   return null;

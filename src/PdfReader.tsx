@@ -31,7 +31,12 @@ import {
   type RenderTask,
 } from "./lib/pdf-reader";
 import { invokeCommand } from "./lib/tauri";
-import type { PdfJobUiState } from "./types/contracts";
+import type {
+  DocumentContext,
+  PdfJobUiState,
+  PdfPreflightState,
+  PdfQualityDiagnostic,
+} from "./types/contracts";
 
 type PdfReaderStatus = "loading" | "ready" | "error";
 type PdfZoomMode = "fit-width" | "manual";
@@ -102,6 +107,110 @@ function jobStatusLabel(status: PdfJobUiState["status"]): string {
   }
 }
 
+function preflightStatusLabel(preflight: PdfPreflightState): string {
+  switch (preflight.status) {
+    case "running": return "正在分析文档";
+    case "completed": return "预检完成";
+    case "degraded": return "已降级应用";
+    case "failed": return "预检失败，继续翻译";
+    default: return "等待预检";
+  }
+}
+
+function emptyPdfPreflight(): PdfPreflightState {
+  return {
+    status: "idle",
+    schemaVersion: null,
+    context: null,
+    contextHash: null,
+    warnings: [],
+    applied: false,
+    message: null,
+  };
+}
+
+function diagnosticSeverityLabel(severity: PdfQualityDiagnostic["severity"]): string {
+  switch (severity) {
+    case "error": return "错误";
+    case "warning": return "警告";
+    default: return "提示";
+  }
+}
+
+function contextTitle(context: DocumentContext | null): string {
+  return context?.title?.trim() || "未识别标题";
+}
+
+function PdfContextSummary({ context }: { context: DocumentContext }) {
+  const metadata = [
+    context.documentType ? `类型：${context.documentType}` : null,
+    context.domain ? `领域：${context.domain}` : null,
+    `术语 ${context.keyTerms.length}`,
+    `缩写 ${context.abbreviations.length}`,
+    context.headings.length > 0 ? `标题层级 ${context.headings.length}` : null,
+  ].filter((item): item is string => item !== null);
+
+  return (
+    <details className="pdf-task-context-details">
+      <summary>查看文档上下文 · {contextTitle(context)}</summary>
+      <div className="pdf-task-context-summary">
+        <p className="pdf-task-panel-meta">{metadata.join(" · ")}</p>
+        {context.abstract && <p className="pdf-task-panel-message">{context.abstract}</p>}
+        {context.translationNotes.length > 0 && (
+          <div>
+            <strong>翻译注意事项</strong>
+            <ul className="pdf-task-warnings">
+              {context.translationNotes.map((note) => <li key={note}>{note}</li>)}
+            </ul>
+          </div>
+        )}
+        {context.keyTerms.length > 0 && (
+          <p className="pdf-task-panel-meta">任务术语：{context.keyTerms.map((term) => term.target ? `${term.source} → ${term.target}` : term.source).join("、")}</p>
+        )}
+        {context.abbreviations.length > 0 && (
+          <p className="pdf-task-panel-meta">任务缩写：{context.abbreviations.map((item) => item.expanded ? `${item.abbreviation}（${item.expanded}）` : item.abbreviation).join("、")}</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function PdfQualityDiagnostics({ diagnostics }: { diagnostics: PdfQualityDiagnostic[] }) {
+  if (diagnostics.length === 0) return null;
+  return (
+    <div className="pdf-task-panel-section pdf-task-diagnostics-section">
+      <div className="pdf-task-panel-heading">
+        <div>
+          <span className="pdf-task-panel-kicker">QUALITY CONTROL</span>
+          <strong>质量诊断 · {diagnostics.length}</strong>
+        </div>
+      </div>
+      <details>
+        <summary>查看诊断明细</summary>
+        <ul className="pdf-task-warnings">
+          {diagnostics.map((diagnostic, index) => {
+            const location = [
+              diagnostic.pageNumber === null ? null : `第 ${diagnostic.pageNumber} 页`,
+              diagnostic.segmentId ? `段落 ${diagnostic.segmentId}` : null,
+            ].filter((item): item is string => item !== null).join(" · ");
+            return (
+              <li key={`${diagnosticKeyForRender(diagnostic)}-${index}`}>
+                <strong>{diagnosticSeverityLabel(diagnostic.severity)}</strong>
+                {diagnostic.ruleId && ` · ${diagnostic.ruleId}`}：{diagnostic.message}
+                {location && <small> · {location}</small>}
+              </li>
+            );
+          })}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+function diagnosticKeyForRender(diagnostic: PdfQualityDiagnostic): string {
+  return [diagnostic.ruleId ?? "diagnostic", diagnostic.message, diagnostic.segmentId ?? "", diagnostic.pageNumber ?? ""].join("-");
+}
+
 interface PdfTaskPanelProps {
   readerStatus: PdfReaderStatus;
   job: PdfJobUiState;
@@ -126,6 +235,9 @@ function PdfTaskPanel({
   const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
   const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
   const jobProgressValue = progressPercent(job.progress);
+  const preflight = job.preflight ?? emptyPdfPreflight();
+  const context = job.documentContext ?? preflight.context;
+  const diagnostics = job.diagnostics ?? [];
 
   return (
     <div className="pdf-task-panel">
@@ -189,6 +301,33 @@ function PdfTaskPanel({
           </p>
         )}
       </div>
+      <div className="pdf-task-panel-section pdf-task-preflight-section" aria-live="polite">
+        <div className="pdf-task-panel-heading">
+          <div>
+            <span className="pdf-task-panel-kicker">DOCUMENT PREFLIGHT</span>
+            <strong>{preflightStatusLabel(preflight)}</strong>
+          </div>
+          {preflight.applied && <span className="connection-status connected">自动应用</span>}
+        </div>
+        {preflight.message && <p className={preflight.status === "failed" ? "pdf-task-error" : "pdf-task-panel-message"}>{preflight.message}</p>}
+        {context ? (
+          <>
+            <p className="pdf-task-panel-meta">文档上下文：{contextTitle(context)} · 术语 {context.keyTerms.length} · 缩写 {context.abbreviations.length}</p>
+            <PdfContextSummary context={context} />
+          </>
+        ) : preflight.status === "running" ? (
+          <p className="pdf-task-panel-meta">正在整理标题、摘要、术语和缩写，完成后会自动用于段落翻译。</p>
+        ) : (
+          <p className="pdf-task-panel-meta">预检结果会自动应用；没有上下文时继续使用普通 PDF 翻译。</p>
+        )}
+        {(preflight.contextHash || preflight.schemaVersion !== null) && (
+          <p className="pdf-task-panel-meta">
+            {preflight.schemaVersion === null ? null : `上下文 v${preflight.schemaVersion}`}
+            {preflight.contextHash ? ` · ${preflight.contextHash}` : null}
+          </p>
+        )}
+      </div>
+      <PdfQualityDiagnostics diagnostics={diagnostics} />
     </div>
   );
 }

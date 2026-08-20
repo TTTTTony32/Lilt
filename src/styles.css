@@ -247,6 +247,19 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-task-output small { color: #93a094; font-size: 10px; }
 .pdf-task-warnings { margin: 8px 0 0; padding-left: 17px; color: #937e5e; font-size: 10px; line-height: 1.55; }
 .pdf-task-warnings li + li { margin-top: 3px; }
+.pdf-task-preflight-section { background: #f5f7f1; }
+.pdf-task-context-details { margin-top: 8px; border: 1px solid #e0e5dc; border-radius: 6px; background: rgba(255, 255, 251, .58); }
+.pdf-task-context-details summary { padding: 7px 9px; color: #687a6b; font-size: 10px; cursor: pointer; }
+.pdf-task-context-details summary::marker { color: #91a192; }
+.pdf-task-context-summary { padding: 0 9px 8px; }
+.pdf-task-context-summary .pdf-task-panel-meta:first-child { margin-top: 0; }
+.pdf-task-context-summary strong { color: #71806f; font-size: 10px; font-weight: 600; }
+.pdf-task-diagnostics-section { background: #f8f5ef; }
+.pdf-task-diagnostics-section details { margin-top: 7px; }
+.pdf-task-diagnostics-section summary { color: #8a795e; font-size: 10px; cursor: pointer; }
+.pdf-task-diagnostics-section .pdf-task-warnings { margin-top: 6px; }
+.pdf-task-diagnostics-section .pdf-task-warnings strong { color: #8f7651; font-weight: 600; }
+.pdf-task-diagnostics-section .pdf-task-warnings small { color: #a3947f; }
 .pdf-reader-file { min-width: 0; flex: 1 1 180px; display: flex; align-items: center; gap: 8px; color: #536456; font-size: 12px; font-weight: 600; }
 .pdf-reader-file > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pdf-reader-file-icon { width: 26px; height: 26px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 7px; color: #6e8a72; background: #edf3ea; }

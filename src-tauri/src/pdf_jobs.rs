@@ -1,12 +1,14 @@
 use crate::contracts::TranslationRequest;
 use crate::diagnostics;
 use crate::pdf_protocol::{
-    PDF_WORKER_PROTOCOL_VERSION, ProtocolErrorPayload, RustToWorkerMessage,
-    TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
-    TranslationResponseOutcome, WorkerToRustMessage,
+    DocumentPreflightRequestMessage, DocumentPreflightResponseMessage, PDF_WORKER_PROTOCOL_VERSION,
+    ProtocolErrorPayload, RustToWorkerMessage, TranslateRequestMessage, TranslateResponseMessage,
+    TranslatedSegment, TranslationResponseOutcome, WorkerToRustMessage,
 };
 use crate::pdf_worker::{WorkerSession, WorkerSessionEvent};
-use crate::{AppState, PreparedTranslation, TranslationCore, TranslationMode, prepare_translation};
+use crate::{
+    AppState, PreparedTranslation, TranslationCore, TranslationMode, prepare_pdf_translation,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -46,6 +48,16 @@ struct PdfTranslationPersistence {
 struct PdfTranslationRequestResult {
     response: TranslateResponseMessage,
     persistence: Option<PdfTranslationPersistence>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfPreflightCompletedEvent {
+    task_id: String,
+    context: Value,
+    context_hash: Option<String>,
+    warnings: Vec<String>,
+    degraded: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,9 +277,39 @@ fn handle_worker_message(
         WorkerToRustMessage::Progress(progress) => {
             let _ = app.emit("pdf_translation_progress", progress);
         }
+        WorkerToRustMessage::DocumentPreflightRequest(request) => {
+            let _ = app.emit(
+                "pdf_translation_preflight_started",
+                json!({
+                    "taskId": request.task_id,
+                    "preflightRequestId": request.preflight_request_id,
+                }),
+            );
+            let state = state.clone();
+            let session = session.clone();
+            let app = app.clone();
+            let cancellation = cancellation.child_token();
+            tauri::async_runtime::spawn(async move {
+                let result = translate_pdf_preflight_for_job(&state, request, cancellation).await;
+                let event = PdfPreflightCompletedEvent {
+                    task_id: result.task_id.clone(),
+                    context: result.document_context.clone(),
+                    context_hash: result.context_hash.clone(),
+                    warnings: result.warnings.clone(),
+                    degraded: result.degraded,
+                };
+                let _ = app.emit("pdf_translation_preflight_completed", event);
+                if let Err(error) =
+                    session.send(RustToWorkerMessage::DocumentPreflightResponse(result))
+                {
+                    diagnostics::warn(format!("pdf.preflight_response.send_failed error={error}"));
+                }
+            });
+        }
         WorkerToRustMessage::TranslateRequest(request) => {
             let state = state.clone();
             let session = session.clone();
+            let app = app.clone();
             let cancellation = cancellation.child_token();
             let persistence = persistence.clone();
             tauri::async_runtime::spawn(async move {
@@ -276,6 +318,18 @@ fn handle_worker_message(
                     && let Ok(mut records) = persistence.lock()
                 {
                     records.push(record);
+                }
+                for warning in &result.response.warnings {
+                    let _ = app.emit(
+                        "pdf_translation_quality_diagnostic",
+                        json!({
+                            "taskId": result.response.task_id,
+                            "translationRequestId": result.response.translation_request_id,
+                            "severity": "warning",
+                            "ruleId": "translation_quality",
+                            "message": warning,
+                        }),
+                    );
                 }
                 if let Err(error) =
                     session.send(RustToWorkerMessage::TranslateResponse(result.response))
@@ -355,6 +409,205 @@ async fn translate_pdf_request_for_job(
     translate_pdf_request_inner(state, request, cancellation, None).await
 }
 
+async fn translate_pdf_preflight_for_job(
+    state: &AppState,
+    request: DocumentPreflightRequestMessage,
+    cancellation: CancellationToken,
+) -> DocumentPreflightResponseMessage {
+    translate_pdf_preflight_inner(state, request, cancellation, None).await
+}
+
+#[cfg(test)]
+async fn translate_pdf_preflight_with_api_key(
+    state: &AppState,
+    request: DocumentPreflightRequestMessage,
+    cancellation: CancellationToken,
+    api_key: String,
+) -> DocumentPreflightResponseMessage {
+    translate_pdf_preflight_inner(state, request, cancellation, Some(api_key)).await
+}
+
+async fn translate_pdf_preflight_inner(
+    state: &AppState,
+    request: DocumentPreflightRequestMessage,
+    cancellation: CancellationToken,
+    api_key_override: Option<String>,
+) -> DocumentPreflightResponseMessage {
+    let task_id = request.task_id.clone();
+    let request_id = request.preflight_request_id.clone();
+    let empty_context = crate::pdf_context::DocumentContext::empty();
+    let degraded_task_id = task_id.clone();
+    let degraded_request_id = request_id.clone();
+    let degraded_context = empty_context.clone();
+    let degraded_response = move |warnings: Vec<String>| DocumentPreflightResponseMessage {
+        task_id: degraded_task_id.clone(),
+        preflight_request_id: degraded_request_id.clone(),
+        outcome: TranslationResponseOutcome::Completed,
+        document_context: degraded_context.to_value(),
+        context_hash: Some(degraded_context.hash().to_string()),
+        degraded: true,
+        warnings,
+        error: None,
+    };
+
+    if cancellation.is_cancelled() {
+        return DocumentPreflightResponseMessage {
+            task_id,
+            preflight_request_id: request_id,
+            outcome: TranslationResponseOutcome::Cancelled,
+            document_context: Value::Null,
+            context_hash: None,
+            degraded: true,
+            warnings: Vec::new(),
+            error: None,
+        };
+    }
+
+    let provider = match state.database.lock() {
+        Ok(connection) => match crate::db::get_provider(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                return degraded_response(vec![format!("预检读取 Provider 失败：{error}")]);
+            }
+        },
+        Err(_) => {
+            return degraded_response(vec!["预检读取 Provider 失败：数据库锁已损坏".to_string()]);
+        }
+    };
+    let source_text = preflight_source_text(&request);
+    if source_text.is_empty() {
+        return degraded_response(vec![
+            "PDF 未提供可用于预检的文本样本，已使用空文档上下文".to_string(),
+        ]);
+    }
+    let request_contract = TranslationRequest {
+        request_id: request.preflight_request_id.clone(),
+        source_text: source_text.clone(),
+        source_language: request.source_language.clone(),
+        target_language: request.target_language.clone(),
+        model_id: provider.model_id.clone(),
+        prompt_id: provider.prompt_id.clone(),
+    };
+    let empty = Value::Object(Default::default());
+    let prepared = match crate::prepare_pdf_translation(
+        state,
+        &request_contract,
+        &source_text,
+        TranslationMode::PdfPreflight,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        &request.engine_constraints,
+    ) {
+        Ok(value) => value,
+        Err(error) => return degraded_response(vec![format!("文档预检准备失败：{error}")]),
+    };
+    let api_key = match api_key_override {
+        Some(value) => value,
+        None => match crate::secrets::load_api_key(&prepared.provider.id) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return degraded_response(vec!["尚未配置 API Key，文档预检已跳过".to_string()]);
+            }
+            Err(error) => {
+                return degraded_response(vec![format!(
+                    "读取 API Key 失败，文档预检已跳过：{error}"
+                )]);
+            }
+        },
+    };
+    let system_prompt = format!(
+        "{}\n\n你正在执行 PDF 文档预检。只返回 JSON 对象，不要返回 Markdown。字段必须包括 schema_version、title、abstract、document_type、domain、headings、key_terms、abbreviations、translation_notes。key_terms 的元素使用 source、target、source_kind、confidence、note；abbreviations 的元素使用 abbreviation、expanded、target、confidence。无法确认的字段使用 null 或空数组。",
+        prepared.system_prompt
+    );
+    let translated = TranslationCore::stream_with_usage(
+        crate::translation_core::StreamRequest {
+            request_id: &request.preflight_request_id,
+            base_url: &prepared.provider.base_url,
+            api_key: &api_key,
+            model_id: &prepared.provider.model_id,
+            system_prompt: &system_prompt,
+            user_text: &source_text,
+            cancel: &cancellation,
+            mode: TranslationMode::PdfPreflight,
+            thinking_effort: &prepared.provider.thinking_effort,
+        },
+        |_| Ok(()),
+    )
+    .await;
+    let translated = match translated {
+        Ok(value) => value,
+        Err(crate::provider::ProviderError::Cancelled) => {
+            return DocumentPreflightResponseMessage {
+                task_id,
+                preflight_request_id: request_id,
+                outcome: TranslationResponseOutcome::Cancelled,
+                document_context: Value::Null,
+                context_hash: None,
+                degraded: true,
+                warnings: Vec::new(),
+                error: None,
+            };
+        }
+        Err(error) => {
+            return degraded_response(vec![format!(
+                "文档预检请求失败，已继续无上下文翻译：{error}"
+            )]);
+        }
+    };
+    match crate::pdf_context::DocumentContext::from_model_output(&translated.content) {
+        Ok(context) => DocumentPreflightResponseMessage {
+            task_id,
+            preflight_request_id: request_id,
+            outcome: TranslationResponseOutcome::Completed,
+            document_context: context.to_value(),
+            context_hash: Some(context.hash().to_string()),
+            degraded: false,
+            warnings: Vec::new(),
+            error: None,
+        },
+        Err(error) => degraded_response(vec![format!(
+            "文档预检结果无法解析，已使用空上下文：{error}"
+        )]),
+    }
+}
+
+fn preflight_source_text(request: &DocumentPreflightRequestMessage) -> String {
+    let mut samples = Vec::new();
+    let mut used_chars = 0usize;
+    for sample in request
+        .samples
+        .iter()
+        .take(crate::pdf_context::MAX_PREFLIGHT_SAMPLE_COUNT)
+    {
+        if used_chars >= crate::pdf_context::MAX_PREFLIGHT_SAMPLE_CHARS {
+            break;
+        }
+        let remaining = crate::pdf_context::MAX_PREFLIGHT_SAMPLE_CHARS - used_chars;
+        let text = sample
+            .source_text
+            .chars()
+            .take(remaining)
+            .collect::<String>();
+        if text.trim().is_empty() {
+            continue;
+        }
+        used_chars += text.chars().count();
+        samples.push(
+            json!({"id": sample.segment_id, "text": text, "placeholders": sample.placeholders}),
+        );
+    }
+    serde_json::to_string(&json!({
+        "metadata": request.metadata,
+        "samples": samples,
+        "source_language": request.source_language,
+        "target_language": request.target_language,
+    }))
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 async fn translate_pdf_request_with_api_key(
     state: &AppState,
@@ -419,7 +672,18 @@ async fn translate_pdf_request_inner(
         model_id: provider.model_id.clone(),
         prompt_id: provider.prompt_id.clone(),
     };
-    let prepared = match prepare_translation(state, &request_contract, &source_text) {
+    let prepared = match prepare_pdf_translation(
+        state,
+        &request_contract,
+        &source_text,
+        TranslationMode::PdfSegment,
+        &request.document_context,
+        &request.context_before,
+        &request.context_after,
+        &request.task_terms,
+        &request.abbreviations,
+        &request.engine_constraints,
+    ) {
         Ok(value) => value,
         Err(error) => return failed("translation_prepare_failed", error),
     };
@@ -437,6 +701,8 @@ async fn translate_pdf_request_inner(
                     Ok(value) => value,
                     Err(error) => return failed("cache_validation_failed", error),
                 };
+            let warnings =
+                quality_warnings(&request, &translated_segments, &prepared.glossary_terms);
             return PdfTranslationRequestResult {
                 response: TranslateResponseMessage {
                     task_id,
@@ -446,7 +712,7 @@ async fn translate_pdf_request_inner(
                     translated_segments,
                     token_usage: None,
                     cache_hit: true,
-                    warnings: Vec::new(),
+                    warnings,
                     error: None,
                 },
                 persistence: Some(make_pdf_persistence(
@@ -472,7 +738,7 @@ async fn translate_pdf_request_inner(
             Err(error) => return failed("api_key_failed", error),
         },
     };
-    let system_prompt = pdf_system_prompt(&prepared, &request.engine_constraints);
+    let system_prompt = prepared.system_prompt.clone();
     let translated = TranslationCore::stream_with_usage(
         crate::translation_core::StreamRequest {
             request_id: &translation_request_id,
@@ -517,10 +783,14 @@ async fn translate_pdf_request_inner(
                 translation_request_id,
                 outcome: TranslationResponseOutcome::Completed,
                 translated_text,
+                warnings: quality_warnings(
+                    &request,
+                    &translated_segments,
+                    &prepared.glossary_terms,
+                ),
                 translated_segments,
                 token_usage,
                 cache_hit: false,
-                warnings: Vec::new(),
                 error: None,
             },
             persistence: Some(make_pdf_persistence(
@@ -631,14 +901,6 @@ fn request_source_text(request: &TranslateRequestMessage) -> Result<String, Stri
     serde_json::to_string(&items).map_err(|error| format!("构造批量翻译请求失败：{error}"))
 }
 
-fn pdf_system_prompt(prepared: &PreparedTranslation, constraints: &Value) -> String {
-    let constraints = serde_json::to_string(constraints).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        "{}\n\nPDF 引擎约束：{}\n保留所有公式、富文本和占位符。批量请求必须返回与输入相同的 JSON 数组，每项保留 id 并在 output 中给出译文。",
-        prepared.system_prompt, constraints
-    )
-}
-
 fn build_translation_response(
     request: &TranslateRequestMessage,
     translated: String,
@@ -693,6 +955,109 @@ fn build_translation_response(
         return Err("批量译文包含未知段落 ID".to_string());
     }
     Ok((None, segments))
+}
+
+fn quality_warnings(
+    request: &TranslateRequestMessage,
+    translated_segments: &[TranslatedSegment],
+    glossary_terms: &[crate::contracts::GlossaryTerm],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for segment in translated_segments {
+        let Some(source) = request
+            .segments
+            .iter()
+            .find(|candidate| candidate.segment_id == segment.segment_id)
+        else {
+            continue;
+        };
+        if segment.translated_text.trim().is_empty() {
+            warnings.push(format!("段落 {} 的译文为空", segment.segment_id));
+        }
+        let source_lower = source.source_text.to_lowercase();
+        let translated_lower = segment.translated_text.to_lowercase();
+        for (original, expected) in constrained_term_pairs(&request.task_terms)
+            .into_iter()
+            .chain(constrained_abbreviation_pairs(&request.abbreviations))
+        {
+            if !source_lower.contains(&original.to_lowercase()) {
+                continue;
+            }
+            if glossary_terms.iter().any(|term| {
+                source_lower.contains(&term.source.to_lowercase())
+                    && term.source.eq_ignore_ascii_case(&original)
+            }) {
+                continue;
+            }
+            if !translated_lower.contains(&expected.to_lowercase()) {
+                warnings.push(format!(
+                    "段落 {} 可能未遵循 {} 的任务约束：{}",
+                    segment.segment_id, original, expected
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+fn constrained_items<'a>(value: &'a Value, key: &'a str) -> Option<&'a Vec<Value>> {
+    value
+        .as_array()
+        .or_else(|| value.get(key).and_then(Value::as_array))
+}
+
+fn constrained_term_pairs(value: &Value) -> Vec<(String, String)> {
+    let Some(items) = constrained_items(value, "key_terms") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let original = object
+                .get("source")
+                .or_else(|| object.get("term"))
+                .or_else(|| object.get("original"))
+                .and_then(Value::as_str)?
+                .trim();
+            let expected = object
+                .get("target")
+                .or_else(|| object.get("translation"))
+                .and_then(Value::as_str)?
+                .trim();
+            if original.is_empty() || expected.is_empty() {
+                return None;
+            }
+            Some((original.to_string(), expected.to_string()))
+        })
+        .collect()
+}
+
+fn constrained_abbreviation_pairs(value: &Value) -> Vec<(String, String)> {
+    let Some(items) = constrained_items(value, "abbreviations") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let original = object
+                .get("source")
+                .or_else(|| object.get("abbreviation"))
+                .or_else(|| object.get("short"))
+                .and_then(Value::as_str)?
+                .trim();
+            let expected = object
+                .get("target")
+                .or_else(|| object.get("translation"))
+                .and_then(Value::as_str)?
+                .trim();
+            if original.is_empty() || expected.is_empty() {
+                return None;
+            }
+            Some((original.to_string(), expected.to_string()))
+        })
+        .collect()
 }
 
 fn validate_placeholders(placeholders: &[String], translated: &str) -> Result<(), String> {
@@ -790,15 +1155,17 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_translation_response, commit_pdf_persistence, normalize_pdf_options,
-        request_source_text, translate_pdf_request_inner, translate_pdf_request_with_api_key,
-        validate_input_pdf, validate_output_pdf,
+        build_translation_response, commit_pdf_persistence, constrained_abbreviation_pairs,
+        normalize_pdf_options, quality_warnings, request_source_text,
+        translate_pdf_preflight_with_api_key, translate_pdf_request_inner,
+        translate_pdf_request_with_api_key, validate_input_pdf, validate_output_pdf,
     };
     use crate::AppState;
     use crate::StartupRuntime;
-    use crate::contracts::ThinkingEffort;
+    use crate::contracts::{GlossaryTerm, ThinkingEffort};
     use crate::pdf_protocol::{
-        FinishedMessage, RustToWorkerMessage, StartJobMessage, TranslateRequestMessage,
+        DocumentPreflightRequestMessage, DocumentPreflightResponseMessage, FinishedMessage,
+        RustToWorkerMessage, StartJobMessage, TranslateRequestMessage, TranslationResponseOutcome,
         TranslationSegment, WorkerToRustMessage,
     };
     use crate::pdf_worker::{WorkerSession, WorkerSessionEvent};
@@ -824,6 +1191,10 @@ mod tests {
             target_language: "zh-CN".to_string(),
             segments,
             document_context: json!({}),
+            context_before: json!({}),
+            context_after: json!({}),
+            task_terms: json!([]),
+            abbreviations: json!([]),
             engine_constraints: json!({}),
         }
     }
@@ -859,6 +1230,38 @@ mod tests {
         )
         .expect_err("placeholder must be preserved");
         assert!(error.contains("占位符"));
+    }
+
+    #[test]
+    fn quality_diagnostics_respect_global_terms_and_ignore_abbreviation_expansions() {
+        let mut translation_request = request(vec![TranslationSegment {
+            segment_id: "p1-s1".to_string(),
+            source_text: "cache API".to_string(),
+            placeholders: Vec::new(),
+        }]);
+        translation_request.task_terms = json!([
+            {"source": "cache", "target": "临时存储"}
+        ]);
+        translation_request.abbreviations = json!([
+            {"abbreviation": "API", "expanded": "Application Programming Interface"}
+        ]);
+        let translated = vec![crate::pdf_protocol::TranslatedSegment {
+            segment_id: "p1-s1".to_string(),
+            translated_text: "缓存 API".to_string(),
+        }];
+        let glossary = vec![GlossaryTerm {
+            id: "global-cache".to_string(),
+            source: "cache".to_string(),
+            target: "缓存".to_string(),
+            note: None,
+        }];
+        assert!(quality_warnings(&translation_request, &translated, &glossary).is_empty());
+        assert!(
+            constrained_abbreviation_pairs(&json!([
+                {"abbreviation": "API", "expanded": "Application Programming Interface"}
+            ]))
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1006,6 +1409,87 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pdf_preflight_reaches_the_shared_provider_core_and_normalizes_context() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream).unwrap();
+            let request = String::from_utf8_lossy(&request).to_lowercase();
+            assert!(request.starts_with("post /v1/chat/completions"));
+            assert!(request.contains("authorization: bearer test-key"));
+            let context = serde_json::to_string(&json!({
+                "schema_version": 1,
+                "title": "A paper",
+                "abstract": "A short abstract",
+                "key_terms": [{
+                    "source": "cache",
+                    "target": "缓存",
+                    "confidence": 0.9
+                }],
+                "abbreviations": [{
+                    "abbreviation": "API",
+                    "expanded": "Application Programming Interface",
+                    "target": "接口",
+                    "confidence": 0.8
+                }]
+            }))
+            .unwrap();
+            let body = format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"delta":{"content":context}}]})
+            );
+            write_http_response(
+                &mut stream,
+                "HTTP/1.1 200 OK",
+                "text/event-stream",
+                body.as_bytes(),
+            );
+        });
+
+        let connection = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&connection).unwrap();
+        crate::db::save_provider(
+            &connection,
+            &format!("http://{address}/v1"),
+            "stub-model",
+            ThinkingEffort::None,
+        )
+        .unwrap();
+        let state = AppState::new(
+            connection,
+            std::env::temp_dir(),
+            Arc::new(StartupRuntime::new()),
+        );
+        let response = translate_pdf_preflight_with_api_key(
+            &state,
+            DocumentPreflightRequestMessage {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                metadata: json!({"file_name": "fixture.pdf"}),
+                samples: vec![TranslationSegment {
+                    segment_id: "p1-s1".to_string(),
+                    source_text: "A representative paragraph".to_string(),
+                    placeholders: Vec::new(),
+                }],
+                engine_constraints: json!({"response_format": "json"}),
+            },
+            CancellationToken::new(),
+            "test-key".to_string(),
+        )
+        .await;
+
+        server.join().unwrap();
+        assert_eq!(response.outcome, TranslationResponseOutcome::Completed);
+        assert!(!response.degraded);
+        assert_eq!(response.document_context["title"], "A paper");
+        assert_eq!(response.document_context["schema_version"], 1);
+        assert_eq!(response.context_hash.as_deref().map(str::len), Some(64));
+    }
+
     #[test]
     #[ignore = "requires a staged external PDF Engine runtime"]
     fn optional_rust_worker_e2e_uses_an_external_engine_and_shared_core() {
@@ -1074,6 +1558,30 @@ mod tests {
         let output_pdf = loop {
             assert!(Instant::now() < deadline, "Rust PDF E2E timed out");
             match session.recv_timeout(Duration::from_millis(250)) {
+                Ok(WorkerSessionEvent::Message(WorkerToRustMessage::DocumentPreflightRequest(
+                    request,
+                ))) => {
+                    session
+                        .send(RustToWorkerMessage::DocumentPreflightResponse(
+                            DocumentPreflightResponseMessage {
+                                task_id: request.task_id,
+                                preflight_request_id: request.preflight_request_id,
+                                outcome: TranslationResponseOutcome::Completed,
+                                document_context: json!({
+                                    "schema_version": 1,
+                                    "title": "Rust PDF E2E fixture",
+                                    "key_terms": [],
+                                    "abbreviations": [],
+                                    "translation_notes": []
+                                }),
+                                context_hash: Some("rust-pdf-e2e-context".to_string()),
+                                degraded: false,
+                                warnings: Vec::new(),
+                                error: None,
+                            },
+                        ))
+                        .expect("send DOCUMENT_PREFLIGHT_RESPONSE");
+                }
                 Ok(WorkerSessionEvent::Message(WorkerToRustMessage::TranslateRequest(request))) => {
                     let response = runtime.block_on(translate_pdf_request_with_api_key(
                         &state,

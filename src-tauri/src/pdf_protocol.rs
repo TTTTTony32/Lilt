@@ -33,6 +33,8 @@ pub enum RustToWorkerMessage {
     CancelJob(CancelJobMessage),
     #[serde(rename = "TRANSLATE_RESPONSE")]
     TranslateResponse(TranslateResponseMessage),
+    #[serde(rename = "DOCUMENT_PREFLIGHT_RESPONSE")]
+    DocumentPreflightResponse(DocumentPreflightResponseMessage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -74,6 +76,24 @@ pub struct TranslateResponseMessage {
     pub error: Option<ProtocolErrorPayload>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct DocumentPreflightResponseMessage {
+    pub task_id: String,
+    pub preflight_request_id: String,
+    pub outcome: TranslationResponseOutcome,
+    #[serde(default)]
+    pub document_context: Value,
+    #[serde(default)]
+    pub context_hash: Option<String>,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub error: Option<ProtocolErrorPayload>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TranslationResponseOutcome {
@@ -100,6 +120,8 @@ pub enum WorkerToRustMessage {
     Progress(ProgressMessage),
     #[serde(rename = "TRANSLATE_REQUEST")]
     TranslateRequest(TranslateRequestMessage),
+    #[serde(rename = "DOCUMENT_PREFLIGHT_REQUEST")]
+    DocumentPreflightRequest(DocumentPreflightRequestMessage),
     #[serde(rename = "TOKEN_USAGE")]
     TokenUsage(TokenUsageMessage),
     #[serde(rename = "WARNING")]
@@ -154,6 +176,29 @@ pub struct TranslateRequestMessage {
     pub segments: Vec<TranslationSegment>,
     #[serde(default)]
     pub document_context: Value,
+    #[serde(default)]
+    pub context_before: Value,
+    #[serde(default)]
+    pub context_after: Value,
+    #[serde(default)]
+    pub task_terms: Value,
+    #[serde(default)]
+    pub abbreviations: Value,
+    #[serde(default)]
+    pub engine_constraints: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct DocumentPreflightRequestMessage {
+    pub task_id: String,
+    pub preflight_request_id: String,
+    pub source_language: String,
+    pub target_language: String,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub samples: Vec<TranslationSegment>,
     #[serde(default)]
     pub engine_constraints: Value,
 }
@@ -309,12 +354,12 @@ pub fn decode_worker_message(line: &str) -> Result<WorkerToRustMessage, Protocol
 #[cfg(test)]
 mod tests {
     use super::{
-        CancelJobMessage, FinishedMessage, JobStartedMessage, MAX_PROTOCOL_LINE_BYTES,
-        PDF_WORKER_PROTOCOL_VERSION, ProtocolError, ProtocolErrorPayload, RustToWorkerMessage,
-        StartJobMessage, TokenUsage, TokenUsageMessage, TranslateRequestMessage,
-        TranslateResponseMessage, TranslatedSegment, TranslationResponseOutcome,
-        TranslationSegment, WarningMessage, WorkerToRustMessage, decode_rust_message,
-        decode_worker_message, encode_rust_message, encode_worker_message,
+        CancelJobMessage, DocumentPreflightRequestMessage, DocumentPreflightResponseMessage,
+        FinishedMessage, JobStartedMessage, MAX_PROTOCOL_LINE_BYTES, PDF_WORKER_PROTOCOL_VERSION,
+        ProtocolError, ProtocolErrorPayload, RustToWorkerMessage, StartJobMessage, TokenUsage,
+        TokenUsageMessage, TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
+        TranslationResponseOutcome, TranslationSegment, WarningMessage, WorkerToRustMessage,
+        decode_rust_message, decode_worker_message, encode_rust_message, encode_worker_message,
     };
     use serde_json::json;
 
@@ -359,6 +404,10 @@ mod tests {
                 },
             ],
             document_context: json!({"page": 2}),
+            context_before: json!({}),
+            context_after: json!({}),
+            task_terms: json!([]),
+            abbreviations: json!([]),
             engine_constraints: json!({"response_format": "json"}),
         });
 
@@ -392,6 +441,46 @@ mod tests {
         let encoded = encode_rust_message(&message).expect("response should serialize");
         let decoded = decode_rust_message(&encoded).expect("response should deserialize");
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn preflight_request_and_response_round_trip_with_context_fields() {
+        let request =
+            WorkerToRustMessage::DocumentPreflightRequest(DocumentPreflightRequestMessage {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                metadata: json!({"title": "A paper"}),
+                samples: vec![TranslationSegment {
+                    segment_id: "p1-s1".to_string(),
+                    source_text: "A sample".to_string(),
+                    placeholders: Vec::new(),
+                }],
+                engine_constraints: json!({"preserve_placeholders": true}),
+            });
+        let decoded_request = decode_worker_message(
+            &encode_worker_message(&request).expect("preflight request should serialize"),
+        )
+        .expect("preflight request should deserialize");
+        assert_eq!(decoded_request, request);
+
+        let response =
+            RustToWorkerMessage::DocumentPreflightResponse(DocumentPreflightResponseMessage {
+                task_id: "task-1".to_string(),
+                preflight_request_id: "preflight-1".to_string(),
+                outcome: TranslationResponseOutcome::Completed,
+                document_context: json!({"schema_version": 1, "title": "A paper"}),
+                context_hash: Some("hash".to_string()),
+                degraded: false,
+                warnings: Vec::new(),
+                error: None,
+            });
+        let decoded_response = decode_rust_message(
+            &encode_rust_message(&response).expect("preflight response should serialize"),
+        )
+        .expect("preflight response should deserialize");
+        assert_eq!(decoded_response, response);
     }
 
     #[test]

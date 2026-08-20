@@ -15,6 +15,9 @@ import {
   decodePdfJobEvent,
   decodePdfTranslationCancelResult,
   decodePdfTranslationStartResult,
+  type PdfPreflightEvent,
+  type PdfPreflightState,
+  type PdfQualityDiagnostic,
   type PdfEngineEvent,
   type PdfEngineProgress,
   type PdfEngineStatus,
@@ -31,6 +34,18 @@ const PDF_ENGINE_PREPARE_TIMEOUT_MS = 600_000;
 const PDF_TRANSLATION_START_TIMEOUT_MS = 30_000;
 const PDF_TRANSLATION_CANCEL_TIMEOUT_MS = 10_000;
 
+function emptyPdfPreflight(): PdfPreflightState {
+  return {
+    status: "idle",
+    schemaVersion: null,
+    context: null,
+    contextHash: null,
+    warnings: [],
+    applied: false,
+    message: null,
+  };
+}
+
 function emptyPdfJob(): PdfJobUiState {
   return {
     taskId: null,
@@ -45,6 +60,84 @@ function emptyPdfJob(): PdfJobUiState {
     tokenUsage: null,
     code: null,
     message: null,
+    preflight: emptyPdfPreflight(),
+    documentContext: null,
+    diagnostics: [],
+  };
+}
+
+function appendUniqueStrings(current: string[], additions: string[]): string[] {
+  return additions.reduce((result, item) => result.includes(item) ? result : [...result, item], current);
+}
+
+function diagnosticKey(diagnostic: PdfQualityDiagnostic): string {
+  return [
+    diagnostic.ruleId ?? "",
+    diagnostic.message,
+    diagnostic.segmentId ?? "",
+    diagnostic.pageNumber ?? "",
+    diagnostic.translationRequestId ?? "",
+  ].join("|");
+}
+
+function appendUniqueDiagnostics(current: PdfQualityDiagnostic[], additions: PdfQualityDiagnostic[]): PdfQualityDiagnostic[] {
+  const keys = new Set(current.map(diagnosticKey));
+  return additions.reduce((result, diagnostic) => {
+    const key = diagnosticKey(diagnostic);
+    if (keys.has(key)) return result;
+    keys.add(key);
+    return [...result, diagnostic];
+  }, current);
+}
+
+function mergePdfJobEventMetadata(current: PdfJobUiState, event: PdfJobEvent): PdfJobUiState {
+  let next = current;
+  if ("preflight" in event && event.preflight) {
+    next = {
+      ...next,
+      preflight: event.preflight,
+      documentContext: event.preflight.context ?? next.documentContext ?? null,
+      warnings: appendUniqueStrings(next.warnings, event.preflight.warnings),
+    };
+  }
+  if ("documentContext" in event && event.documentContext) {
+    next = { ...next, documentContext: event.documentContext };
+  }
+  if ("diagnostics" in event && event.diagnostics) {
+    next = { ...next, diagnostics: appendUniqueDiagnostics(next.diagnostics ?? [], event.diagnostics) };
+  }
+  return next;
+}
+
+function mergePdfPreflight(current: PdfJobUiState, event: PdfPreflightEvent): PdfJobUiState {
+  const withMetadata = mergePdfJobEventMetadata({
+    ...current,
+    taskId: event.taskId,
+    preflight: event.preflight,
+    documentContext: event.preflight.context ?? current.documentContext ?? null,
+    warnings: appendUniqueStrings(current.warnings, event.preflight.warnings),
+  }, event);
+  const message = event.preflight.message;
+  return message && event.preflight.status !== "running"
+    ? { ...withMetadata, warnings: appendUniqueStrings(withMetadata.warnings, [message]) }
+    : withMetadata;
+}
+
+function mergePdfPreflightWarning(current: PdfJobUiState, code: string, message: string): PdfJobUiState {
+  if (!code.toLowerCase().includes("preflight")) return current;
+  const preflight = current.preflight ?? emptyPdfPreflight();
+  const failed = code.toLowerCase().includes("failed") || code.toLowerCase().includes("error");
+  const status = failed ? "failed" : "degraded";
+  return {
+    ...current,
+    preflight: {
+      ...preflight,
+      status,
+      message,
+      applied: preflight.applied && !failed,
+      warnings: appendUniqueStrings(preflight.warnings, [message]),
+    },
+    warnings: appendUniqueStrings(current.warnings, [message]),
   };
 }
 
@@ -376,8 +469,20 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
   const handlePdfJobEvent = useCallback((event: PdfJobEvent) => {
     if (disposedRef.current || !matchesPdfTask(event.taskId)) return;
     switch (event.type) {
+      case "preflightStarted":
+      case "preflightCompleted":
+      case "preflightDegraded":
+      case "preflightFailed":
+        updatePdfJob((current) => mergePdfPreflight(current, event));
+        break;
+      case "diagnostic":
+        updatePdfJob((current) => mergePdfJobEventMetadata({
+          ...current,
+          diagnostics: appendUniqueDiagnostics(current.diagnostics ?? [], [event.diagnostic]),
+        }, event));
+        break;
       case "started":
-        updatePdfJob((current) => ({
+        updatePdfJob((current) => mergePdfJobEventMetadata({
           ...current,
           taskId: event.taskId,
           status: current.status === "cancelling" ? "cancelling" : "running",
@@ -385,35 +490,52 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
           workerVersion: event.workerVersion,
           message: null,
           code: null,
-        }));
+        }, event));
         break;
       case "stage":
-        updatePdfJob((current) => ({
-          ...current,
-          taskId: event.taskId,
-          status: current.status === "cancelling" ? "cancelling" : "running",
-          stage: event.stage,
-          message: null,
-        }));
+        updatePdfJob((current) => {
+          const next = mergePdfJobEventMetadata({
+            ...current,
+            taskId: event.taskId,
+            status: current.status === "cancelling" ? "cancelling" : "running",
+            stage: event.stage,
+            message: null,
+          }, event);
+          const preflight = next.preflight ?? emptyPdfPreflight();
+          return /preflight/i.test(event.stage) && preflight.status === "idle"
+            ? { ...next, preflight: { ...preflight, status: "running", message: null } }
+            : next;
+        });
         break;
       case "progress":
-        updatePdfJob((current) => ({
-          ...current,
-          taskId: event.taskId,
-          status: current.status === "cancelling" ? "cancelling" : "running",
-          stage: event.progress.stage,
-          progress: event.progress,
-          message: event.progress.message ?? current.message,
-        }));
+        updatePdfJob((current) => {
+          const next = mergePdfJobEventMetadata({
+            ...current,
+            taskId: event.taskId,
+            status: current.status === "cancelling" ? "cancelling" : "running",
+            stage: event.progress.stage,
+            progress: event.progress,
+            message: event.progress.message ?? current.message,
+          }, event);
+          const preflight = next.preflight ?? emptyPdfPreflight();
+          return /preflight/i.test(event.progress.stage) && preflight.status === "idle"
+            ? { ...next, preflight: { ...preflight, status: "running", message: null } }
+            : next;
+        });
         break;
       case "tokenUsage":
-        updatePdfJob((current) => ({ ...current, tokenUsage: event.usage }));
+        updatePdfJob((current) => mergePdfJobEventMetadata({ ...current, tokenUsage: event.usage }, event));
         break;
       case "warning":
-        updatePdfJob((current) => ({
-          ...current,
-          warnings: current.warnings.includes(event.message) ? current.warnings : [...current.warnings, event.message],
-        }));
+        updatePdfJob((current) => {
+          const next = mergePdfPreflightWarning(mergePdfJobEventMetadata({
+            ...current,
+            warnings: appendUniqueStrings(current.warnings, [event.message]),
+          }, event), event.code, event.message);
+          return event.diagnostic
+            ? { ...next, diagnostics: appendUniqueDiagnostics(next.diagnostics ?? [], [event.diagnostic]) }
+            : next;
+        });
         break;
       case "finished": {
         clearPdfTaskRefs();
@@ -424,7 +546,7 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
         } else {
           setError("翻译已完成，但输出 PDF 路径无效。请从任务面板检查输出文件。");
         }
-        updatePdfJob((current) => ({
+        updatePdfJob((current) => mergePdfJobEventMetadata({
           ...current,
           taskId: event.taskId,
           status: "completed",
@@ -433,33 +555,39 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
           outputPdf: event.outputPdf,
           outputMode: event.outputMode,
           pageCount: event.pageCount,
-          warnings: [...current.warnings, ...event.warnings.filter((warning) => !current.warnings.includes(warning))],
+          warnings: appendUniqueStrings(current.warnings, event.warnings),
           message: null,
           code: null,
-        }));
+        }, event));
         break;
       }
       case "cancelled":
         clearPdfTaskRefs();
-        updatePdfJob((current) => ({
+        updatePdfJob((current) => mergePdfJobEventMetadata({
           ...current,
           taskId: event.taskId,
           status: "cancelled",
           message: event.reason ?? "PDF 翻译已取消",
           code: null,
           outputPdf: null,
-        }));
+        }, event));
         break;
       case "failed":
         clearPdfTaskRefs();
-        updatePdfJob((current) => ({
-          ...current,
-          taskId: event.taskId,
-          status: "failed",
-          code: event.code,
-          message: event.message,
-          outputPdf: null,
-        }));
+        updatePdfJob((current) => {
+          const next = mergePdfJobEventMetadata({
+            ...current,
+            taskId: event.taskId,
+            status: "failed",
+            code: event.code,
+            message: event.message,
+            outputPdf: null,
+          }, event);
+          const preflight = next.preflight ?? emptyPdfPreflight();
+          return event.code.toLowerCase().includes("preflight")
+            ? { ...next, preflight: { ...preflight, status: "failed", message: event.message, applied: false }, warnings: appendUniqueStrings(next.warnings, [event.message]) }
+            : next;
+        });
         break;
     }
   }, [clearPdfTaskRefs, matchesPdfTask, updatePdfJob]);
@@ -487,6 +615,7 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
           source_language: "en",
           target_language: "zh-CN",
           output_mode: "bilingual",
+          metadata: { file_name: selectedFile.fileName },
         },
       });
       void commandPromise.then((lateRaw) => {

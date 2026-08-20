@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 pub enum TranslationMode {
     Paragraph,
     PdfSegment,
+    PdfPreflight,
     WordExample,
 }
 
@@ -13,6 +14,7 @@ impl TranslationMode {
         match mode {
             "paragraph" => Some(Self::Paragraph),
             "pdf_segment" => Some(Self::PdfSegment),
+            "pdf_preflight" => Some(Self::PdfPreflight),
             "word_example" => Some(Self::WordExample),
             _ => None,
         }
@@ -22,6 +24,7 @@ impl TranslationMode {
         match self {
             Self::Paragraph => "translate",
             Self::PdfSegment => "pdf_segment",
+            Self::PdfPreflight => "pdf_preflight",
             Self::WordExample => "word_example",
         }
     }
@@ -88,11 +91,19 @@ mod tests {
             TranslationMode::from_wire_mode("pdf_segment"),
             Some(TranslationMode::PdfSegment)
         );
+        assert_eq!(
+            TranslationMode::from_wire_mode("pdf_preflight"),
+            Some(TranslationMode::PdfPreflight)
+        );
         assert_eq!(TranslationMode::from_wire_mode("unknown"), None);
         assert_eq!(TranslationMode::Paragraph.provider_operation(), "translate");
         assert_eq!(
             TranslationMode::PdfSegment.provider_operation(),
             "pdf_segment"
+        );
+        assert_eq!(
+            TranslationMode::PdfPreflight.provider_operation(),
+            "pdf_preflight"
         );
         assert_eq!(
             TranslationMode::WordExample.provider_operation(),

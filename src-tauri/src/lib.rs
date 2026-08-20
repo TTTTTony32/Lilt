@@ -6,6 +6,7 @@ mod examples;
 mod glossary;
 mod icons;
 mod pdf;
+mod pdf_context;
 mod pdf_engine;
 mod pdf_jobs;
 pub mod pdf_protocol;
@@ -1056,6 +1057,7 @@ async fn translate_impl(
 pub(crate) struct PreparedTranslation {
     pub(crate) provider: contracts::ProviderRecord,
     pub(crate) prompt: Prompt,
+    pub(crate) glossary_terms: Vec<GlossaryTerm>,
     pub(crate) system_prompt: String,
     pub(crate) cache_key: String,
     pub(crate) cache_enabled: bool,
@@ -1068,6 +1070,67 @@ pub(crate) fn prepare_translation(
     state: &AppState,
     request: &TranslationRequest,
     source_text: &str,
+) -> Result<PreparedTranslation, String> {
+    prepare_translation_internal(
+        state,
+        request,
+        source_text,
+        TranslationMode::Paragraph,
+        None,
+    )
+}
+
+pub(crate) fn prepare_pdf_translation(
+    state: &AppState,
+    request: &TranslationRequest,
+    source_text: &str,
+    mode: TranslationMode,
+    document_context: &serde_json::Value,
+    context_before: &serde_json::Value,
+    context_after: &serde_json::Value,
+    task_terms: &serde_json::Value,
+    abbreviations: &serde_json::Value,
+    engine_constraints: &serde_json::Value,
+) -> Result<PreparedTranslation, String> {
+    let document_context = pdf_context::DocumentContext::from_value(document_context.clone())
+        .unwrap_or_else(|_| pdf_context::DocumentContext::empty())
+        .to_value();
+    let context_before = pdf_context::bounded_value(context_before);
+    let context_after = pdf_context::bounded_value(context_after);
+    let task_terms = pdf_context::bounded_value(task_terms);
+    let abbreviations = pdf_context::bounded_value(abbreviations);
+    let engine_constraints = pdf_context::bounded_value(engine_constraints);
+    prepare_translation_internal(
+        state,
+        request,
+        source_text,
+        mode,
+        Some(PdfPromptContext {
+            document_context: &document_context,
+            context_before: &context_before,
+            context_after: &context_after,
+            task_terms: &task_terms,
+            abbreviations: &abbreviations,
+            engine_constraints: &engine_constraints,
+        }),
+    )
+}
+
+struct PdfPromptContext<'a> {
+    document_context: &'a serde_json::Value,
+    context_before: &'a serde_json::Value,
+    context_after: &'a serde_json::Value,
+    task_terms: &'a serde_json::Value,
+    abbreviations: &'a serde_json::Value,
+    engine_constraints: &'a serde_json::Value,
+}
+
+fn prepare_translation_internal(
+    state: &AppState,
+    request: &TranslationRequest,
+    source_text: &str,
+    mode: TranslationMode,
+    pdf_context: Option<PdfPromptContext<'_>>,
 ) -> Result<PreparedTranslation, String> {
     let connection = state
         .database
@@ -1085,8 +1148,8 @@ pub(crate) fn prepare_translation(
     let prompt = db::get_prompt(&connection, &provider.prompt_id)?;
     let terms = db::list_glossary_terms(&connection)?;
     let glossary_version = db::glossary_version(&connection)?;
-    let system_prompt = build_system_prompt(&prompt.content, &terms, source_text);
-    let cache_key = make_cache_key(&CacheKeyInput {
+    let base_system_prompt = build_system_prompt(&prompt.content, &terms, source_text);
+    let cache_input = CacheKeyInput {
         base_url: &provider.base_url,
         provider_id: &provider.id,
         model_id: &provider.model_id,
@@ -1096,10 +1159,18 @@ pub(crate) fn prepare_translation(
         source_language: &request.source_language,
         target_language: &request.target_language,
         source_text,
-    });
+    };
+    let (system_prompt, cache_key) = match pdf_context {
+        Some(context) => (
+            build_pdf_system_prompt(&base_system_prompt, &context),
+            make_pdf_cache_key(&cache_input, mode, &context),
+        ),
+        None => (base_system_prompt, make_cache_key(&cache_input)),
+    };
     Ok(PreparedTranslation {
         provider,
         prompt,
+        glossary_terms: terms,
         system_prompt,
         cache_key,
         cache_enabled: settings.cache_enabled,
@@ -1107,6 +1178,21 @@ pub(crate) fn prepare_translation(
         history_retention: settings.history_retention,
         glossary_version,
     })
+}
+
+fn build_pdf_system_prompt(base_prompt: &str, context: &PdfPromptContext<'_>) -> String {
+    let encode = |value: &serde_json::Value| {
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+    };
+    format!(
+        "{base_prompt}\n\nPDF 文档上下文：{}\n相邻段落前文：{}\n相邻段落后文：{}\n当前任务术语：{}\n当前任务缩写：{}\nPDF 引擎约束：{}\n全局术语表具有最高优先级。当前任务术语和缩写只在全局术语表没有命中时提供参考，发生冲突时必须遵循全局术语表。保持所有公式、富文本、占位符和结构标识。",
+        encode(context.document_context),
+        encode(context.context_before),
+        encode(context.context_after),
+        encode(context.task_terms),
+        encode(context.abbreviations),
+        encode(context.engine_constraints),
+    )
 }
 
 fn build_system_prompt(base_prompt: &str, terms: &[GlossaryTerm], source_text: &str) -> String {
@@ -1154,6 +1240,39 @@ fn make_cache_key(input: &CacheKeyInput<'_>) -> String {
         input.prompt_id,
         input.prompt_version,
         input.glossary_version,
+        input.source_language,
+        input.target_language,
+        input.source_text,
+    );
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{digest:x}")
+}
+
+fn make_pdf_cache_key(
+    input: &CacheKeyInput<'_>,
+    mode: TranslationMode,
+    context: &PdfPromptContext<'_>,
+) -> String {
+    let canonical = format!(
+        "base={}\nprovider={}\nmodel={}\nprompt={}@{}\nglossary={}\nmode={}\ncontext_schema={}\ncontext={}\nwindow_before={}\nwindow_after={}\ntask_terms={}\nabbreviations={}\nengine_constraints={}\nsource_language={}\ntarget_language={}\nsource={}",
+        input.base_url,
+        input.provider_id,
+        input.model_id,
+        input.prompt_id,
+        input.prompt_version,
+        input.glossary_version,
+        mode.provider_operation(),
+        context
+            .document_context
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        pdf_context::hash_value(context.document_context),
+        pdf_context::hash_value(context.context_before),
+        pdf_context::hash_value(context.context_after),
+        pdf_context::hash_value(context.task_terms),
+        pdf_context::hash_value(context.abbreviations),
+        pdf_context::hash_value(context.engine_constraints),
         input.source_language,
         input.target_language,
         input.source_text,
@@ -2515,12 +2634,15 @@ fn emit_word_failed(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CacheKeyInput, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
+        AppState, CacheKeyInput, PdfPromptContext, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
         WordAiCacheKeyInput, WordExampleDelta, WordExampleProtocolParser, build_system_prompt,
-        cancel_request, make_cache_key, make_word_ai_cache_key, unregister_request,
+        cancel_request, make_cache_key, make_pdf_cache_key, make_word_ai_cache_key,
+        unregister_request,
     };
     use crate::contracts::GlossaryTerm;
+    use crate::translation_core::TranslationMode;
     use rusqlite::Connection;
+    use serde_json::json;
     use std::sync::{Arc, atomic::Ordering};
     use tokio_util::sync::CancellationToken;
 
@@ -2549,6 +2671,50 @@ mod tests {
     fn cache_key_does_not_include_api_key() {
         let first = test_cache_key("hello");
         assert!(!first.contains("api"));
+    }
+
+    #[test]
+    fn pdf_cache_context_isolated_from_paragraph_cache() {
+        let input = CacheKeyInput {
+            base_url: "https://example.com/v1",
+            provider_id: "default",
+            model_id: "model-a",
+            prompt_id: "prompt",
+            prompt_version: 1,
+            glossary_version: 1,
+            source_language: "en",
+            target_language: "zh-CN",
+            source_text: "hello",
+        };
+        let empty_context = json!({"schema_version": 1, "context_hash": "a"});
+        let changed_context = json!({"schema_version": 1, "context_hash": "b"});
+        let empty_window = json!([]);
+        fn context<'a>(
+            document_context: &'a serde_json::Value,
+            empty_window: &'a serde_json::Value,
+        ) -> PdfPromptContext<'a> {
+            PdfPromptContext {
+                document_context,
+                context_before: empty_window,
+                context_after: empty_window,
+                task_terms: empty_window,
+                abbreviations: empty_window,
+                engine_constraints: empty_window,
+            }
+        }
+        let paragraph_key = make_cache_key(&input);
+        let pdf_key = make_pdf_cache_key(
+            &input,
+            TranslationMode::PdfSegment,
+            &context(&empty_context, &empty_window),
+        );
+        let changed_pdf_key = make_pdf_cache_key(
+            &input,
+            TranslationMode::PdfSegment,
+            &context(&changed_context, &empty_window),
+        );
+        assert_ne!(paragraph_key, pdf_key);
+        assert_ne!(pdf_key, changed_pdf_key);
     }
 
     #[test]

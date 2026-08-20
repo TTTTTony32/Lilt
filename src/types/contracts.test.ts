@@ -11,6 +11,10 @@ import {
   decodePersonalDictionaryExportResult,
   decodeGlossaryExportResult,
   decodeGlossaryImportResult,
+  decodeDocumentContext,
+  decodePdfJobEvent,
+  decodePdfPreflightEvent,
+  decodePdfQualityDiagnostic,
 } from "./contracts";
 
 describe("selection contract", () => {
@@ -245,5 +249,139 @@ describe("dictionary and glossary transfer contracts", () => {
       skippedCount: 2,
       skippedRows: [{ line: 4, reason: "译文不能为空" }],
     })).toBeNull();
+  });
+});
+
+describe("PDF document context and quality contracts", () => {
+  it("decodes a versioned document context with snake_case worker fields", () => {
+    expect(decodeDocumentContext({
+      schema_version: 1,
+      title: "A PDF context",
+      abstract: "摘要",
+      document_type: "academic_paper",
+      domain: "machine_learning",
+      headings: ["Introduction", "Method"],
+      key_terms: [{
+        source: "federated learning",
+        target: "联邦学习",
+        source_kind: "preflight",
+        confidence: 0.92,
+        note: "保留术语译法",
+      }],
+      abbreviations: [{
+        abbreviation: "FL",
+        expanded: "federated learning",
+        target: "联邦学习",
+        confidence: 0.88,
+      }],
+      translation_notes: ["保留模型名称"],
+      context_hash: "ctx-1",
+    })).toEqual({
+      schemaVersion: 1,
+      title: "A PDF context",
+      abstract: "摘要",
+      documentType: "academic_paper",
+      domain: "machine_learning",
+      headings: ["Introduction", "Method"],
+      keyTerms: [{
+        source: "federated learning",
+        target: "联邦学习",
+        sourceKind: "preflight",
+        confidence: 0.92,
+        note: "保留术语译法",
+      }],
+      abbreviations: [{
+        abbreviation: "FL",
+        expanded: "federated learning",
+        target: "联邦学习",
+        confidence: 0.88,
+      }],
+      translationNotes: ["保留模型名称"],
+      contextHash: "ctx-1",
+    });
+  });
+
+  it("decodes preflight completion and keeps degraded results non-blocking", () => {
+    expect(decodePdfPreflightEvent("pdf_translation_preflight_completed", {
+      task_id: "task-1",
+      schema_version: 1,
+      document_context: { title: "标题", key_terms: [], abbreviations: [] },
+      context_hash: "ctx-2",
+      applied: true,
+    })).toEqual({
+      type: "preflightCompleted",
+      taskId: "task-1",
+      preflight: {
+        status: "completed",
+        schemaVersion: 1,
+        context: {
+          schemaVersion: 1,
+          title: "标题",
+          abstract: null,
+          documentType: null,
+          domain: null,
+          headings: [],
+          keyTerms: [],
+          abbreviations: [],
+          translationNotes: [],
+          contextHash: "ctx-2",
+        },
+        contextHash: "ctx-2",
+        warnings: [],
+        applied: true,
+        message: null,
+      },
+    });
+    expect(decodePdfPreflightEvent("pdf_translation_preflight_warning", {
+      taskId: "task-1",
+      warnings: ["预检输出被截断"],
+      degraded: true,
+    })?.type).toBe("preflightDegraded");
+    const degraded = decodePdfPreflightEvent("pdf_translation_preflight_completed", {
+      taskId: "task-1",
+      context: { title: "标题", key_terms: [], abbreviations: [] },
+      context_hash: "ctx-3",
+      warnings: ["Provider 未返回完整结构"],
+      degraded: true,
+    });
+    expect(degraded?.preflight.status).toBe("degraded");
+    expect(degraded?.preflight.applied).toBe(false);
+  });
+
+  it("decodes diagnostics and preserves old PDF events without new fields", () => {
+    expect(decodePdfQualityDiagnostic({
+      level: "warning",
+      rule_id: "placeholder_missing",
+      description: "占位符数量不一致",
+      page_number: 3,
+      segment_id: "p3-s2",
+    })).toEqual({
+      severity: "warning",
+      ruleId: "placeholder_missing",
+      message: "占位符数量不一致",
+      taskId: null,
+      translationRequestId: null,
+      segmentId: "p3-s2",
+      pageNumber: 3,
+    });
+    expect(decodePdfJobEvent("pdf_translation_started", {
+      taskId: "task-1",
+      workerVersion: "worker-1",
+    })).toEqual({
+      type: "started",
+      taskId: "task-1",
+      workerVersion: "worker-1",
+    });
+    expect(decodePdfJobEvent("pdf_translation_diagnostic", {
+      task_id: "task-1",
+      severity: "error",
+      rule_id: "empty_translation",
+      message: "译文为空",
+    })?.type).toBe("diagnostic");
+  });
+
+  it("rejects malformed context entries instead of applying partial constraints", () => {
+    expect(decodeDocumentContext({ key_terms: [{ source: "term", confidence: "high" }] })).toBeNull();
+    expect(decodePdfQualityDiagnostic({ severity: "unknown", message: "诊断" })).toBeNull();
   });
 });

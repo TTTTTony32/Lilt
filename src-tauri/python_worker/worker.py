@@ -7,6 +7,7 @@ TRANSLATE_REQUEST and is completed by the matching TRANSLATE_RESPONSE.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import multiprocessing
@@ -14,6 +15,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import uuid
 from asyncio import CancelledError
 from contextlib import redirect_stdout
@@ -24,6 +26,13 @@ from typing import Any, BinaryIO, Callable
 PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 8 * 1024 * 1024
 ENGINE_VERSION = "babeldoc-0.6.4"
+PREFLIGHT_MAX_SAMPLES = 8
+PREFLIGHT_MAX_SAMPLE_CHARS = 12_000
+PREFLIGHT_MAX_CONTEXT_SEGMENTS = 3
+PREFLIGHT_MAX_CONTEXT_CHARS = 4_000
+PREFLIGHT_MAX_CONSTRAINT_ITEMS = 64
+PREFLIGHT_TIMEOUT_SECONDS = 5.0
+TASK_CONSTRAINT_MIN_CONFIDENCE = 0.6
 
 logger = logging.getLogger("lilt.pdf_worker")
 
@@ -188,6 +197,232 @@ class TranslationResponse:
     error: dict[str, Any] | None
 
 
+@dataclass(frozen=True)
+class DocumentContextState:
+    """The task-local context forwarded with each PDF segment request."""
+
+    document_context: dict[str, Any]
+    context_hash: str | None
+    context_before: list[Any]
+    context_after: list[Any]
+    task_terms: list[Any]
+    abbreviations: list[Any]
+    warnings: list[str]
+    fallback: bool = False
+
+
+@dataclass(frozen=True)
+class DocumentPreflightResponse:
+    outcome: str
+    document_context: dict[str, Any]
+    context_hash: str | None
+    warnings: list[str]
+    error: dict[str, Any] | None
+    context_before: list[Any]
+    context_after: list[Any]
+    task_terms: list[Any]
+    abbreviations: list[Any]
+    context_valid: bool = True
+    degraded: bool = False
+
+
+class DocumentPreflightCoordinator:
+    """Coordinate one optional preflight exchange for the current PDF task.
+
+    BabelDOC owns parsing and calls the translator from its own execution
+    path. The first structured segment text is therefore the safest fallback
+    sample when BabelDOC has not exposed a separate document IR. The
+    coordinator only sends JSON over the existing Worker pipe; it never reads
+    Provider settings or calls a model itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        source_language: str,
+        target_language: str,
+        emit: Callable[[dict[str, Any]], None],
+        cancel_event: threading.Event,
+        metadata: dict[str, Any] | None = None,
+        engine_constraints: dict[str, Any] | None = None,
+        configured_samples: list[Any] | None = None,
+        timeout_seconds: float = PREFLIGHT_TIMEOUT_SECONDS,
+        on_state: Callable[[DocumentContextState], None] | None = None,
+    ) -> None:
+        self.task_id = task_id
+        self.source_language = source_language
+        self.target_language = target_language
+        self._emit = emit
+        self._cancel_event = cancel_event
+        self._metadata = _sanitize_mapping(metadata)
+        self._engine_constraints = _sanitize_mapping(engine_constraints)
+        self._engine_constraints.setdefault("response_format", "json")
+        self._engine_constraints.setdefault("sample_limit", PREFLIGHT_MAX_SAMPLES)
+        self._engine_constraints.setdefault("sample_char_limit", PREFLIGHT_MAX_SAMPLE_CHARS)
+        self._configured_samples = _limited_preflight_samples(configured_samples or [])
+        self._timeout_seconds = max(0.1, min(float(timeout_seconds), 60.0))
+        self._on_state = on_state
+        self._pending_lock = threading.Lock()
+        self._pending: dict[str, queue.Queue[DocumentPreflightResponse]] = {}
+        self._ensure_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._initialized = False
+        self._state = DocumentContextState({}, None, [], [], [], [], [])
+
+    @property
+    def state(self) -> DocumentContextState:
+        with self._state_lock:
+            return copy.deepcopy(self._state)
+
+    def ensure(self, samples: list[dict[str, Any]]) -> DocumentContextState:
+        """Run preflight once, then return the task-local state.
+
+        A timeout, malformed response, or explicit failed outcome becomes a
+        warning plus empty context. This keeps old Rust/Worker combinations
+        able to complete normal PDF translation while the new protocol is
+        rolled out.
+        """
+        with self._ensure_lock:
+            if self._initialized:
+                return self.state
+
+            request_id = str(uuid.uuid4())
+            response_queue: queue.Queue[DocumentPreflightResponse] = queue.Queue(maxsize=1)
+            with self._pending_lock:
+                self._pending[request_id] = response_queue
+            request = {
+                "type": "DOCUMENT_PREFLIGHT_REQUEST",
+                "task_id": self.task_id,
+                "preflight_request_id": request_id,
+                "source_language": self.source_language,
+                "target_language": self.target_language,
+                "metadata": copy.deepcopy(self._metadata),
+                "samples": _limited_preflight_samples(
+                    [*self._configured_samples, *samples]
+                ),
+                "engine_constraints": copy.deepcopy(self._engine_constraints),
+            }
+            try:
+                self._emit(request)
+            except Exception as exc:  # noqa: BLE001 - protocol boundary fallback
+                with self._pending_lock:
+                    self._pending.pop(request_id, None)
+                return self._finish_fallback(
+                    f"发送文档预检请求失败：{str(exc).splitlines()[0][:300]}"
+                )
+
+            expires_at = time.monotonic() + self._timeout_seconds
+            try:
+                while True:
+                    if self._cancel_event.is_set():
+                        raise WorkerCancelled("用户取消了 PDF 翻译")
+                    remaining = expires_at - time.monotonic()
+                    if remaining <= 0:
+                        return self._finish_fallback("文档预检响应超时，已使用空上下文继续翻译")
+                    try:
+                        response = response_queue.get(timeout=min(0.1, remaining))
+                    except queue.Empty:
+                        continue
+                    if response.outcome == "cancelled":
+                        raise WorkerCancelled("Rust 文档预检已取消")
+                    if response.outcome != "completed":
+                        error_message = _preflight_error_message(response)
+                        return self._finish_fallback(error_message)
+                    if (
+                        not response.context_valid
+                        or not isinstance(response.document_context, dict)
+                    ):
+                        return self._finish_fallback("文档预检响应缺少有效的 document_context")
+                    return self._finish_response(response)
+            finally:
+                with self._pending_lock:
+                    self._pending.pop(request_id, None)
+
+    def resolve(self, message: dict[str, Any]) -> None:
+        if message.get("task_id") != self.task_id:
+            raise WorkerProtocolError("DOCUMENT_PREFLIGHT_RESPONSE 的 task_id 与当前任务不匹配")
+        request_id = message.get("preflight_request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise WorkerProtocolError("DOCUMENT_PREFLIGHT_RESPONSE 缺少 preflight_request_id")
+        with self._pending_lock:
+            response_queue = self._pending.get(request_id)
+        if response_queue is None:
+            # A late response after the bounded fallback is harmless and must
+            # not turn a recoverable preflight timeout into a failed PDF job.
+            return
+        response = _document_preflight_response(message)
+        try:
+            response_queue.put_nowait(response)
+        except queue.Full:
+            return
+
+    def _finish_response(self, response: DocumentPreflightResponse) -> DocumentContextState:
+        context = _sanitize_json_value(response.document_context)
+        if not isinstance(context, dict):
+            return self._finish_fallback("文档预检响应的 document_context 无法序列化")
+        if response.context_hash:
+            context["context_hash"] = response.context_hash
+        task_terms = response.task_terms or _list_field(context, "task_terms")
+        if not task_terms:
+            task_terms = _list_field(context, "key_terms")
+        abbreviations = response.abbreviations or _list_field(context, "abbreviations")
+        task_terms = _reliable_term_constraints(task_terms)
+        abbreviations = _reliable_abbreviation_constraints(abbreviations)
+        warnings = list(response.warnings)
+        if response.degraded and not warnings:
+            warnings.append("文档预检已降级，继续使用受限上下文翻译")
+        state = DocumentContextState(
+            document_context=context,
+            context_hash=response.context_hash,
+            context_before=_bounded_context_window(response.context_before),
+            context_after=_bounded_context_window(response.context_after),
+            task_terms=copy.deepcopy(task_terms),
+            abbreviations=copy.deepcopy(abbreviations),
+            warnings=warnings,
+            fallback=response.degraded,
+        )
+        self._set_state(state)
+        for warning in state.warnings:
+            self._emit_warning("document_preflight_warning", warning)
+        return self.state
+
+    def _finish_fallback(self, message: str) -> DocumentContextState:
+        state = DocumentContextState(
+            document_context={},
+            context_hash=None,
+            context_before=[],
+            context_after=[],
+            task_terms=[],
+            abbreviations=[],
+            warnings=[message],
+            fallback=True,
+        )
+        self._set_state(state)
+        self._emit_warning("document_preflight_failed", message)
+        return self.state
+
+    def _set_state(self, state: DocumentContextState) -> None:
+        with self._state_lock:
+            self._state = copy.deepcopy(state)
+            self._initialized = True
+        if self._on_state is not None:
+            self._on_state(copy.deepcopy(state))
+
+    def _emit_warning(self, code: str, message: str) -> None:
+        try:
+            self._emit(
+                {
+                    "type": "WARNING",
+                    "task_id": self.task_id,
+                    "code": code,
+                    "message": message[:500],
+                }
+            )
+        except Exception:  # noqa: BLE001 - warning must not block translation
+            logger.exception("Unable to emit document preflight warning")
+
+
 class ResponseRouter:
     def __init__(self, emit: Callable[[dict[str, Any]], None], cancel_event: threading.Event):
         self._emit = emit
@@ -205,6 +440,10 @@ class ResponseRouter:
         segments: list[dict[str, Any]],
         document_context: dict[str, Any] | None = None,
         engine_constraints: dict[str, Any] | None = None,
+        context_before: list[Any] | None = None,
+        context_after: list[Any] | None = None,
+        task_terms: list[Any] | None = None,
+        abbreviations: list[Any] | None = None,
     ) -> TranslationResponse:
         request_id = str(uuid.uuid4())
         response_queue: queue.Queue[TranslationResponse] = queue.Queue(maxsize=1)
@@ -222,6 +461,10 @@ class ResponseRouter:
                     "segments": segments,
                     "document_context": document_context or {},
                     "engine_constraints": engine_constraints or {},
+                    "context_before": copy.deepcopy(context_before or []),
+                    "context_after": copy.deepcopy(context_after or []),
+                    "task_terms": copy.deepcopy(task_terms or []),
+                    "abbreviations": copy.deepcopy(abbreviations or []),
                 }
             )
             while True:
@@ -276,13 +519,18 @@ class LiltTranslator:
         lang_out: str,
         router: ResponseRouter,
         cancel_event: threading.Event,
+        preflight: DocumentPreflightCoordinator | None = None,
+        engine_constraints: dict[str, Any] | None = None,
     ) -> None:
         self.lang_in = lang_in
         self.lang_out = lang_out
         self.task_id = task_id
         self.router = router
         self.cancel_event = cancel_event
+        self.preflight = preflight
+        self.engine_constraints = _sanitize_mapping(engine_constraints)
         self.model = "lilt-translation-core"
+        self._recent_source_texts: list[str] = []
         self.token_count = _Counter()
         self.prompt_token_count = _Counter()
         self.completion_token_count = _Counter()
@@ -304,19 +552,49 @@ class LiltTranslator:
 
     def _translate(self, text: str, *, rate_limit_params: dict | None) -> str:
         segments, batch_shape = _segments_from_engine_text(text)
+        state = (
+            self.preflight.ensure(segments)
+            if self.preflight is not None
+            else _empty_context_state()
+        )
+        context_before = _bounded_context_window(
+            [*state.context_before, *self._recent_source_texts]
+        )
+        context_after = state.context_after or _bounded_context_window(
+            [
+                segment.get("source_text")
+                for segment in segments[1:]
+                if isinstance(segment.get("source_text"), str)
+            ]
+        )
+        segment_constraints = copy.deepcopy(self.engine_constraints)
+        segment_constraints.update(
+            {
+                "response_format": "json" if batch_shape else "text",
+                "placeholder_policy": "preserve",
+                "request_json_mode": bool((rate_limit_params or {}).get("request_json_mode")),
+            }
+        )
         response = self.router.request(
             task_id=self.task_id,
             mode="pdf_segment",
             source_language=self.lang_in,
             target_language=self.lang_out,
             segments=segments,
-            engine_constraints={
-                "response_format": "json" if batch_shape else "text",
-                "placeholder_policy": "preserve",
-                "request_json_mode": bool((rate_limit_params or {}).get("request_json_mode")),
-            },
+            document_context=state.document_context,
+            engine_constraints=segment_constraints,
+            context_before=context_before,
+            context_after=context_after,
+            task_terms=state.task_terms,
+            abbreviations=state.abbreviations,
         )
         self._record_usage(response.token_usage)
+        self._recent_source_texts.extend(
+            segment["source_text"]
+            for segment in segments
+            if isinstance(segment.get("source_text"), str)
+        )
+        self._recent_source_texts = self._recent_source_texts[-PREFLIGHT_MAX_CONTEXT_SEGMENTS:]
         if batch_shape:
             return _batch_response_text(response, batch_shape)
         return response.translated_text or ""
@@ -346,6 +624,14 @@ class BabelDocWorker:
         self.router = ResponseRouter(emit, self.cancel_event)
         self._job_thread: threading.Thread | None = None
         self._task_id: str | None = None
+        self._document_preflight: DocumentPreflightCoordinator | None = None
+        self._document_context_lock = threading.Lock()
+        self._document_context: dict[str, Any] = {}
+        self._context_hash: str | None = None
+        self._context_before: list[Any] = []
+        self._context_after: list[Any] = []
+        self._task_terms: list[Any] = []
+        self._abbreviations: list[Any] = []
 
     def handle(self, message: dict[str, Any]) -> None:
         message_type = message["type"]
@@ -357,6 +643,11 @@ class BabelDocWorker:
             return
         if message_type == "TRANSLATE_RESPONSE":
             self.router.resolve(message)
+            return
+        if message_type == "DOCUMENT_PREFLIGHT_RESPONSE":
+            if self._document_preflight is None:
+                raise WorkerProtocolError("当前任务没有等待中的文档预检")
+            self._document_preflight.resolve(message)
             return
         raise WorkerProtocolError(f"未知的 Rust → Worker 消息类型：{message_type}")
 
@@ -381,6 +672,14 @@ class BabelDocWorker:
         output_dir.mkdir(parents=True, exist_ok=True)
         self._task_id = task_id
         self.cancel_event.clear()
+        self._document_preflight = None
+        with self._document_context_lock:
+            self._document_context = {}
+            self._context_hash = None
+            self._context_before = []
+            self._context_after = []
+            self._task_terms = []
+            self._abbreviations = []
         self.emit(
             {
                 "type": "JOB_STARTED",
@@ -433,6 +732,24 @@ class BabelDocWorker:
         task_id = self._task_id
         assert task_id is not None
         try:
+            options = message.get("pdf_options")
+            if not isinstance(options, dict):
+                options = {}
+            lang_in = str(options.get("source_language") or "en")
+            lang_out = str(options.get("target_language") or "zh-CN")
+            preflight = DocumentPreflightCoordinator(
+                task_id=task_id,
+                source_language=lang_in,
+                target_language=lang_out,
+                emit=self.emit,
+                cancel_event=self.cancel_event,
+                metadata=_preflight_metadata(options),
+                engine_constraints=_preflight_engine_constraints(options),
+                configured_samples=_preflight_configured_samples(options),
+                timeout_seconds=_preflight_timeout(options),
+                on_state=self._save_document_context,
+            )
+            self._document_preflight = preflight
             with redirect_stdout(sys.stderr):
                 result = _run_babeldoc(
                     message,
@@ -442,6 +759,7 @@ class BabelDocWorker:
                     self.cancel_event,
                     self.emit,
                     babeldoc_api,
+                    preflight=preflight,
                 )
             if self.cancel_event.is_set():
                 self.emit({"type": "CANCELLED", "task_id": task_id, "reason": "user_requested"})
@@ -471,6 +789,15 @@ class BabelDocWorker:
                     },
                 }
             )
+
+    def _save_document_context(self, state: DocumentContextState) -> None:
+        with self._document_context_lock:
+            self._document_context = copy.deepcopy(state.document_context)
+            self._context_hash = state.context_hash
+            self._context_before = copy.deepcopy(state.context_before)
+            self._context_after = copy.deepcopy(state.context_after)
+            self._task_terms = copy.deepcopy(state.task_terms)
+            self._abbreviations = copy.deepcopy(state.abbreviations)
 
 
 def run_worker(stdin: BinaryIO, stdout: BinaryIO) -> None:
@@ -558,6 +885,8 @@ def _run_babeldoc(
     cancel_event: threading.Event,
     emit: Callable[[dict[str, Any]], None],
     babeldoc_api: BabelDocApi,
+    *,
+    preflight: DocumentPreflightCoordinator | None = None,
 ) -> dict[str, Any]:
     """Create the fixed BabelDOC config and run its synchronous entrypoint."""
     do_translate = babeldoc_api.do_translate
@@ -577,6 +906,8 @@ def _run_babeldoc(
         lang_out=lang_out,
         router=router,
         cancel_event=cancel_event,
+        preflight=preflight,
+        engine_constraints=_segment_engine_constraints(options),
     )
     config = TranslationConfig(
         input_file=input_pdf,
@@ -687,11 +1018,273 @@ def _segments_from_engine_text(text: str) -> tuple[list[dict[str, Any]], list[st
                 {
                     "segment_id": segment_id,
                     "source_text": source_text,
-                    "placeholders": item.get("placeholders", []) if isinstance(item.get("placeholders"), list) else [],
+                    "placeholders": (
+                        item.get("placeholders", [])
+                        if isinstance(item.get("placeholders"), list)
+                        else []
+                    ),
                 }
             )
         return segments, ids
     return [{"segment_id": "segment-0", "source_text": text, "placeholders": []}], None
+
+
+def _empty_context_state() -> DocumentContextState:
+    return DocumentContextState({}, None, [], [], [], [], [])
+
+
+def _document_preflight_response(message: dict[str, Any]) -> DocumentPreflightResponse:
+    context_value = message.get("document_context")
+    context_valid = isinstance(context_value, dict)
+    context = context_value
+    if not context_valid:
+        context = {}
+    context_hash = message.get("context_hash")
+    return DocumentPreflightResponse(
+        outcome=str(message.get("outcome") or "failed"),
+        document_context=copy.deepcopy(context),
+        context_hash=context_hash if isinstance(context_hash, str) and context_hash else None,
+        warnings=_string_list(message.get("warnings")),
+        error=message.get("error") if isinstance(message.get("error"), dict) else None,
+        context_before=_list_field(context, "context_before"),
+        context_after=_list_field(context, "context_after"),
+        task_terms=_list_field(context, "task_terms"),
+        abbreviations=_list_field(context, "abbreviations"),
+        context_valid=context_valid,
+        degraded=bool(message.get("degraded", False)),
+    )
+
+
+def _preflight_error_message(response: DocumentPreflightResponse) -> str:
+    if response.error:
+        detail = response.error.get("message")
+        if isinstance(detail, str) and detail.strip():
+            return f"文档预检失败，已使用空上下文继续翻译：{detail.strip()[:400]}"
+    if response.warnings:
+        return f"文档预检失败，已使用空上下文继续翻译：{response.warnings[0][:400]}"
+    return "文档预检失败，已使用空上下文继续翻译"
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip()[:500] for item in value if isinstance(item, str) and item.strip()]
+
+
+def _list_field(value: Any, key: str) -> list[Any]:
+    if not isinstance(value, dict) or not isinstance(value.get(key), list):
+        return []
+    return copy.deepcopy(value[key])
+
+
+def _reliable_term_constraints(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source") or item.get("term") or item.get("original")
+        target = item.get("target") or item.get("translation")
+        if not isinstance(source, str) or not source.strip():
+            continue
+        if not isinstance(target, str) or not target.strip():
+            continue
+        if not _meets_confidence_threshold(item):
+            continue
+        result.append(copy.deepcopy(item))
+    return result[:PREFLIGHT_MAX_CONSTRAINT_ITEMS]
+
+
+def _reliable_abbreviation_constraints(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        abbreviation = item.get("abbreviation") or item.get("short")
+        target = item.get("target") or item.get("translation")
+        if not isinstance(abbreviation, str) or not abbreviation.strip():
+            continue
+        if not isinstance(target, str) or not target.strip():
+            continue
+        if not _meets_confidence_threshold(item):
+            continue
+        result.append(copy.deepcopy(item))
+    return result[:PREFLIGHT_MAX_CONSTRAINT_ITEMS]
+
+
+def _meets_confidence_threshold(item: dict[str, Any]) -> bool:
+    confidence = item.get("confidence")
+    if confidence is None:
+        return True
+    return (
+        isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and confidence >= TASK_CONSTRAINT_MIN_CONFIDENCE
+    )
+
+
+def _bounded_context_window(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        values: list[Any] = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        return []
+    result: list[Any] = []
+    used_chars = 0
+    for item in values:
+        if len(result) >= PREFLIGHT_MAX_CONTEXT_SEGMENTS:
+            break
+        if isinstance(item, str):
+            remaining = PREFLIGHT_MAX_CONTEXT_CHARS - used_chars
+            if remaining <= 0:
+                break
+            item = item[:remaining]
+            if not item:
+                continue
+            used_chars += len(item)
+        else:
+            try:
+                item_size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+            except (TypeError, ValueError):
+                continue
+            if used_chars + item_size > PREFLIGHT_MAX_CONTEXT_CHARS:
+                continue
+            item = copy.deepcopy(item)
+            used_chars += item_size
+        result.append(item)
+    return result
+
+
+def _limited_preflight_samples(values: list[Any]) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    samples: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    used_chars = 0
+    for index, value in enumerate(values):
+        if len(samples) >= PREFLIGHT_MAX_SAMPLES or used_chars >= PREFLIGHT_MAX_SAMPLE_CHARS:
+            break
+        if isinstance(value, str):
+            sample_id = f"sample-{index}"
+            source_text = value
+            placeholders: list[Any] = []
+            extra: dict[str, Any] = {}
+        elif isinstance(value, dict):
+            sample_id = str(value.get("segment_id") or value.get("id") or f"sample-{index}")
+            source_text = value.get("source_text")
+            if not isinstance(source_text, str):
+                source_text = value.get("input")
+            if not isinstance(source_text, str):
+                source_text = value.get("text")
+            if not isinstance(source_text, str):
+                continue
+            placeholders = (
+                copy.deepcopy(value.get("placeholders"))
+                if isinstance(value.get("placeholders"), list)
+                else []
+            )
+            extra = {}
+            for key in ("page_number", "heading_level", "layout_label", "is_heading"):
+                if isinstance(value.get(key), (str, int, float, bool)):
+                    extra[key] = value[key]
+        else:
+            continue
+        if not source_text:
+            continue
+        identity = (sample_id, source_text)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        remaining = PREFLIGHT_MAX_SAMPLE_CHARS - used_chars
+        if remaining <= 0:
+            break
+        source_text = source_text[:remaining]
+        sample = {
+            "segment_id": sample_id,
+            "source_text": source_text,
+            "placeholders": placeholders,
+        }
+        sample.update(extra)
+        samples.append(sample)
+        used_chars += len(source_text)
+    return samples
+
+
+def _sanitize_json_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return None
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:32]:
+            if not isinstance(key, str) or _is_sensitive_key(key):
+                continue
+            result[key] = _sanitize_json_value(item, depth=depth + 1)
+        return result
+    if isinstance(value, list):
+        return [_sanitize_json_value(item, depth=depth + 1) for item in value[:32]]
+    if isinstance(value, str):
+        return value[:4_000]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:500]
+
+
+def _sanitize_mapping(value: Any) -> dict[str, Any]:
+    sanitized = _sanitize_json_value(value)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(
+        marker in normalized
+        for marker in (
+            "api_key",
+            "apikey",
+            "authorization",
+            "base_url",
+            "credential",
+            "password",
+            "provider",
+            "secret",
+            "token",
+        )
+    )
+
+
+def _preflight_metadata(options: dict[str, Any]) -> dict[str, Any]:
+    metadata = options.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = options.get("document_metadata")
+    return _sanitize_mapping(metadata)
+
+
+def _preflight_engine_constraints(options: dict[str, Any]) -> dict[str, Any]:
+    constraints = _sanitize_mapping(options.get("engine_constraints"))
+    constraints.setdefault("response_format", "json")
+    constraints.setdefault("sample_limit", PREFLIGHT_MAX_SAMPLES)
+    constraints.setdefault("sample_char_limit", PREFLIGHT_MAX_SAMPLE_CHARS)
+    return constraints
+
+
+def _segment_engine_constraints(options: dict[str, Any]) -> dict[str, Any]:
+    return _sanitize_mapping(options.get("engine_constraints"))
+
+
+def _preflight_configured_samples(options: dict[str, Any]) -> list[Any]:
+    value = options.get("samples")
+    return value if isinstance(value, list) else []
+
+
+def _preflight_timeout(options: dict[str, Any]) -> float:
+    value = options.get("preflight_timeout_seconds")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return PREFLIGHT_TIMEOUT_SECONDS
 
 
 def _batch_response_text(response: TranslationResponse, ids: list[str]) -> str:

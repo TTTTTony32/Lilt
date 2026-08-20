@@ -12,9 +12,11 @@ from unittest import mock
 
 from worker import (
     BabelDocWorker,
+    DocumentPreflightCoordinator,
     MAX_LINE_BYTES,
     LiltTranslator,
     ResponseRouter,
+    WorkerCancelled,
     WorkerEngineUnavailable,
     WorkerProtocolError,
     decode_message,
@@ -108,6 +110,274 @@ class ResponseRouterTests(unittest.TestCase):
         )
         thread.join(timeout=1)
         self.assertEqual(result["value"], '[{"id": "7", "output": "你好"}]')
+
+
+class DocumentPreflightTests(unittest.TestCase):
+    def _wait_for_type(self, emitted, message_type):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            for message in emitted:
+                if message.get("type") == message_type:
+                    return message
+            time.sleep(0.001)
+        self.fail(f"did not observe {message_type}: {emitted!r}")
+
+    def test_preflight_request_and_response_save_task_context(self):
+        emitted = []
+        cancel = threading.Event()
+        worker = BabelDocWorker(emit=emitted.append)
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=cancel,
+            metadata={"title": "A paper"},
+            configured_samples=[{"id": "configured-1", "input": "abstract"}],
+            timeout_seconds=1,
+            on_state=worker._save_document_context,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "state",
+                coordinator.ensure(
+                    [{"segment_id": "p1-s1", "source_text": "representative paragraph"}]
+                ),
+            )
+        )
+        thread.start()
+        request = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        self.assertEqual(request["task_id"], "task-1")
+        self.assertEqual(request["source_language"], "en")
+        self.assertEqual(request["target_language"], "zh-CN")
+        self.assertEqual(request["metadata"], {"title": "A paper"})
+        self.assertEqual(request["samples"][0]["source_text"], "abstract")
+        self.assertEqual(request["samples"][1]["source_text"], "representative paragraph")
+        self.assertEqual(request["engine_constraints"]["response_format"], "json")
+        coordinator.resolve(
+            {
+                "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                "task_id": "task-1",
+                "preflight_request_id": request["preflight_request_id"],
+                "outcome": "completed",
+                "document_context": {
+                    "schema_version": 1,
+                    "title": "A paper",
+                    "key_terms": [{"source": "term", "target": "术语"}],
+                    "abbreviations": [{
+                        "short": "API",
+                        "expanded": "Application",
+                        "target": "应用",
+                    }],
+                },
+                "context_hash": "ctx-1",
+                "warnings": [],
+                "error": None,
+            }
+        )
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        state = result["state"]
+        self.assertEqual(state.document_context["context_hash"], "ctx-1")
+        self.assertEqual(state.context_hash, "ctx-1")
+        self.assertEqual(state.task_terms[0]["target"], "术语")
+        self.assertEqual(state.abbreviations[0]["short"], "API")
+        self.assertFalse(state.fallback)
+        self.assertEqual(worker._document_context["title"], "A paper")
+        self.assertEqual(worker._context_hash, "ctx-1")
+
+    def test_low_confidence_context_items_are_kept_out_of_constraints(self):
+        emitted = []
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=threading.Event(),
+            timeout_seconds=1,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "state",
+                coordinator.ensure([{"segment_id": "p1-s1", "source_text": "hello"}]),
+            )
+        )
+        thread.start()
+        request = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        coordinator.resolve(
+            {
+                "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                "task_id": "task-1",
+                "preflight_request_id": request["preflight_request_id"],
+                "outcome": "completed",
+                "document_context": {
+                    "key_terms": [
+                        {"source": "reliable", "target": "可靠", "confidence": 0.9},
+                        {"source": "uncertain", "target": "不确定", "confidence": 0.4},
+                    ],
+                    "abbreviations": [
+                        {"abbreviation": "API", "target": "接口", "confidence": 0.9},
+                        {"abbreviation": "CPU", "target": "处理器", "confidence": 0.4},
+                        {"abbreviation": "GPU", "expanded": "Graphics Processing Unit"},
+                    ],
+                },
+                "context_hash": "ctx-2",
+                "warnings": [],
+                "error": None,
+            }
+        )
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        state = result["state"]
+        self.assertEqual([item["source"] for item in state.task_terms], ["reliable"])
+        self.assertEqual([item["abbreviation"] for item in state.abbreviations], ["API"])
+
+    def test_pdf_segment_receives_context_fields_after_preflight(self):
+        emitted = []
+        cancel = threading.Event()
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=cancel,
+            timeout_seconds=1,
+        )
+        router = ResponseRouter(emitted.append, cancel)
+        translator = LiltTranslator(
+            task_id="task-1",
+            lang_in="en",
+            lang_out="zh-CN",
+            router=router,
+            cancel_event=cancel,
+            preflight=coordinator,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault("value", translator.translate("hello"))
+        )
+        thread.start()
+        preflight = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        coordinator.resolve(
+            {
+                "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                "task_id": "task-1",
+                "preflight_request_id": preflight["preflight_request_id"],
+                "outcome": "completed",
+                "document_context": {"title": "A paper"},
+                "context_hash": "ctx-1",
+                "warnings": [],
+                "error": None,
+            }
+        )
+        request = self._wait_for_type(emitted, "TRANSLATE_REQUEST")
+        self.assertEqual(request["mode"], "pdf_segment")
+        self.assertEqual(request["document_context"]["title"], "A paper")
+        self.assertEqual(request["context_before"], [])
+        self.assertEqual(request["context_after"], [])
+        self.assertEqual(request["task_terms"], [])
+        self.assertEqual(request["abbreviations"], [])
+        router.resolve(
+            {
+                "type": "TRANSLATE_RESPONSE",
+                "task_id": "task-1",
+                "translation_request_id": request["translation_request_id"],
+                "outcome": "completed",
+                "translated_text": "你好",
+            }
+        )
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["value"], "你好")
+
+    def test_preflight_failure_emits_warning_and_falls_back_to_empty_context(self):
+        emitted = []
+        cancel = threading.Event()
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=cancel,
+            timeout_seconds=1,
+        )
+        router = ResponseRouter(emitted.append, cancel)
+        translator = LiltTranslator(
+            task_id="task-1",
+            lang_in="en",
+            lang_out="zh-CN",
+            router=router,
+            cancel_event=cancel,
+            preflight=coordinator,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault("value", translator.translate("hello"))
+        )
+        thread.start()
+        preflight = self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        coordinator.resolve(
+            {
+                "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                "task_id": "task-1",
+                "preflight_request_id": preflight["preflight_request_id"],
+                "outcome": "failed",
+                "document_context": {},
+                "context_hash": None,
+                "warnings": [],
+                "error": {"code": "provider_failed", "message": "preflight unavailable"},
+            }
+        )
+        request = self._wait_for_type(emitted, "TRANSLATE_REQUEST")
+        warning = self._wait_for_type(emitted, "WARNING")
+        self.assertEqual(warning["code"], "document_preflight_failed")
+        self.assertEqual(request["document_context"], {})
+        self.assertEqual(request["task_terms"], [])
+        router.resolve(
+            {
+                "type": "TRANSLATE_RESPONSE",
+                "task_id": "task-1",
+                "translation_request_id": request["translation_request_id"],
+                "outcome": "completed",
+                "translated_text": "你好",
+            }
+        )
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["value"], "你好")
+
+    def test_preflight_wait_is_cancelled(self):
+        emitted = []
+        cancel = threading.Event()
+        coordinator = DocumentPreflightCoordinator(
+            task_id="task-1",
+            source_language="en",
+            target_language="zh-CN",
+            emit=emitted.append,
+            cancel_event=cancel,
+            timeout_seconds=1,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: self._capture_exception(
+                result, lambda: coordinator.ensure([{"source_text": "hello"}])
+            )
+        )
+        thread.start()
+        self._wait_for_type(emitted, "DOCUMENT_PREFLIGHT_REQUEST")
+        cancel.set()
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(result["error"], WorkerCancelled)
+
+    @staticmethod
+    def _capture_exception(result, operation):
+        try:
+            result["value"] = operation()
+        except Exception as exc:  # noqa: BLE001 - test helper
+            result["error"] = exc
 
 
 def _start_job_message(input_pdf: pathlib.Path, output_dir: pathlib.Path) -> dict:
@@ -257,7 +527,25 @@ class WorkerSubprocessIntegrationTests(unittest.TestCase):
                     worker_process.wait(timeout=5)
                     self.fail(f"Worker emitted non-JSON stdout: {line!r}: {exc}")
                 observed_types.append(event.get("type"))
-                if event.get("type") == "TRANSLATE_REQUEST":
+                if event.get("type") == "DOCUMENT_PREFLIGHT_REQUEST":
+                    response = {
+                        "type": "DOCUMENT_PREFLIGHT_RESPONSE",
+                        "task_id": event.get("task_id"),
+                        "preflight_request_id": event.get("preflight_request_id"),
+                        "outcome": "completed",
+                        "document_context": {
+                            "schema_version": 1,
+                            "title": "Local fixture",
+                        },
+                        "context_hash": "integration-context",
+                        "warnings": [],
+                        "error": None,
+                    }
+                    worker_process.stdin.write(
+                        json.dumps(response, ensure_ascii=False) + "\n"
+                    )
+                    worker_process.stdin.flush()
+                elif event.get("type") == "TRANSLATE_REQUEST":
                     segments = event.get("segments") or []
                     translated_segments = [
                         {
@@ -293,6 +581,7 @@ class WorkerSubprocessIntegrationTests(unittest.TestCase):
                     "Worker did not emit a terminal event. Recent stderr:\n"
                     + "\n".join(stderr_lines[-80:])
                 )
+            self.assertIn("DOCUMENT_PREFLIGHT_REQUEST", observed_types)
             self.assertIn("TRANSLATE_REQUEST", observed_types)
             self.assertEqual(terminal_event["type"], "FINISHED")
             output_pdf = pathlib.Path(terminal_event["output_pdf"])
