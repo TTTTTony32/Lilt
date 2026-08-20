@@ -4,7 +4,6 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(not(debug_assertions))]
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
@@ -1338,7 +1337,13 @@ fn manifest_python_path() -> &'static str {
 fn find_python_executable(root: &Path) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     let mut pending = vec![root.to_path_buf()];
+    let mut visited = HashSet::new();
     while let Some(directory) = pending.pop() {
+        let directory = fs::canonicalize(&directory)
+            .map_err(|error| format!("读取 Python 运行时目录失败：{error}"))?;
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
         let entries = fs::read_dir(&directory)
             .map_err(|error| format!("读取 Python 运行时目录失败：{error}"))?;
         for entry in entries {
@@ -1347,14 +1352,19 @@ fn find_python_executable(root: &Path) -> Result<PathBuf, String> {
             let file_type = entry
                 .file_type()
                 .map_err(|error| format!("读取 Python 运行时条目类型失败：{error}"))?;
-            if file_type.is_symlink() {
-                return Err(format!(
-                    "Python 运行时包含不受支持的符号链接：{}",
-                    path.display()
-                ));
+            let resolved_path = if file_type.is_symlink() {
+                fs::canonicalize(&path)
+                    .map_err(|error| format!("解析 Python 运行时链接失败：{error}"))?
+            } else {
+                path.clone()
+            };
+            let metadata = fs::metadata(&resolved_path)
+                .map_err(|error| format!("读取 Python 运行时条目失败：{error}"))?;
+            if metadata.is_dir() {
+                pending.push(resolved_path);
+                continue;
             }
-            if file_type.is_dir() {
-                pending.push(path);
+            if !metadata.is_file() {
                 continue;
             }
             let name = entry.file_name();
@@ -1370,7 +1380,7 @@ fn find_python_executable(root: &Path) -> Result<PathBuf, String> {
                     .and_then(Path::file_name)
                     .is_some_and(|name| name.eq_ignore_ascii_case("Scripts"));
                 if !parent_is_scripts {
-                    candidates.push(path);
+                    candidates.push(resolved_path);
                 }
             }
         }
@@ -1383,31 +1393,53 @@ fn find_python_executable(root: &Path) -> Result<PathBuf, String> {
 
 #[cfg(debug_assertions)]
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination)
-        .map_err(|error| format!("创建 Python 运行时目录失败：{error}"))?;
-    let entries =
-        fs::read_dir(source).map_err(|error| format!("读取 Python 运行时文件失败：{error}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("读取 Python 运行时文件失败：{error}"))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("读取 Python 运行时文件类型失败：{error}"))?;
-        if file_type.is_symlink() {
-            return Err(format!(
-                "Python 运行时包含不受支持的符号链接：{}",
-                source_path.display()
-            ));
-        }
-        if file_type.is_dir() {
-            copy_directory_contents(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            fs::copy(&source_path, &destination_path)
-                .map_err(|error| format!("复制 Python 运行时文件失败：{error}"))?;
-        }
+    let mut active_sources = HashSet::new();
+    copy_directory_contents_inner(source, destination, &mut active_sources)
+}
+
+#[cfg(debug_assertions)]
+fn copy_directory_contents_inner(
+    source: &Path,
+    destination: &Path,
+    active_sources: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    let source =
+        fs::canonicalize(source).map_err(|error| format!("解析 Python 运行时目录失败：{error}"))?;
+    if !active_sources.insert(source.clone()) {
+        return Err("Python 运行时包含循环链接".to_string());
     }
-    Ok(())
+
+    let result = (|| {
+        fs::create_dir_all(destination)
+            .map_err(|error| format!("创建 Python 运行时目录失败：{error}"))?;
+        let entries = fs::read_dir(&source)
+            .map_err(|error| format!("读取 Python 运行时文件失败：{error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("读取 Python 运行时文件失败：{error}"))?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("读取 Python 运行时文件类型失败：{error}"))?;
+            let resolved_path = if file_type.is_symlink() {
+                fs::canonicalize(&source_path)
+                    .map_err(|error| format!("解析 Python 运行时链接失败：{error}"))?
+            } else {
+                source_path
+            };
+            let metadata = fs::metadata(&resolved_path)
+                .map_err(|error| format!("读取 Python 运行时文件失败：{error}"))?;
+            if metadata.is_dir() {
+                copy_directory_contents_inner(&resolved_path, &destination_path, active_sources)?;
+            } else if metadata.is_file() {
+                fs::copy(&resolved_path, &destination_path)
+                    .map_err(|error| format!("复制 Python 运行时文件失败：{error}"))?;
+            }
+        }
+        Ok(())
+    })();
+    active_sources.remove(&source);
+    result
 }
 
 #[cfg(debug_assertions)]
@@ -1482,8 +1514,9 @@ fn summarize_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BABELDOC_ENGINE_VERSION, PdfEngineRuntime, build_worker_command, current_target,
-        ensure_supported_target, resolve_runtime_file, status_for_data_dir,
+        BABELDOC_ENGINE_VERSION, PdfEngineRuntime, build_worker_command, copy_directory_contents,
+        current_target, ensure_supported_target, find_python_executable, resolve_runtime_file,
+        status_for_data_dir,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -1698,6 +1731,44 @@ mod tests {
         assert_eq!(
             fs::read(target.join("marker")).expect("read restored marker"),
             b"current"
+        );
+    }
+
+    #[cfg(all(debug_assertions, windows))]
+    #[test]
+    fn debug_python_copy_materializes_a_linked_uv_install() {
+        use std::os::windows::fs::symlink_dir;
+
+        let temp = TempDir::new();
+        let uv_root = temp.path().join("uv-python");
+        let managed_root = uv_root.join("cpython-3.12-windows-x86_64-none");
+        let install_root = temp.path().join("python-base");
+        let linked_install = install_root.join("cpython-3.12-windows-x86_64-none");
+        fs::create_dir_all(&managed_root).expect("create managed Python");
+        fs::write(managed_root.join("python.exe"), b"python").expect("write Python");
+        fs::create_dir_all(&install_root).expect("create install directory");
+        if symlink_dir(&managed_root, &linked_install).is_err() {
+            return;
+        }
+
+        let executable = find_python_executable(&install_root).expect("find linked Python");
+        assert!(executable.ends_with("python.exe"));
+
+        let destination = temp.path().join("materialized-python");
+        copy_directory_contents(
+            executable.parent().expect("Python parent directory"),
+            &destination,
+        )
+        .expect("copy linked Python");
+        assert_eq!(
+            fs::read(destination.join("python.exe")).expect("read materialized Python"),
+            b"python"
+        );
+        assert!(
+            !fs::symlink_metadata(&destination)
+                .expect("read destination metadata")
+                .file_type()
+                .is_symlink()
         );
     }
 
