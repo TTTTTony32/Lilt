@@ -31,7 +31,7 @@ pub enum WorkerSessionError {
 
 #[derive(Debug)]
 pub enum WorkerSessionEvent {
-    Message(WorkerToRustMessage),
+    Message(Box<WorkerToRustMessage>),
     ProtocolError(String),
     WorkerExited(Option<i32>),
 }
@@ -227,7 +227,10 @@ fn read_loop(stdout: impl std::io::Read, events: Sender<WorkerSessionEvent>, tas
                         ));
                         break;
                     }
-                    if events.send(WorkerSessionEvent::Message(message)).is_err() {
+                    if events
+                        .send(WorkerSessionEvent::Message(Box::new(message)))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -275,11 +278,13 @@ mod tests {
 
         assert!(matches!(
             events_rx.recv().expect("job started event"),
-            WorkerSessionEvent::Message(WorkerToRustMessage::JobStarted(_))
+            WorkerSessionEvent::Message(message)
+                if matches!(*message, WorkerToRustMessage::JobStarted(_))
         ));
         assert!(matches!(
             events_rx.recv().expect("stage event"),
-            WorkerSessionEvent::Message(WorkerToRustMessage::StageChanged(_))
+            WorkerSessionEvent::Message(message)
+                if matches!(*message, WorkerToRustMessage::StageChanged(_))
         ));
     }
 

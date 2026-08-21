@@ -9,7 +9,8 @@ use crate::pdf_protocol::{
 };
 use crate::pdf_worker::{WorkerSession, WorkerSessionEvent};
 use crate::{
-    AppState, PreparedTranslation, TranslationCore, TranslationMode, prepare_pdf_translation,
+    AppState, PdfPromptContext, PreparedTranslation, TranslationCore, TranslationMode,
+    prepare_pdf_translation,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -323,7 +324,7 @@ fn run_job_loop(
                     &job_dir,
                     &persistence,
                     &preflight_registry,
-                    message,
+                    *message,
                 ) {
                     keep_output = should_keep_output;
                     break;
@@ -841,10 +842,7 @@ async fn translate_pdf_preflight_inner(
         prompt_id: provider.prompt_id.clone(),
     };
     let empty = Value::Object(Default::default());
-    let prepared = match crate::prepare_pdf_translation(
-        state,
-        &request_contract,
-        &source_text,
+    let pdf_context = crate::PdfPromptContext::new(
         TranslationMode::PdfPreflight,
         &empty,
         &empty,
@@ -852,6 +850,12 @@ async fn translate_pdf_preflight_inner(
         &empty,
         &empty,
         &request.engine_constraints,
+    );
+    let prepared = match crate::prepare_pdf_translation(
+        state,
+        &request_contract,
+        &source_text,
+        &pdf_context,
     ) {
         Ok(value) => value,
         Err(error) => return degraded_response(vec![format!("文档预检准备失败：{error}")]),
@@ -1029,10 +1033,7 @@ async fn translate_pdf_request_inner(
         model_id: provider.model_id.clone(),
         prompt_id: provider.prompt_id.clone(),
     };
-    let prepared = match prepare_pdf_translation(
-        state,
-        &request_contract,
-        &source_text,
+    let pdf_context = PdfPromptContext::new(
         TranslationMode::PdfSegment,
         &request.document_context,
         &request.context_before,
@@ -1040,10 +1041,12 @@ async fn translate_pdf_request_inner(
         &request.task_terms,
         &request.abbreviations,
         &request.engine_constraints,
-    ) {
-        Ok(value) => value,
-        Err(error) => return failed("translation_prepare_failed", error),
-    };
+    );
+    let prepared =
+        match prepare_pdf_translation(state, &request_contract, &source_text, &pdf_context) {
+            Ok(value) => value,
+            Err(error) => return failed("translation_prepare_failed", error),
+        };
     if prepared.cache_enabled {
         let cached = match state.database.lock() {
             Ok(connection) => match crate::db::find_cache(&connection, &prepared.cache_key) {
@@ -1993,47 +1996,48 @@ mod tests {
         let output_pdf = loop {
             assert!(Instant::now() < deadline, "Rust PDF E2E timed out");
             match session.recv_timeout(Duration::from_millis(250)) {
-                Ok(WorkerSessionEvent::Message(WorkerToRustMessage::DocumentPreflightRequest(
-                    request,
-                ))) => {
-                    session
-                        .send(RustToWorkerMessage::DocumentPreflightResponse(
-                            DocumentPreflightResponseMessage {
-                                task_id: request.task_id,
-                                preflight_request_id: request.preflight_request_id,
-                                outcome: TranslationResponseOutcome::Completed,
-                                document_context: json!({
-                                    "schema_version": 1,
-                                    "title": "Rust PDF E2E fixture",
-                                    "key_terms": [],
-                                    "abbreviations": [],
-                                    "translation_notes": []
-                                }),
-                                context_hash: Some("rust-pdf-e2e-context".to_string()),
-                                degraded: false,
-                                warnings: Vec::new(),
-                                error: None,
-                            },
-                        ))
-                        .expect("send DOCUMENT_PREFLIGHT_RESPONSE");
-                }
-                Ok(WorkerSessionEvent::Message(WorkerToRustMessage::TranslateRequest(request))) => {
-                    let response = runtime.block_on(translate_pdf_request_with_api_key(
-                        &state,
-                        request,
-                        CancellationToken::new(),
-                        "test-key".to_string(),
-                    ));
-                    session
-                        .send(RustToWorkerMessage::TranslateResponse(response))
-                        .expect("send TRANSLATE_RESPONSE");
-                }
-                Ok(WorkerSessionEvent::Message(WorkerToRustMessage::Finished(
-                    FinishedMessage { output_pdf, .. },
-                ))) => break PathBuf::from(output_pdf),
-                Ok(WorkerSessionEvent::Message(WorkerToRustMessage::Error(error))) => {
-                    panic!("Worker returned an error: {}", error.error.message);
-                }
+                Ok(WorkerSessionEvent::Message(message)) => match *message {
+                    WorkerToRustMessage::DocumentPreflightRequest(request) => {
+                        session
+                            .send(RustToWorkerMessage::DocumentPreflightResponse(
+                                DocumentPreflightResponseMessage {
+                                    task_id: request.task_id,
+                                    preflight_request_id: request.preflight_request_id,
+                                    outcome: TranslationResponseOutcome::Completed,
+                                    document_context: json!({
+                                        "schema_version": 1,
+                                        "title": "Rust PDF E2E fixture",
+                                        "key_terms": [],
+                                        "abbreviations": [],
+                                        "translation_notes": []
+                                    }),
+                                    context_hash: Some("rust-pdf-e2e-context".to_string()),
+                                    degraded: false,
+                                    warnings: Vec::new(),
+                                    error: None,
+                                },
+                            ))
+                            .expect("send DOCUMENT_PREFLIGHT_RESPONSE");
+                    }
+                    WorkerToRustMessage::TranslateRequest(request) => {
+                        let response = runtime.block_on(translate_pdf_request_with_api_key(
+                            &state,
+                            request,
+                            CancellationToken::new(),
+                            "test-key".to_string(),
+                        ));
+                        session
+                            .send(RustToWorkerMessage::TranslateResponse(response))
+                            .expect("send TRANSLATE_RESPONSE");
+                    }
+                    WorkerToRustMessage::Finished(FinishedMessage { output_pdf, .. }) => {
+                        break PathBuf::from(output_pdf);
+                    }
+                    WorkerToRustMessage::Error(error) => {
+                        panic!("Worker returned an error: {}", error.error.message);
+                    }
+                    _ => {}
+                },
                 Ok(WorkerSessionEvent::WorkerExited(code)) => {
                     panic!("Worker exited before FINISHED: {code:?}");
                 }
