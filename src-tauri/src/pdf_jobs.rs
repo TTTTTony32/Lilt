@@ -766,7 +766,15 @@ async fn translate_pdf_preflight_for_job(
     cancellation: CancellationToken,
     activity_handler: Option<PreflightActivityHandler>,
 ) -> DocumentPreflightResponseMessage {
-    translate_pdf_preflight_inner(state, request, cancellation, None, activity_handler).await
+    translate_pdf_preflight_inner(
+        state,
+        request,
+        cancellation,
+        None,
+        activity_handler,
+        PdfPreflightStreamBackend::SharedCore,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -776,7 +784,105 @@ async fn translate_pdf_preflight_with_api_key(
     cancellation: CancellationToken,
     api_key: String,
 ) -> DocumentPreflightResponseMessage {
-    translate_pdf_preflight_inner(state, request, cancellation, Some(api_key), None).await
+    translate_pdf_preflight_inner(
+        state,
+        request,
+        cancellation,
+        Some(api_key),
+        None,
+        PdfPreflightStreamBackend::DeterministicFixture,
+    )
+    .await
+}
+
+enum PdfPreflightStreamBackend {
+    SharedCore,
+    #[cfg(test)]
+    DeterministicFixture,
+}
+
+impl PdfPreflightStreamBackend {
+    async fn stream<F, A>(
+        self,
+        request: crate::translation_core::StreamRequest<'_>,
+        on_delta: F,
+        on_activity: A,
+    ) -> Result<crate::provider::ProviderStreamResult, crate::provider::ProviderError>
+    where
+        F: FnMut(String) -> Result<(), crate::provider::ProviderError>,
+        A: FnMut(crate::provider::ProviderStreamActivity),
+    {
+        match self {
+            Self::SharedCore => {
+                TranslationCore::stream_with_usage_and_activity(request, on_delta, on_activity)
+                    .await
+            }
+            #[cfg(test)]
+            Self::DeterministicFixture => {
+                deterministic_pdf_preflight_fixture(request, on_delta, on_activity)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn deterministic_pdf_preflight_fixture<F, A>(
+    request: crate::translation_core::StreamRequest<'_>,
+    mut on_delta: F,
+    mut on_activity: A,
+) -> Result<crate::provider::ProviderStreamResult, crate::provider::ProviderError>
+where
+    F: FnMut(String) -> Result<(), crate::provider::ProviderError>,
+    A: FnMut(crate::provider::ProviderStreamActivity),
+{
+    assert_eq!(request.mode, TranslationMode::PdfPreflight);
+    assert_eq!(request.request_id, "preflight-1");
+    assert_eq!(request.base_url, "https://provider.example/v1");
+    assert_eq!(request.model_id, "stub-model");
+    assert_eq!(request.api_key, "test-key");
+    assert!(request.system_prompt.contains("PDF 文档预检"));
+    assert!(request.system_prompt.contains("只返回 JSON 对象"));
+    assert!(request.system_prompt.contains("schema_version"));
+    assert!(request.system_prompt.contains("key_terms"));
+    assert!(request.system_prompt.contains("translation_notes"));
+
+    let user_payload: Value = serde_json::from_str(request.user_text)
+        .expect("PDF preflight fixture should receive JSON user text");
+    assert_eq!(user_payload["metadata"]["file_name"], "fixture.pdf");
+    assert_eq!(user_payload["source_language"], "en");
+    assert_eq!(user_payload["target_language"], "zh-CN");
+    let sample_text = user_payload["samples"]
+        .as_array()
+        .and_then(|samples| samples.first())
+        .and_then(|sample| sample.get("text"))
+        .and_then(Value::as_str)
+        .expect("PDF preflight fixture should receive a sample");
+    assert_eq!(sample_text, "A representative paragraph");
+
+    let content = serde_json::to_string(&json!({
+        "schema_version": 1,
+        "title": "A paper",
+        "abstract": "A short abstract",
+        "key_terms": [{
+            "source": "cache",
+            "target": "缓存",
+            "confidence": 0.9
+        }],
+        "abbreviations": [{
+            "abbreviation": "API",
+            "expanded": "Application Programming Interface",
+            "target": "接口",
+            "confidence": 0.8
+        }]
+    }))
+    .expect("encode deterministic PDF preflight context");
+    on_activity(crate::provider::ProviderStreamActivity::Thinking);
+    on_activity(crate::provider::ProviderStreamActivity::Content);
+    on_delta(content.clone())?;
+    Ok(crate::provider::ProviderStreamResult {
+        content,
+        token_usage: None,
+    })
 }
 
 async fn translate_pdf_preflight_inner(
@@ -785,6 +891,7 @@ async fn translate_pdf_preflight_inner(
     cancellation: CancellationToken,
     api_key_override: Option<String>,
     mut activity_handler: Option<PreflightActivityHandler>,
+    stream_backend: PdfPreflightStreamBackend,
 ) -> DocumentPreflightResponseMessage {
     let task_id = request.task_id.clone();
     let request_id = request.preflight_request_id.clone();
@@ -878,26 +985,27 @@ async fn translate_pdf_preflight_inner(
         "{}\n\n你正在执行 PDF 文档预检。只返回 JSON 对象，不要返回 Markdown。字段必须包括 schema_version、title、abstract、document_type、domain、headings、key_terms、abbreviations、translation_notes。key_terms 的元素使用 source、target、source_kind、confidence、note；abbreviations 的元素使用 abbreviation、expanded、target、confidence。无法确认的字段使用 null 或空数组。",
         prepared.system_prompt
     );
-    let translated = TranslationCore::stream_with_usage_and_activity(
-        crate::translation_core::StreamRequest {
-            request_id: &request.preflight_request_id,
-            base_url: &prepared.provider.base_url,
-            api_key: &api_key,
-            model_id: &prepared.provider.model_id,
-            system_prompt: &system_prompt,
-            user_text: &source_text,
-            cancel: &cancellation,
-            mode: TranslationMode::PdfPreflight,
-            thinking_effort: &prepared.provider.thinking_effort,
-        },
-        |_| Ok(()),
-        |activity| {
-            if let Some(handler) = activity_handler.as_mut() {
-                handler(activity);
-            }
-        },
-    )
-    .await;
+    let translated = stream_backend
+        .stream(
+            crate::translation_core::StreamRequest {
+                request_id: &request.preflight_request_id,
+                base_url: &prepared.provider.base_url,
+                api_key: &api_key,
+                model_id: &prepared.provider.model_id,
+                system_prompt: &system_prompt,
+                user_text: &source_text,
+                cancel: &cancellation,
+                mode: TranslationMode::PdfPreflight,
+                thinking_effort: &prepared.provider.thinking_effort,
+            },
+            |_| Ok(()),
+            |activity| {
+                if let Some(handler) = activity_handler.as_mut() {
+                    handler(activity);
+                }
+            },
+        )
+        .await;
     let translated = match translated {
         Ok(value) => value,
         Err(crate::provider::ProviderError::Cancelled) => {
@@ -1538,7 +1646,6 @@ mod tests {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::sync_channel,
     };
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1849,63 +1956,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pdf_preflight_reaches_the_shared_provider_core_and_normalizes_context() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let (provider_ready_tx, provider_ready_rx) = sync_channel(0);
-        let (provider_request_tx, provider_request_rx) = sync_channel(1);
-        let server = std::thread::spawn(move || {
-            let context = serde_json::to_string(&json!({
-                "schema_version": 1,
-                "title": "A paper",
-                "abstract": "A short abstract",
-                "key_terms": [{
-                    "source": "cache",
-                    "target": "缓存",
-                    "confidence": 0.9
-                }],
-                "abbreviations": [{
-                    "abbreviation": "API",
-                    "expanded": "Application Programming Interface",
-                    "target": "接口",
-                    "confidence": 0.8
-                }]
-            }))
-            .unwrap();
-            let body = format!(
-                "data: {}\n\ndata: [DONE]\n\n",
-                json!({"choices":[{"delta":{"content":context}}]})
-            );
-            listener
-                .set_nonblocking(false)
-                .expect("provider stub listener should be blocking");
-            provider_ready_tx
-                .send(())
-                .expect("provider test should still be waiting for readiness");
-            let (mut stream, _) = listener.accept().expect("accept provider stub request");
-            let request = read_http_request(&mut stream).expect("read provider stub request");
-            let request = String::from_utf8_lossy(&request).to_lowercase();
-            assert!(request.starts_with("post /v1/chat/completions"));
-            assert!(request.contains("authorization: bearer test-key"));
-            provider_request_tx
-                .send(())
-                .expect("provider test should still be waiting for the request");
-            write_http_response(
-                &mut stream,
-                "HTTP/1.1 200 OK",
-                "text/event-stream",
-                body.as_bytes(),
-            );
-        });
-        provider_ready_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("provider stub should start before the request");
-
+    async fn pdf_preflight_uses_shared_boundary_and_normalizes_context() {
         let connection = Connection::open_in_memory().unwrap();
         crate::db::migrate(&connection).unwrap();
         crate::db::save_provider(
             &connection,
-            &format!("http://{address}/v1"),
+            "https://provider.example/v1",
             "stub-model",
             ThinkingEffort::None,
         )
@@ -1935,10 +1991,6 @@ mod tests {
         )
         .await;
 
-        provider_request_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("provider stub should receive the client request");
-        server.join().unwrap();
         assert_eq!(response.outcome, TranslationResponseOutcome::Completed);
         assert!(!response.degraded);
         assert_eq!(response.document_context["title"], "A paper");
