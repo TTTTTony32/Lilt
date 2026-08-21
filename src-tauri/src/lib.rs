@@ -2673,8 +2673,8 @@ mod tests {
             target_language: "zh-CN",
             source_text: "hello",
         };
-        let empty_context = json!({"schema_version": 1, "context_hash": "a"});
-        let changed_context = json!({"schema_version": 1, "context_hash": "b"});
+        let empty_context = json!({"schema_version": 1});
+        let changed_context = json!({"schema_version": 1, "title": "A different document"});
         let empty_window = json!([]);
         fn context(
             document_context: &serde_json::Value,

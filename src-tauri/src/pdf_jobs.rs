@@ -1851,12 +1851,10 @@ mod tests {
     async fn pdf_preflight_reaches_the_shared_provider_core_and_normalizes_context() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
+        let provider_stop = Arc::new(AtomicBool::new(false));
+        let provider_stop_for_thread = provider_stop.clone();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_http_request(&mut stream).unwrap();
-            let request = String::from_utf8_lossy(&request).to_lowercase();
-            assert!(request.starts_with("post /v1/chat/completions"));
-            assert!(request.contains("authorization: bearer test-key"));
+            listener.set_nonblocking(true).unwrap();
             let context = serde_json::to_string(&json!({
                 "schema_version": 1,
                 "title": "A paper",
@@ -1878,12 +1876,33 @@ mod tests {
                 "data: {}\n\ndata: [DONE]\n\n",
                 json!({"choices":[{"delta":{"content":context}}]})
             );
-            write_http_response(
-                &mut stream,
-                "HTTP/1.1 200 OK",
-                "text/event-stream",
-                body.as_bytes(),
-            );
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !provider_stop_for_thread.load(Ordering::Acquire) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let Some(request) = read_http_request(&mut stream) else {
+                            continue;
+                        };
+                        let request = String::from_utf8_lossy(&request).to_lowercase();
+                        assert!(request.starts_with("post /v1/chat/completions"));
+                        assert!(request.contains("authorization: bearer test-key"));
+                        write_http_response(
+                            &mut stream,
+                            "HTTP/1.1 200 OK",
+                            "text/event-stream",
+                            body.as_bytes(),
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept provider stub connection: {error}"),
+                }
+            }
+            if provider_stop_for_thread.load(Ordering::Acquire) {
+                return;
+            }
+            panic!("provider stub timed out waiting for a request");
         });
 
         let connection = Connection::open_in_memory().unwrap();
@@ -1920,6 +1939,7 @@ mod tests {
         )
         .await;
 
+        provider_stop.store(true, Ordering::Release);
         server.join().unwrap();
         assert_eq!(response.outcome, TranslationResponseOutcome::Completed);
         assert!(!response.degraded);
@@ -2163,19 +2183,75 @@ mod tests {
                 continue;
             };
             let headers = String::from_utf8_lossy(&bytes[..header_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("Content-Length:")
-                        .or_else(|| line.strip_prefix("content-length:"))
-                })
-                .and_then(|value| value.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let required = header_end + 4 + content_length;
-            if bytes.len() >= required {
-                bytes.truncate(required);
-                return Some(bytes);
+            let content_length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            });
+            if let Some(content_length) = content_length {
+                let required = header_end + 4 + content_length;
+                if bytes.len() >= required {
+                    bytes.truncate(required);
+                    return Some(bytes);
+                }
+                continue;
             }
+            let chunked = headers.lines().any(|line| {
+                let Some((name, value)) = line.split_once(':') else {
+                    return false;
+                };
+                name.trim().eq_ignore_ascii_case("transfer-encoding")
+                    && value
+                        .split(',')
+                        .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+            });
+            if chunked {
+                if let Some(body) = decode_chunked_body(&bytes[header_end + 4..]) {
+                    let mut request = bytes[..header_end + 4].to_vec();
+                    request.extend_from_slice(&body);
+                    return Some(request);
+                }
+                continue;
+            }
+            return None;
+        }
+    }
+
+    fn decode_chunked_body(body: &[u8]) -> Option<Vec<u8>> {
+        let mut offset = 0;
+        let mut decoded = Vec::new();
+        loop {
+            let line_end = body[offset..]
+                .windows(2)
+                .position(|value| value == b"\r\n")?
+                + offset;
+            let size = usize::from_str_radix(
+                body[offset..line_end]
+                    .split(|byte| *byte == b';')
+                    .next()
+                    .and_then(|value| std::str::from_utf8(value).ok())?
+                    .trim(),
+                16,
+            )
+            .ok()?;
+            offset = line_end + 2;
+            if size == 0 {
+                if body.get(offset..)?.starts_with(b"\r\n") {
+                    return Some(decoded);
+                }
+                body[offset..]
+                    .windows(4)
+                    .position(|value| value == b"\r\n\r\n")?;
+                return Some(decoded);
+            }
+            let data_end = offset.checked_add(size)?;
+            if body.len() < data_end + 2 || &body[data_end..data_end + 2] != b"\r\n" {
+                return None;
+            }
+            decoded.extend_from_slice(&body[offset..data_end]);
+            offset = data_end + 2;
         }
     }
 
