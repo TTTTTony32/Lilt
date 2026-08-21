@@ -1538,6 +1538,7 @@ mod tests {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc::sync_channel,
     };
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1851,10 +1852,9 @@ mod tests {
     async fn pdf_preflight_reaches_the_shared_provider_core_and_normalizes_context() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let provider_stop = Arc::new(AtomicBool::new(false));
-        let provider_stop_for_thread = provider_stop.clone();
+        let (provider_ready_tx, provider_ready_rx) = sync_channel(0);
+        let (provider_request_tx, provider_request_rx) = sync_channel(1);
         let server = std::thread::spawn(move || {
-            listener.set_nonblocking(true).unwrap();
             let context = serde_json::to_string(&json!({
                 "schema_version": 1,
                 "title": "A paper",
@@ -1876,34 +1876,30 @@ mod tests {
                 "data: {}\n\ndata: [DONE]\n\n",
                 json!({"choices":[{"delta":{"content":context}}]})
             );
-            let deadline = Instant::now() + Duration::from_secs(20);
-            while !provider_stop_for_thread.load(Ordering::Acquire) && Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let Some(request) = read_http_request(&mut stream) else {
-                            continue;
-                        };
-                        let request = String::from_utf8_lossy(&request).to_lowercase();
-                        assert!(request.starts_with("post /v1/chat/completions"));
-                        assert!(request.contains("authorization: bearer test-key"));
-                        write_http_response(
-                            &mut stream,
-                            "HTTP/1.1 200 OK",
-                            "text/event-stream",
-                            body.as_bytes(),
-                        );
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("accept provider stub connection: {error}"),
-                }
-            }
-            if provider_stop_for_thread.load(Ordering::Acquire) {
-                return;
-            }
-            panic!("provider stub timed out waiting for a request");
+            listener
+                .set_nonblocking(false)
+                .expect("provider stub listener should be blocking");
+            provider_ready_tx
+                .send(())
+                .expect("provider test should still be waiting for readiness");
+            let (mut stream, _) = listener.accept().expect("accept provider stub request");
+            let request = read_http_request(&mut stream).expect("read provider stub request");
+            let request = String::from_utf8_lossy(&request).to_lowercase();
+            assert!(request.starts_with("post /v1/chat/completions"));
+            assert!(request.contains("authorization: bearer test-key"));
+            provider_request_tx
+                .send(())
+                .expect("provider test should still be waiting for the request");
+            write_http_response(
+                &mut stream,
+                "HTTP/1.1 200 OK",
+                "text/event-stream",
+                body.as_bytes(),
+            );
         });
+        provider_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("provider stub should start before the request");
 
         let connection = Connection::open_in_memory().unwrap();
         crate::db::migrate(&connection).unwrap();
@@ -1939,7 +1935,9 @@ mod tests {
         )
         .await;
 
-        provider_stop.store(true, Ordering::Release);
+        provider_request_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("provider stub should receive the client request");
         server.join().unwrap();
         assert_eq!(response.outcome, TranslationResponseOutcome::Completed);
         assert!(!response.degraded);
@@ -2168,6 +2166,7 @@ mod tests {
     }
 
     fn read_http_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
+        stream.set_nonblocking(false).ok()?;
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .ok()?;
