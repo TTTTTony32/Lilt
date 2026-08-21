@@ -1,6 +1,6 @@
 [package]
 name = "lilt"
-version = "0.4.7"
+version = "0.4.8"
 description = "A simple desktop translation workspace for English learners."
 authors = ["Tony32"]
 edition = "2024"

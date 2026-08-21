@@ -23,7 +23,7 @@ pub(crate) const BABELDOC_ENGINE_VERSION: &str = "babeldoc-0.6.4";
 const BABELDOC_VERSION: &str = "0.6.4";
 const SUPPORTED_ENGINE_TARGET: &str = "windows-x86_64";
 #[cfg(not(debug_assertions))]
-const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r1";
+const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r2";
 #[cfg(not(debug_assertions))]
 const RELEASE_REPOSITORY_OWNER: &str = "TTTTTony32";
 #[cfg(not(debug_assertions))]

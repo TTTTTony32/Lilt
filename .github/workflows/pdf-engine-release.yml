@@ -9,7 +9,7 @@ on:
       release_tag:
         description: "用于手动构建标识的 Engine 标签"
         required: true
-        default: lilt-pdf-engine-babeldoc-0.6.4-r1
+        default: lilt-pdf-engine-babeldoc-0.6.4-r2
         type: string
 
 permissions:
