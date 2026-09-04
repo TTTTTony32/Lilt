@@ -208,7 +208,7 @@ export interface TranslationCommandResult {
   message: string | null;
 }
 
-export const PARAGRAPH_LEARNING_PROTOCOL_VERSION = "paragraph-learning-v1";
+export const PARAGRAPH_LEARNING_PROTOCOL_VERSION = "paragraph-learning-v2";
 export const MAX_PARAGRAPH_LEARNING_SEGMENTS = 256;
 export const MAX_PARAGRAPH_LEARNING_ID_LENGTH = 128;
 export const MAX_PARAGRAPH_LEARNING_SOURCE_LENGTH = 100_000;

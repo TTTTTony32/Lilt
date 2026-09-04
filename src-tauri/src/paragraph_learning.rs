@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub const PARAGRAPH_LEARNING_PROTOCOL_VERSION: &str = "paragraph-learning-v1";
+pub const PARAGRAPH_LEARNING_PROTOCOL_VERSION: &str = "paragraph-learning-v2";
 pub const PARAGRAPH_LEARNING_CACHE_MODE: &str = "paragraph-learning";
 pub const MAX_PARAGRAPH_LEARNING_SEGMENTS: usize = 256;
 pub const MAX_PARAGRAPH_LEARNING_ID_CHARS: usize = 128;
@@ -67,7 +67,7 @@ impl ParagraphLearningResult {
 
 pub fn build_system_prompt(base_prompt: &str) -> String {
     format!(
-        "{base_prompt}\n\n段落学习模式结构化输出协议（版本 {PARAGRAPH_LEARNING_PROTOCOL_VERSION}）：只返回一个 JSON 对象，不要返回 Markdown 代码围栏、说明文字或其他内容。对象必须包含 protocolVersion（固定为 {PARAGRAPH_LEARNING_PROTOCOL_VERSION}）和 segments 数组。每个分段必须包含非空且唯一的 id、source、translation、explanation 字符串。source 必须是用户原文中的连续精确子串；所有 source 按原文连续覆盖全文，不得遗漏、重叠、改写空白或标点。translation 按原文顺序拼接后构成完整译文，因此需要保留连接所需的空格和标点。explanation 使用简洁中文，只说明可验证的词义、语法、搭配、语气或文化背景，不输出完整推理过程。",
+        "{base_prompt}\n\n段落学习模式结构化输出协议（版本 {PARAGRAPH_LEARNING_PROTOCOL_VERSION}）：只返回一个 JSON 对象，不要返回 Markdown 代码围栏、说明文字或其他内容。分段应按有实际学习价值的语言单位切分，优先使用单词（words）、词组或搭配（phrases or collocations），包括短语动词（phrasal verbs）、固定搭配（collocations）、习语（idioms）、名词短语（noun phrases）、动词短语（verb phrases）和简短语义片段或意群（short semantic chunks）等粒度，不要默认以完整句子作为一个分段。当一个句子包含多个可学习单位时，必须拆分为多个分段，禁止把完整句子单独作为一个分段。对象必须包含 protocolVersion（固定为 {PARAGRAPH_LEARNING_PROTOCOL_VERSION}）和 segments 数组。每个分段必须包含非空且唯一的 id、source、translation、explanation 字符串。source 必须是用户原文中的连续精确子串；所有 source 按原文连续覆盖全文，空格和标点必须原样保留，不得遗漏、重叠或改写。translation 按原文顺序拼接后构成完整译文，因此需要保留连接所需的空格和标点。explanation 使用简洁中文，只说明可验证的词义、语法、搭配、语气或文化背景，不输出完整推理过程。",
     )
 }
 
@@ -641,7 +641,40 @@ mod tests {
         assert!(prompt.starts_with("base prompt"));
         assert!(prompt.contains(PARAGRAPH_LEARNING_PROTOCOL_VERSION));
         assert!(prompt.contains("protocolVersion"));
+        assert!(prompt.contains("segments 数组"));
+        assert!(prompt.contains("id、source、translation、explanation 字符串"));
         assert!(prompt.contains("source"));
+        assert!(prompt.contains("translation"));
         assert!(prompt.contains("explanation"));
+    }
+
+    #[test]
+    fn prompt_requires_meaningful_learning_units_and_preserves_text_boundaries() {
+        let prompt = build_system_prompt("base prompt");
+
+        for unit in [
+            "单词（words）",
+            "词组或搭配（phrases or collocations）",
+            "短语动词（phrasal verbs）",
+            "固定搭配（collocations）",
+            "习语（idioms）",
+            "名词短语（noun phrases）",
+            "动词短语（verb phrases）",
+            "简短语义片段或意群（short semantic chunks）",
+        ] {
+            assert!(
+                prompt.contains(unit),
+                "prompt missing learning unit: {unit}"
+            );
+        }
+        assert!(prompt.contains("semantic chunks"));
+        assert!(prompt.contains("意群"));
+        assert!(prompt.contains("不要默认以完整句子作为一个分段"));
+        assert!(prompt.contains("当一个句子包含多个可学习单位时，必须拆分为多个分段"));
+        assert!(prompt.contains("禁止把完整句子单独作为一个分段"));
+        assert!(prompt.contains("所有 source 按原文连续覆盖全文"));
+        assert!(prompt.contains("空格和标点必须原样保留"));
+        assert!(prompt.contains("translation 按原文顺序拼接后构成完整译文"));
+        assert!(prompt.contains("保留连接所需的空格和标点"));
     }
 }

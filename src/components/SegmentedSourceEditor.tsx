@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState, type ChangeEvent, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import type { ParagraphLearningResult } from "../types/contracts";
 import {
@@ -35,8 +35,10 @@ export default function SegmentedSourceEditor({
     reduceSegmentInteraction,
     EMPTY_SEGMENT_INTERACTION_STATE,
   );
+  const [isEditing, setIsEditing] = useState(false);
   const [tooltipPosition, setTooltipPosition] = useState<TooltipPosition | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const segmentRefs = useRef<Record<string, HTMLSpanElement | null>>({});
   const tooltipId = useId();
@@ -44,10 +46,19 @@ export default function SegmentedSourceEditor({
   const activeSegmentId = getActiveSegmentId(interaction);
   const activeSegment = learning?.segments.find((segment) => segment.id === activeSegmentId) ?? null;
 
-  useEffect(() => {
+  const clearSegmentInteraction = useCallback(() => {
     dispatch({ type: "reset" });
     setTooltipPosition(null);
-  }, [learning, value]);
+  }, []);
+
+  useEffect(() => {
+    clearSegmentInteraction();
+  }, [clearSegmentInteraction, learning, value]);
+
+  useLayoutEffect(() => {
+    if (!isEditing) return;
+    editorRef.current?.focus();
+  }, [isEditing]);
 
   const updateTooltipPosition = useCallback(() => {
     if (!activeSegmentId || !activeSegment) {
@@ -86,7 +97,7 @@ export default function SegmentedSourceEditor({
   }, [updateTooltipPosition]);
 
   useEffect(() => {
-    if (!activeSegment) return undefined;
+    if (isEditing || !activeSegment) return undefined;
     const anchor = activeSegmentId ? segmentRefs.current[activeSegmentId] : null;
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateTooltipPosition);
     if (surfaceRef.current) observer?.observe(surfaceRef.current);
@@ -99,59 +110,82 @@ export default function SegmentedSourceEditor({
       window.removeEventListener("resize", updateTooltipPosition);
       document.removeEventListener("scroll", updateTooltipPosition, true);
     };
-  }, [activeSegment, activeSegmentId, updateTooltipPosition]);
+  }, [activeSegment, activeSegmentId, isEditing, updateTooltipPosition]);
 
-  const handleEditableInput = (event: FormEvent<HTMLDivElement>) => {
-    onChange(event.currentTarget.innerText.replace(/\r\n/g, "\n"));
+  const handleEditorChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    onChange(event.currentTarget.value.replace(/\r\n/g, "\n"));
+  };
+
+  const handleEnterEditing = () => {
+    clearSegmentInteraction();
+    setIsEditing(true);
+  };
+
+  const handleEditorBlur = () => {
+    clearSegmentInteraction();
+    setIsEditing(false);
   };
 
   const handleSegmentKeyDown = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
-    dispatch({ type: "escape" });
+    clearSegmentInteraction();
   };
 
   return (
     <>
       <div className="segmented-source-editor">
-      <div
-        ref={surfaceRef}
-        className="segmented-source-editor-surface"
-        contentEditable
-        suppressContentEditableWarning
-        role="textbox"
-        aria-label="原文"
-        aria-multiline="true"
-        aria-placeholder={placeholder}
-        data-empty={value.length === 0 ? "true" : "false"}
-        spellCheck={false}
-        onInput={handleEditableInput}
-      >
-        {parts.map((part, index) => {
-          if (part.type === "plain") return part.text ? <span key={`plain-${index}`}>{part.text}</span> : null;
-          const { segment } = part;
-          const isActive = segment.id === activeSegmentId;
-          return (
-            <span
-              key={segment.id}
-              ref={(element) => { segmentRefs.current[segment.id] = element; }}
-              className={`source-segment ${isActive ? "is-active" : ""}`}
-              data-segment-id={segment.id}
-              tabIndex={0}
-              aria-describedby={isActive ? tooltipId : undefined}
-              onMouseEnter={() => dispatch({ type: "pointerEnter", segmentId: segment.id })}
-              onMouseLeave={() => dispatch({ type: "pointerLeave", segmentId: segment.id })}
-              onFocus={() => dispatch({ type: "focus", segmentId: segment.id })}
-              onBlur={() => dispatch({ type: "blur", segmentId: segment.id })}
-              onKeyDown={handleSegmentKeyDown}
-            >
-              {segment.source}
-            </span>
-          );
-        })}
+        {isEditing ? (
+          <textarea
+            ref={editorRef}
+            className="segmented-source-editor-input"
+            value={value}
+            aria-label="原文"
+            aria-multiline="true"
+            placeholder={placeholder}
+            spellCheck={false}
+            onChange={handleEditorChange}
+            onBlur={handleEditorBlur}
+          />
+        ) : (
+          <div
+            ref={surfaceRef}
+            className="segmented-source-editor-surface"
+            role="textbox"
+            aria-label="原文"
+            aria-multiline="true"
+            aria-readonly="true"
+            aria-placeholder={placeholder}
+            data-empty={value.length === 0 ? "true" : "false"}
+            tabIndex={0}
+            onClick={handleEnterEditing}
+          >
+            {parts.map((part, index) => {
+              if (part.type === "plain") return part.text ? <span key={`plain-${index}`}>{part.text}</span> : null;
+              const { segment } = part;
+              const isActive = segment.id === activeSegmentId;
+              return (
+                <span
+                  key={segment.id}
+                  ref={(element) => { segmentRefs.current[segment.id] = element; }}
+                  className={`source-segment ${isActive ? "is-active" : ""}`}
+                  data-segment-id={segment.id}
+                  tabIndex={0}
+                  aria-describedby={isActive ? tooltipId : undefined}
+                  onMouseEnter={() => dispatch({ type: "pointerEnter", segmentId: segment.id })}
+                  onMouseLeave={() => dispatch({ type: "pointerLeave", segmentId: segment.id })}
+                  onFocus={() => dispatch({ type: "focus", segmentId: segment.id })}
+                  onBlur={() => dispatch({ type: "blur", segmentId: segment.id })}
+                  onKeyDown={handleSegmentKeyDown}
+                >
+                  {segment.source}
+                </span>
+              );
+            })}
+          </div>
+        )}
       </div>
-      </div>
-      {activeSegment && createPortal(
+      {!isEditing && activeSegment && createPortal(
         <div
           ref={tooltipRef}
           id={tooltipId}
