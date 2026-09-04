@@ -2065,10 +2065,19 @@ function TranslateView(props: TranslateViewProps) {
           <div className="translation-panel result-panel">
             <div className="translation-scroll-region">
               <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
-                {props.translatedText || (isLearningRequest && isBusy
-                  ? <span className="learning-stream-status">正在整理学习分段……</span>
-                  : <span className="empty-result">译文会显示在这里</span>)}
-                {props.status === "streaming" && <span className="stream-caret" />}
+                {props.translatedText ? (
+                  <>
+                    {props.translatedText}
+                    {props.status === "streaming" && <span className="stream-caret" />}
+                  </>
+                ) : (
+                  <>
+                    {props.status === "streaming" && <span className="stream-caret is-leading" />}
+                    {isLearningRequest && isBusy
+                      ? <span className="learning-stream-status">正在整理学习分段……</span>
+                      : <span className="empty-result">译文会显示在这里</span>}
+                  </>
+                )}
               </div>
             </div>
             <div className="panel-footer result-footer">

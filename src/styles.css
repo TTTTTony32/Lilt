@@ -138,6 +138,7 @@ textarea::placeholder { color: #b5b6ad; }
 .empty-result { color: #b5b6ad; }
 .learning-stream-status { color: #8f9e90; }
 .stream-caret { width: 2px; height: 16px; margin-left: 3px; display: inline-block; vertical-align: -2px; background: #79937d; animation: blink 1s steps(2, start) infinite; }
+.stream-caret.is-leading { margin-right: 3px; margin-left: 0; }
 @keyframes blink { 50% { opacity: 0; } }
 .result-footer { justify-content: space-between; }
 .result-footer-actions { display: flex; align-items: center; gap: 3px; }
