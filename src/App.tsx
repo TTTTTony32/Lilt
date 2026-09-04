@@ -2324,6 +2324,166 @@ function PromptManager({
   );
 }
 
+interface SettingsSelectOption {
+  value: string;
+  label: string;
+}
+
+interface SettingsSelectProps {
+  id: string;
+  ariaLabel: string;
+  value: string;
+  options: SettingsSelectOption[];
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}
+
+function SettingsSelect({
+  id,
+  ariaLabel,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: SettingsSelectProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [open, setOpen] = useState(false);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const [highlightedIndex, setHighlightedIndex] = useState(selectedIndex);
+  const selectedOption = options[selectedIndex];
+
+  useEffect(() => {
+    if (!open) return;
+    setHighlightedIndex(selectedIndex);
+    const frame = window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && containerRef.current?.contains(event.target)) return;
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  const focusOption = (index: number) => {
+    setHighlightedIndex(index);
+    window.requestAnimationFrame(() => optionRefs.current[index]?.focus());
+  };
+
+  const selectValue = (nextValue: string) => {
+    onChange(nextValue);
+    setOpen(false);
+    buttonRef.current?.focus();
+  };
+
+  const handleButtonKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      setOpen(false);
+      return;
+    }
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && options.length > 0) {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = open
+        ? (highlightedIndex + direction + options.length) % options.length
+        : selectedIndex;
+      setOpen(true);
+      focusOption(nextIndex);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen((current) => !current);
+    }
+  };
+
+  const handleOptionKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number, optionValue: string) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      focusOption((index + direction + options.length) % options.length);
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      focusOption(event.key === "Home" ? 0 : options.length - 1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectValue(optionValue);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      buttonRef.current?.focus();
+      return;
+    }
+    if (event.key === "Tab") setOpen(false);
+  };
+
+  return (
+    <div className="settings-select-control" ref={containerRef}>
+      <button
+        className="settings-select-button"
+        ref={buttonRef}
+        id={id}
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={`${id}-menu`}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={handleButtonKeyDown}
+      >
+        <span className="settings-select-button-label">{selectedOption?.label ?? value}</span>
+        <ChevronDown className="settings-select-button-icon" size={15} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+      {open && options.length > 0 && (
+        <div className="settings-select-menu" id={`${id}-menu`} role="listbox" aria-label={ariaLabel}>
+          {options.map((option, index) => (
+            <button
+              className={`settings-select-option ${index === selectedIndex ? "is-selected" : ""} ${index === highlightedIndex ? "is-highlighted" : ""}`}
+              key={option.value}
+              ref={(element) => { optionRefs.current[index] = element; }}
+              type="button"
+              role="option"
+              aria-selected={index === selectedIndex}
+              onMouseEnter={() => setHighlightedIndex(index)}
+              onClick={() => selectValue(option.value)}
+              onKeyDown={(event) => handleOptionKeyDown(event, index, option.value)}
+            >
+              <span>{option.label}</span>
+              {index === selectedIndex && <Check size={14} strokeWidth={2} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsSelectField({ label, ...props }: SettingsSelectProps & { label: string }) {
+  return (
+    <div className="settings-select-field">
+      <span className="settings-select-label">{label}</span>
+      <SettingsSelect {...props} />
+    </div>
+  );
+}
+
 function SettingsView({
   snapshot,
   dictionaryProgress,
@@ -2500,6 +2660,12 @@ function SettingsView({
     ? Math.min(100, Math.round((dictionaryProgress.current / dictionaryProgress.total) * 100))
     : 0;
   const activeSelectionMode = selectionStatus?.mode ?? snapshot.settings.selectionMode;
+  const modelOptions = availableModels
+    ? [
+      ...(!availableModels.some((model) => model.id === modelId) ? [{ value: modelId, label: `当前：${modelId}` }] : []),
+      ...availableModels.map((model) => ({ value: model.id, label: model.label })),
+    ]
+    : [];
 
   return (
     <section className="page-section narrow-page">
@@ -2509,8 +2675,8 @@ function SettingsView({
           <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>即将支持其他协议。</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" /></label>
-            <label>Model ID{availableModels ? <select value={modelId} onChange={(event) => setModelId(event.target.value)}>{!availableModels.some((model) => model.id === modelId) && <option value={modelId}>当前：{modelId}</option>}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select> : <input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" />}</label>
-            <label>思考强度<select value={thinkingEffort} onChange={(event) => setThinkingEffort(event.target.value as ThinkingEffort)}><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+            {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={setModelId} /> : <label>Model ID<input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" /></label>}
+            <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => setThinkingEffort(value as ThinkingEffort)} />
             <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
           </div>
           {providerMessage && <p className="notice-message settings-message">{providerMessage}</p>}
@@ -2541,7 +2707,7 @@ function SettingsView({
         <div className="simple-card selection-settings-card">
           <div className="card-heading"><div><strong>划词翻译</strong><span>从其他 Windows 应用读取选中文本，浮窗复用当前翻译方向。</span></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
           <div className="form-grid selection-settings-grid">
-            <label>触发方式<select value={selectionMode} onChange={(event) => setSelectionMode(event.target.value as AppSettings["selectionMode"])}><option value="shortcut">按快捷键</option><option value="automatic">自动监听选区</option></select></label>
+            <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => setSelectionMode(value as AppSettings["selectionMode"])} />
             <label>快捷键<input value={selectionShortcut} onChange={(event) => setSelectionShortcut(event.target.value)} placeholder="Ctrl+Shift+L" /></label>
           </div>
           <p className="settings-hint">快捷键格式使用 Ctrl+Shift+L 这样的组合。按快捷键模式读取当前选区；自动监听模式在选区稳定 500 毫秒后显示结果。自动模式仍保留快捷键设置，切换回来即可使用。</p>
