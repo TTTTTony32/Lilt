@@ -11,6 +11,7 @@ export interface AppSettings {
   cacheUsageBytes: number;
   wordAiCacheEnabled: boolean;
   paragraphExampleLookupEnabled: boolean;
+  paragraphLearningModeEnabled: boolean;
   selectionMode: "shortcut" | "automatic";
   selectionShortcut: string;
   selectionWindowWidth: number;
@@ -176,6 +177,7 @@ export interface TranslationEventCompleted {
   requestId: string;
   content: string;
   cacheHit: boolean;
+  learning: ParagraphLearningResult | null;
 }
 
 export interface TranslationEventCancelled {
@@ -202,8 +204,34 @@ export interface TranslationCommandResult {
   outcome: TranslationOutcome;
   content: string | null;
   cacheHit: boolean;
+  learning?: ParagraphLearningResult | null;
   message: string | null;
 }
+
+export const PARAGRAPH_LEARNING_PROTOCOL_VERSION = "paragraph-learning-v1";
+export const MAX_PARAGRAPH_LEARNING_SEGMENTS = 256;
+export const MAX_PARAGRAPH_LEARNING_ID_LENGTH = 128;
+export const MAX_PARAGRAPH_LEARNING_SOURCE_LENGTH = 100_000;
+export const MAX_PARAGRAPH_LEARNING_TRANSLATION_LENGTH = 100_000;
+export const MAX_PARAGRAPH_LEARNING_EXPLANATION_LENGTH = 2_000;
+export const MAX_PARAGRAPH_LEARNING_TOTAL_TRANSLATION_LENGTH = 200_000;
+
+export interface ParagraphLearningSegment {
+  id: string;
+  source: string;
+  translation: string;
+  explanation: string;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
+export interface ParagraphLearningResult {
+  protocolVersion: typeof PARAGRAPH_LEARNING_PROTOCOL_VERSION;
+  segments: ParagraphLearningSegment[];
+}
+
+export type LearningSegment = ParagraphLearningSegment;
+export type LearningResult = ParagraphLearningResult;
 
 export type WordExampleStatus = "idle" | "streaming" | "completed" | "cancelling" | "failed";
 
@@ -596,6 +624,71 @@ function optionalBooleanField(record: Record<string, unknown>, ...names: string[
   const raw = readField(record, ...names);
   if (raw === undefined || raw === null) return { valid: true, value: false };
   return typeof raw === "boolean" ? { valid: true, value: raw } : { valid: false, value: false };
+}
+
+function learningRange(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function decodeParagraphLearningSegment(value: unknown): ParagraphLearningSegment | null {
+  if (!isRecord(value)) return null;
+  const id = nonEmptyString(value.id);
+  const source = stringValue(value.source);
+  const translation = stringValue(value.translation);
+  const explanation = stringValue(value.explanation);
+  const sourceStart = learningRange(value.sourceStart);
+  const sourceEnd = learningRange(value.sourceEnd);
+  if (
+    id === null || Array.from(id).length > MAX_PARAGRAPH_LEARNING_ID_LENGTH ||
+    source === null || source.length === 0 || Array.from(source).length > MAX_PARAGRAPH_LEARNING_SOURCE_LENGTH ||
+    translation === null || translation.trim().length === 0 || Array.from(translation).length > MAX_PARAGRAPH_LEARNING_TRANSLATION_LENGTH ||
+    explanation === null || explanation.trim().length === 0 || Array.from(explanation).length > MAX_PARAGRAPH_LEARNING_EXPLANATION_LENGTH ||
+    sourceStart === null || sourceEnd === null || sourceStart >= sourceEnd
+  ) return null;
+  return { id, source, translation, explanation, sourceStart, sourceEnd };
+}
+
+/**
+ * Decode the normalized learning payload and, when available, prove that all
+ * ranges cover the supplied source text without gaps or overlaps.
+ */
+export function decodeParagraphLearningResult(value: unknown, sourceText?: string): ParagraphLearningResult | null {
+  if (!isRecord(value) || value.protocolVersion !== PARAGRAPH_LEARNING_PROTOCOL_VERSION || !Array.isArray(value.segments)) {
+    return null;
+  }
+  if (value.segments.length === 0 || value.segments.length > MAX_PARAGRAPH_LEARNING_SEGMENTS) return null;
+
+  const segments: ParagraphLearningSegment[] = [];
+  const ids = new Set<string>();
+  for (const rawSegment of value.segments) {
+    const segment = decodeParagraphLearningSegment(rawSegment);
+    if (!segment || ids.has(segment.id)) return null;
+    ids.add(segment.id);
+    segments.push(segment);
+  }
+
+  const ordered = [...segments].sort((left, right) => left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd);
+  let cursor = 0;
+  let totalTranslationLength = 0;
+  for (const segment of ordered) {
+    if (segment.sourceStart !== cursor || segment.sourceEnd - segment.sourceStart !== segment.source.length) return null;
+    if (sourceText !== undefined && sourceText.slice(segment.sourceStart, segment.sourceEnd) !== segment.source) return null;
+    cursor = segment.sourceEnd;
+    totalTranslationLength += Array.from(segment.translation).length;
+  }
+  if (totalTranslationLength > MAX_PARAGRAPH_LEARNING_TOTAL_TRANSLATION_LENGTH) return null;
+  if (sourceText !== undefined && cursor !== sourceText.length) return null;
+
+  return {
+    protocolVersion: PARAGRAPH_LEARNING_PROTOCOL_VERSION,
+    segments: ordered,
+  };
+}
+
+export const decodeLearningResult = decodeParagraphLearningResult;
+
+export function validateParagraphLearningResult(value: unknown, sourceText: string): ParagraphLearningResult | null {
+  return decodeParagraphLearningResult(value, sourceText);
 }
 
 function optionalFractionField(record: Record<string, unknown>, ...names: string[]): { valid: boolean; value: number | null } {
@@ -1281,7 +1374,7 @@ export function decodeSelectionRequest(value: unknown): SelectionRequestPayload 
     : { requestId, sourceText, sourceLanguage, targetLanguage, trigger, anchor };
 }
 
-export function decodeTranslationEvent(name: string, value: unknown): TranslationEvent | null {
+export function decodeTranslationEvent(name: string, value: unknown, sourceText?: string): TranslationEvent | null {
   if (!isRecord(value)) return null;
   const requestId = stringValue(value.requestId);
   if (!requestId) return null;
@@ -1294,9 +1387,14 @@ export function decodeTranslationEvent(name: string, value: unknown): Translatio
   if (name === "translation_completed") {
     const content = stringValue(value.content);
     if (typeof value.cacheHit !== "boolean") return null;
+    const learning = value.learning === undefined || value.learning === null
+      ? null
+      : decodeParagraphLearningResult(value.learning, sourceText);
     return content === null
       ? null
-      : { type: "completed", requestId, content, cacheHit: value.cacheHit };
+      : learning === null && value.learning !== undefined && value.learning !== null
+        ? null
+        : { type: "completed", requestId, content, cacheHit: value.cacheHit, learning };
   }
   if (name === "translation_cancelled") return { type: "cancelled", requestId };
   if (name === "translation_failed") {
@@ -1306,7 +1404,7 @@ export function decodeTranslationEvent(name: string, value: unknown): Translatio
   return null;
 }
 
-export function decodeTranslationCommandResult(value: unknown): TranslationCommandResult | null {
+export function decodeTranslationCommandResult(value: unknown, sourceText?: string): TranslationCommandResult | null {
   if (!isRecord(value)) return null;
 
   const outcome = value.outcome;
@@ -1324,10 +1422,15 @@ export function decodeTranslationCommandResult(value: unknown): TranslationComma
     : stringValue(value.message);
   if (message === null && value.message !== null && value.message !== undefined) return null;
 
+  const learning = value.learning === undefined || value.learning === null
+    ? null
+    : decodeParagraphLearningResult(value.learning, sourceText);
+  if (learning === null && value.learning !== undefined && value.learning !== null) return null;
+
   if (outcome === "completed" && content === null) return null;
   if (outcome === "failed" && message === null) return null;
 
-  return { outcome, content, cacheHit: value.cacheHit, message };
+  return { outcome, content, cacheHit: value.cacheHit, learning, message };
 }
 
 export function decodeWordExampleEvent(name: string, value: unknown): WordExampleEvent | null {
@@ -1451,6 +1554,7 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     cacheUsageBytes: 0,
     wordAiCacheEnabled: true,
     paragraphExampleLookupEnabled: true,
+    paragraphLearningModeEnabled: false,
     selectionMode: "shortcut",
     selectionShortcut: "Ctrl+Shift+L",
     selectionWindowWidth: 560,

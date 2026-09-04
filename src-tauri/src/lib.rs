@@ -5,6 +5,7 @@ mod dictionary;
 mod examples;
 mod glossary;
 mod icons;
+mod paragraph_learning;
 mod pdf;
 mod pdf_context;
 mod pdf_engine;
@@ -296,6 +297,7 @@ pub fn run() {
             save_provider_config,
             fetch_models,
             save_app_settings,
+            set_paragraph_learning_mode,
             configure_selection,
             get_selection_status,
             set_selection_language,
@@ -656,6 +658,15 @@ fn save_app_settings(
 }
 
 #[tauri::command]
+fn set_paragraph_learning_mode(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::save_paragraph_learning_mode(&connection, enabled)
+}
+
+#[tauri::command]
 fn configure_selection(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -864,51 +875,85 @@ async fn translate_impl(
             }
         };
         if let Some(cached) = cached {
-            diagnostics::info(format!(
-                "command.translate.cache_hit request_id={request_id}"
-            ));
-            let persist = {
-                let connection = state
-                    .database
-                    .lock()
-                    .map_err(|_| "应用数据库锁已损坏".to_string())?;
-                let history = db::HistoryRecord {
-                    source_text: &source_text,
-                    translated_text: &cached.translated_text,
-                    source_language: &request.source_language,
-                    target_language: &request.target_language,
-                    provider: &prepared.provider,
-                    prompt_id: &prepared.prompt.id,
-                    glossary_version: prepared.glossary_version,
-                    cache_hit: true,
-                };
-                db::insert_history(&connection, &history)
-                    .and_then(|_| db::prune_history(&connection, prepared.history_retention))
+            let parsed_cache = if prepared.learning_mode {
+                match paragraph_learning::parse_cached_result(&source_text, &cached.translated_text)
+                {
+                    Ok(learning) => Some((learning.translated_text(), Some(learning))),
+                    Err(error) => {
+                        diagnostics::warn(format!(
+                            "command.translate.learning_cache_invalid request_id={} reason={error}",
+                            request_id
+                        ));
+                        let deletion = state
+                            .database
+                            .lock()
+                            .map_err(|_| "应用数据库锁已损坏".to_string())
+                            .and_then(|connection| {
+                                db::delete_cache(&connection, &prepared.cache_key)
+                            });
+                        if let Err(error) = deletion {
+                            unregister_request(&state, &request_id);
+                            return emit_failed(&app, &request_id, &error);
+                        }
+                        None
+                    }
+                }
+            } else {
+                Some((cached.translated_text, None))
             };
-            unregister_request(&state, &request_id);
-            if let Err(error) = persist {
-                diagnostics::error(format!(
-                    "command.translate.persistence_failed request_id={} reason={error}",
+
+            if let Some((content, learning)) = parsed_cache {
+                diagnostics::info(format!(
+                    "command.translate.cache_hit request_id={request_id}"
+                ));
+                let persist = {
+                    let connection = state
+                        .database
+                        .lock()
+                        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+                    let history = db::HistoryRecord {
+                        source_text: &source_text,
+                        translated_text: &content,
+                        source_language: &request.source_language,
+                        target_language: &request.target_language,
+                        provider: &prepared.provider,
+                        prompt_id: &prepared.prompt.id,
+                        glossary_version: prepared.glossary_version,
+                        cache_hit: true,
+                    };
+                    db::insert_history(&connection, &history)
+                        .and_then(|_| db::prune_history(&connection, prepared.history_retention))
+                };
+                unregister_request(&state, &request_id);
+                if let Err(error) = persist {
+                    diagnostics::error(format!(
+                        "command.translate.persistence_failed request_id={} reason={error}",
+                        request_id
+                    ));
+                    return emit_failed(&app, &request_id, &error);
+                }
+                schedule_example_index(&state, &prepared.cache_key);
+                app.emit(
+                    "translation_completed",
+                    TranslationCompleted {
+                        request_id: request_id.clone(),
+                        content: content.clone(),
+                        cache_hit: true,
+                        learning: learning.clone(),
+                    },
+                )
+                .map_err(|error| format!("发送翻译结果失败：{error}"))?;
+                diagnostics::info(format!(
+                    "command.translate.completed request_id={} cache_hit=true",
                     request_id
                 ));
-                return emit_failed(&app, &request_id, &error);
+                return Ok(match learning {
+                    Some(learning) => {
+                        TranslationCommandResult::completed_with_learning(content, true, learning)
+                    }
+                    None => TranslationCommandResult::completed(content, true),
+                });
             }
-            let content = cached.translated_text;
-            schedule_example_index(&state, &prepared.cache_key);
-            app.emit(
-                "translation_completed",
-                TranslationCompleted {
-                    request_id: request_id.clone(),
-                    content: content.clone(),
-                    cache_hit: true,
-                },
-            )
-            .map_err(|error| format!("发送翻译结果失败：{error}"))?;
-            diagnostics::info(format!(
-                "command.translate.completed request_id={} cache_hit=true",
-                request_id
-            ));
-            return Ok(TranslationCommandResult::completed(content, true));
         }
         diagnostics::info(format!(
             "command.translate.cache_miss request_id={}",
@@ -944,6 +989,7 @@ async fn translate_impl(
         "command.translate.provider_request request_id={} provider_id={} model={}",
         request_id, prepared.provider.id, prepared.provider.model_id
     ));
+    let learning_mode = prepared.learning_mode;
     let translated = TranslationCore::stream(
         CoreStreamRequest {
             request_id: &request_id,
@@ -957,6 +1003,9 @@ async fn translate_impl(
             thinking_effort: &prepared.provider.thinking_effort,
         },
         |content| {
+            if learning_mode {
+                return Ok(());
+            }
             app.emit(
                 "translation_delta",
                 TranslationDelta {
@@ -990,6 +1039,27 @@ async fn translate_impl(
         }
     };
 
+    let (content, learning, cache_text) = if prepared.learning_mode {
+        let learning = match paragraph_learning::parse_model_output(&source_text, &translated) {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics::error(format!(
+                    "command.translate.learning_protocol_failed request_id={} reason={error}",
+                    request_id
+                ));
+                return emit_failed(&app, &request_id, &error);
+            }
+        };
+        let content = learning.translated_text();
+        let cache_text = match learning.to_cache_json() {
+            Ok(value) => value,
+            Err(error) => return emit_failed(&app, &request_id, &error),
+        };
+        (content, Some(learning), cache_text)
+    } else {
+        (translated.clone(), None, translated)
+    };
+
     let persistence = {
         let connection = state
             .database
@@ -999,7 +1069,7 @@ async fn translate_impl(
             let cache = db::CacheRecord {
                 cache_key: &prepared.cache_key,
                 source_text: &source_text,
-                translated_text: &translated,
+                translated_text: &cache_text,
                 source_language: &request.source_language,
                 target_language: &request.target_language,
                 provider: &prepared.provider,
@@ -1014,7 +1084,7 @@ async fn translate_impl(
         cache_result.and_then(|_| {
             let history = db::HistoryRecord {
                 source_text: &source_text,
-                translated_text: &translated,
+                translated_text: &content,
                 source_language: &request.source_language,
                 target_language: &request.target_language,
                 provider: &prepared.provider,
@@ -1036,7 +1106,6 @@ async fn translate_impl(
     if prepared.cache_enabled {
         schedule_example_index(&state, &prepared.cache_key);
     }
-    let content = translated;
     let output_chars = content.chars().count();
     app.emit(
         "translation_completed",
@@ -1044,6 +1113,7 @@ async fn translate_impl(
             request_id: request_id.clone(),
             content: content.clone(),
             cache_hit: false,
+            learning: learning.clone(),
         },
     )
     .map_err(|error| format!("发送翻译结果失败：{error}"))?;
@@ -1051,7 +1121,12 @@ async fn translate_impl(
         "command.translate.completed request_id={} cache_hit=false output_chars={}",
         request_id, output_chars
     ));
-    Ok(TranslationCommandResult::completed(content, false))
+    Ok(match learning {
+        Some(learning) => {
+            TranslationCommandResult::completed_with_learning(content, false, learning)
+        }
+        None => TranslationCommandResult::completed(content, false),
+    })
 }
 
 pub(crate) struct PreparedTranslation {
@@ -1061,6 +1136,7 @@ pub(crate) struct PreparedTranslation {
     pub(crate) system_prompt: String,
     pub(crate) cache_key: String,
     pub(crate) cache_enabled: bool,
+    pub(crate) learning_mode: bool,
     pub(crate) cache_max_bytes: i64,
     pub(crate) history_retention: i64,
     pub(crate) glossary_version: i64,
@@ -1140,6 +1216,7 @@ fn prepare_translation_internal(
     let terms = db::list_glossary_terms(&connection)?;
     let glossary_version = db::glossary_version(&connection)?;
     let base_system_prompt = build_system_prompt(&prompt.content, &terms, source_text);
+    let learning_mode = request.learning_mode && pdf_context.is_none();
     let cache_input = CacheKeyInput {
         base_url: &provider.base_url,
         provider_id: &provider.id,
@@ -1156,6 +1233,10 @@ fn prepare_translation_internal(
             build_pdf_system_prompt(&base_system_prompt, context),
             make_pdf_cache_key(&cache_input, context),
         ),
+        None if learning_mode => (
+            paragraph_learning::build_system_prompt(&base_system_prompt),
+            make_learning_cache_key(&cache_input),
+        ),
         None => (base_system_prompt, make_cache_key(&cache_input)),
     };
     Ok(PreparedTranslation {
@@ -1165,6 +1246,7 @@ fn prepare_translation_internal(
         system_prompt,
         cache_key,
         cache_enabled: settings.cache_enabled,
+        learning_mode,
         cache_max_bytes: settings.cache_max_bytes,
         history_retention: settings.history_retention,
         glossary_version,
@@ -1223,7 +1305,21 @@ struct CacheKeyInput<'a> {
 }
 
 fn make_cache_key(input: &CacheKeyInput<'_>) -> String {
+    hash_cache_key(&cache_key_material(input))
+}
+
+fn make_learning_cache_key(input: &CacheKeyInput<'_>) -> String {
     let canonical = format!(
+        "mode={}\nprotocol={}\n{}",
+        paragraph_learning::PARAGRAPH_LEARNING_CACHE_MODE,
+        paragraph_learning::PARAGRAPH_LEARNING_PROTOCOL_VERSION,
+        cache_key_material(input),
+    );
+    hash_cache_key(&canonical)
+}
+
+fn cache_key_material(input: &CacheKeyInput<'_>) -> String {
+    format!(
         "base={}\nprovider={}\nmodel={}\nprompt={}@{}\nglossary={}\nsource_language={}\ntarget_language={}\nsource={}",
         input.base_url,
         input.provider_id,
@@ -1234,7 +1330,10 @@ fn make_cache_key(input: &CacheKeyInput<'_>) -> String {
         input.source_language,
         input.target_language,
         input.source_text,
-    );
+    )
+}
+
+fn hash_cache_key(canonical: &str) -> String {
     let digest = Sha256::digest(canonical.as_bytes());
     format!("{digest:x}")
 }
@@ -2623,8 +2722,8 @@ mod tests {
     use super::{
         AppState, CacheKeyInput, PdfPromptContext, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
         WordAiCacheKeyInput, WordExampleDelta, WordExampleProtocolParser, build_system_prompt,
-        cancel_request, make_cache_key, make_pdf_cache_key, make_word_ai_cache_key,
-        unregister_request,
+        cancel_request, make_cache_key, make_learning_cache_key, make_pdf_cache_key,
+        make_word_ai_cache_key, unregister_request,
     };
     use crate::contracts::GlossaryTerm;
     use crate::translation_core::TranslationMode;
@@ -2658,6 +2757,22 @@ mod tests {
     fn cache_key_does_not_include_api_key() {
         let first = test_cache_key("hello");
         assert!(!first.contains("api"));
+    }
+
+    #[test]
+    fn learning_cache_key_is_isolated_from_plain_translation_cache() {
+        let input = CacheKeyInput {
+            base_url: "https://example.com/v1",
+            provider_id: "default",
+            model_id: "model-a",
+            prompt_id: "prompt",
+            prompt_version: 1,
+            glossary_version: 1,
+            source_language: "en",
+            target_language: "zh-CN",
+            source_text: "hello",
+        };
+        assert_ne!(make_cache_key(&input), make_learning_cache_key(&input));
     }
 
     #[test]

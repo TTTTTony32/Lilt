@@ -947,6 +947,7 @@ async fn translate_pdf_preflight_inner(
         target_language: request.target_language.clone(),
         model_id: provider.model_id.clone(),
         prompt_id: provider.prompt_id.clone(),
+        learning_mode: false,
     };
     let empty = Value::Object(Default::default());
     let pdf_context = crate::PdfPromptContext::new(
@@ -1140,6 +1141,7 @@ async fn translate_pdf_request_inner(
         target_language: request.target_language.clone(),
         model_id: provider.model_id.clone(),
         prompt_id: provider.prompt_id.clone(),
+        learning_mode: false,
     };
     let pdf_context = PdfPromptContext::new(
         TranslationMode::PdfSegment,

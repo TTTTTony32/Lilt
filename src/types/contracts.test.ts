@@ -15,6 +15,8 @@ import {
   decodePdfJobEvent,
   decodePdfPreflightEvent,
   decodePdfQualityDiagnostic,
+  decodeParagraphLearningResult,
+  PARAGRAPH_LEARNING_PROTOCOL_VERSION,
 } from "./contracts";
 import {
   createEmptyPdfPreflightState,
@@ -114,6 +116,7 @@ describe("translation event contract", () => {
       requestId: "req-2",
       content: "缓存译文",
       cacheHit: true,
+      learning: null,
     });
   });
 
@@ -132,33 +135,39 @@ describe("translation command result contract", () => {
       outcome: "completed",
       content: "完整译文",
       cacheHit: true,
+      learning: null,
       message: null,
     })).toEqual({
       outcome: "completed",
       content: "完整译文",
       cacheHit: true,
+      learning: null,
       message: null,
     });
     expect(decodeTranslationCommandResult({
       outcome: "cancelled",
       content: null,
       cacheHit: false,
+      learning: null,
       message: null,
     })).toEqual({
       outcome: "cancelled",
       content: null,
       cacheHit: false,
+      learning: null,
       message: null,
     });
     expect(decodeTranslationCommandResult({
       outcome: "failed",
       content: null,
       cacheHit: false,
+      learning: null,
       message: "Provider 请求失败",
     })).toEqual({
       outcome: "failed",
       content: null,
       cacheHit: false,
+      learning: null,
       message: "Provider 请求失败",
     });
   });
@@ -187,6 +196,78 @@ describe("translation command result contract", () => {
       cacheHit: false,
       message: null,
     })).toBeNull();
+  });
+});
+
+describe("paragraph learning contract", () => {
+  const source = "A😀BC";
+  const learning = {
+    protocolVersion: PARAGRAPH_LEARNING_PROTOCOL_VERSION,
+    segments: [
+      {
+        id: "segment-1",
+        source: "A😀",
+        translation: "甲😀",
+        explanation: "说明第一个分段",
+        sourceStart: 0,
+        sourceEnd: 3,
+      },
+      {
+        id: "segment-2",
+        source: "BC",
+        translation: "乙丙",
+        explanation: "说明第二个分段",
+        sourceStart: 3,
+        sourceEnd: 5,
+      },
+    ],
+  };
+  const firstSegment = learning.segments[0]!;
+  const secondSegment = learning.segments[1]!;
+
+  it("decodes UTF-16 ranges and attaches learning data to terminal contracts", () => {
+    expect(decodeParagraphLearningResult(learning, source)).toEqual(learning);
+    expect(decodeTranslationCommandResult({
+      outcome: "completed",
+      content: "甲😀乙丙",
+      cacheHit: false,
+      learning,
+      message: null,
+    }, source)?.learning).toEqual(learning);
+    expect(decodeTranslationEvent("translation_completed", {
+      requestId: "req-learning",
+      content: "甲😀乙丙",
+      cacheHit: false,
+      learning,
+    }, source)?.type).toBe("completed");
+  });
+
+  it("requires exact coverage and stable unique identifiers", () => {
+    expect(decodeParagraphLearningResult({ ...learning, protocolVersion: "paragraph-learning-v0" }, source)).toBeNull();
+    expect(decodeParagraphLearningResult({
+      ...learning,
+      segments: [firstSegment, { ...secondSegment, id: firstSegment.id }],
+    }, source)).toBeNull();
+    expect(decodeParagraphLearningResult({
+      ...learning,
+      segments: [firstSegment, { ...secondSegment, sourceStart: 4 }],
+    }, source)).toBeNull();
+    expect(decodeParagraphLearningResult({
+      ...learning,
+      segments: [firstSegment, { ...secondSegment, source: "BD" }],
+    }, source)).toBeNull();
+  });
+
+  it("rejects malformed fields and unbounded explanations", () => {
+    expect(decodeParagraphLearningResult({
+      ...learning,
+      segments: [{ ...firstSegment, sourceStart: "0" }],
+    }, source)).toBeNull();
+    expect(decodeParagraphLearningResult({
+      ...learning,
+      segments: [{ ...firstSegment, explanation: "x".repeat(4_001) }, secondSegment],
+    }, source)).toBeNull();
+    expect(decodeParagraphLearningResult(learning, "A😀BD")).toBeNull();
   });
 });
 

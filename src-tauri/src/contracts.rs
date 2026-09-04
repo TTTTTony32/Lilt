@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::paragraph_learning::ParagraphLearningResult;
+
 pub const DEFAULT_PROVIDER_ID: &str = "default";
 pub const DEFAULT_PROMPT_ID: &str = "builtin-general";
 pub const DEFAULT_THINKING_EFFORT: ThinkingEffort = ThinkingEffort::None;
@@ -9,6 +11,7 @@ pub const DEFAULT_HISTORY_RETENTION: i64 = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: i64 = 256 * 1024 * 1024;
 pub const DEFAULT_WORD_AI_CACHE_ENABLED: bool = true;
 pub const DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED: bool = true;
+pub const DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED: bool = false;
 pub const DEFAULT_SELECTION_SHORTCUT: &str = "Ctrl+Shift+L";
 pub const DEFAULT_SELECTION_MODE: SelectionMode = SelectionMode::Shortcut;
 pub const DEFAULT_SELECTION_WINDOW_WIDTH: i64 = 560;
@@ -31,6 +34,7 @@ pub struct AppSettings {
     pub cache_usage_bytes: i64,
     pub word_ai_cache_enabled: bool,
     pub paragraph_example_lookup_enabled: bool,
+    pub paragraph_learning_mode_enabled: bool,
     pub selection_mode: SelectionMode,
     pub selection_shortcut: String,
     pub selection_window_width: i64,
@@ -440,6 +444,8 @@ pub struct TranslationRequest {
     pub target_language: String,
     pub model_id: String,
     pub prompt_id: String,
+    #[serde(default)]
+    pub learning_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -461,6 +467,7 @@ pub struct TranslationCompleted {
     pub request_id: String,
     pub content: String,
     pub cache_hit: bool,
+    pub learning: Option<ParagraphLearningResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -491,6 +498,7 @@ pub struct TranslationCommandResult {
     pub content: Option<String>,
     pub cache_hit: bool,
     pub message: Option<String>,
+    pub learning: Option<ParagraphLearningResult>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -606,6 +614,21 @@ impl TranslationCommandResult {
             content: Some(content.into()),
             cache_hit,
             message: None,
+            learning: None,
+        }
+    }
+
+    pub fn completed_with_learning(
+        content: impl Into<String>,
+        cache_hit: bool,
+        learning: ParagraphLearningResult,
+    ) -> Self {
+        Self {
+            outcome: TranslationOutcome::Completed,
+            content: Some(content.into()),
+            cache_hit,
+            message: None,
+            learning: Some(learning),
         }
     }
 
@@ -615,6 +638,7 @@ impl TranslationCommandResult {
             content: None,
             cache_hit: false,
             message: None,
+            learning: None,
         }
     }
 
@@ -624,6 +648,7 @@ impl TranslationCommandResult {
             content: None,
             cache_hit: false,
             message: Some(message.into()),
+            learning: None,
         }
     }
 }
@@ -739,6 +764,7 @@ mod tests {
                 content: Some("译文".to_string()),
                 cache_hit: true,
                 message: None,
+                learning: None,
             }
         );
         assert_eq!(
@@ -748,6 +774,7 @@ mod tests {
                 content: None,
                 cache_hit: false,
                 message: None,
+                learning: None,
             }
         );
         assert_eq!(
@@ -757,6 +784,7 @@ mod tests {
                 content: None,
                 cache_hit: false,
                 message: Some("请求失败".to_string()),
+                learning: None,
             }
         );
     }

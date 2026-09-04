@@ -1,13 +1,14 @@
 use crate::contracts::{
     AppSettings, CacheStats, CachedTranslation, CloseBehavior, DEFAULT_CACHE_MAX_BYTES,
     DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED,
-    DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT,
-    DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT,
-    DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
-    DICTIONARY_SQLITE_SCHEMA_VERSION, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
-    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
-    SelectionMode, ThinkingEffort, parse_selection_window_dimension,
+    DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
+    DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT,
+    DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED,
+    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
+    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_SELECTION_WINDOW_HEIGHT,
+    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo,
+    PersonalDictionaryEntry, Prompt, ProviderRecord, SelectionMode, ThinkingEffort,
+    parse_selection_window_dimension,
 };
 use crate::glossary::GlossaryImportTerm;
 use chrono::Utc;
@@ -379,6 +380,10 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         get_setting(connection, "paragraph_example_lookup_enabled")?
             .map(|value| value != "0")
             .unwrap_or(DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED);
+    let paragraph_learning_mode_enabled =
+        get_setting(connection, "paragraph_learning_mode_enabled")?
+            .map(|value| value != "0")
+            .unwrap_or(DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED);
     let close_behavior = match get_setting(connection, "close_behavior")?.as_deref() {
         Some("exit") => CloseBehavior::Exit,
         Some("tray") => CloseBehavior::Tray,
@@ -405,6 +410,7 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         cache_usage_bytes: stats.usage_bytes,
         word_ai_cache_enabled,
         paragraph_example_lookup_enabled,
+        paragraph_learning_mode_enabled,
         selection_mode,
         selection_shortcut,
         selection_window_width,
@@ -467,6 +473,14 @@ pub fn save_settings(
     prune_cache(
         connection,
         cache_max_bytes.clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+    )
+}
+
+pub fn save_paragraph_learning_mode(connection: &Connection, enabled: bool) -> Result<(), String> {
+    set_setting(
+        connection,
+        "paragraph_learning_mode_enabled",
+        if enabled { "1" } else { "0" },
     )
 }
 
@@ -902,6 +916,16 @@ pub fn find_cache(
             .map_err(|error| format!("更新缓存访问时间失败：{error}"))?;
     }
     Ok(cached)
+}
+
+pub fn delete_cache(connection: &Connection, cache_key: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM translation_cache WHERE cache_key = ?1",
+            params![cache_key],
+        )
+        .map_err(|error| format!("删除翻译缓存失败：{error}"))?;
+    Ok(())
 }
 
 pub fn save_cache(connection: &Connection, record: &CacheRecord<'_>) -> Result<(), String> {
@@ -1940,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_round_trip_includes_word_example_switches() {
+    fn settings_round_trip_includes_word_example_switches_and_learning_mode() {
         let connection = test_connection();
         save_settings(&connection, 12, true, 32 * 1024 * 1024, false, false)
             .expect("settings write should succeed");
@@ -1948,6 +1972,7 @@ mod tests {
         assert_eq!(settings.history_retention, 12);
         assert!(!settings.word_ai_cache_enabled);
         assert!(!settings.paragraph_example_lookup_enabled);
+        assert!(!settings.paragraph_learning_mode_enabled);
         assert_eq!(settings.selection_mode, SelectionMode::Shortcut);
         assert_eq!(settings.selection_shortcut, DEFAULT_SELECTION_SHORTCUT);
         assert_eq!(
@@ -1965,6 +1990,65 @@ mod tests {
             get_settings(&connection).expect("selection settings read should succeed");
         assert_eq!(selection_settings.selection_mode, SelectionMode::Automatic);
         assert_eq!(selection_settings.selection_shortcut, "Alt+L");
+    }
+
+    #[test]
+    fn paragraph_learning_mode_setting_defaults_and_round_trips_without_save_settings() {
+        let connection = test_connection();
+        assert!(
+            !get_settings(&connection)
+                .expect("default settings should be readable")
+                .paragraph_learning_mode_enabled
+        );
+
+        save_paragraph_learning_mode(&connection, true).expect("learning mode setting should save");
+        assert!(
+            get_settings(&connection)
+                .expect("saved settings should be readable")
+                .paragraph_learning_mode_enabled
+        );
+
+        save_settings(&connection, 20, false, 64 * 1024 * 1024, true, true)
+            .expect("general settings should save");
+        assert!(
+            get_settings(&connection)
+                .expect("general settings should preserve learning mode")
+                .paragraph_learning_mode_enabled
+        );
+    }
+
+    #[test]
+    fn deleting_a_cache_entry_removes_only_the_requested_key() {
+        let connection = test_connection();
+        let provider = test_provider();
+        for cache_key in ["learning-cache-a", "learning-cache-b"] {
+            save_cache(
+                &connection,
+                &CacheRecord {
+                    cache_key,
+                    source_text: "source",
+                    translated_text: "translated",
+                    source_language: "en",
+                    target_language: "zh-CN",
+                    provider: &provider,
+                    prompt_id: DEFAULT_PROMPT_ID,
+                    glossary_version: 1,
+                },
+            )
+            .expect("cache entry should save");
+        }
+
+        delete_cache(&connection, "learning-cache-a").expect("cache entry should delete");
+        assert!(
+            find_cache(&connection, "learning-cache-a")
+                .expect("deleted cache should be queryable")
+                .is_none()
+        );
+        assert!(
+            find_cache(&connection, "learning-cache-b")
+                .expect("other cache should be queryable")
+                .is_some()
+        );
     }
 
     #[test]

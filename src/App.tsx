@@ -13,6 +13,7 @@ import { AnimatedOverlay } from "./components/AnimatedOverlay";
 import { usePrefersReducedMotion } from "./components/usePrefersReducedMotion";
 import { DownloadActivityStack } from "./components/DownloadActivityStack";
 import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./components/ResourceDownloadDialog";
+import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
 import {
   downloadActivityKey,
   downloadActivityReducer,
@@ -38,6 +39,7 @@ import {
   type PersonalDictionaryExportResult,
   type Prompt,
   type ThinkingEffort,
+  type ParagraphLearningResult,
   type TranslationCommandResult,
   type TranslationEvent,
   type TranslationStatus,
@@ -49,6 +51,7 @@ import {
   decodeSelectionStatus,
   decodeTranslationCommandResult,
   decodeTranslationEvent,
+  decodeParagraphLearningResult,
   decodeWordExampleCommandResult,
   decodeWordExampleEvent,
   decodePrompt,
@@ -106,6 +109,8 @@ interface TranslationSummary {
   durationMs: number;
   cacheHit: boolean;
 }
+
+type TranslationRequestMode = "plain" | "learning";
 
 function formatTranslationSummary(summary: TranslationSummary): string {
   return `${(summary.durationMs / 1000).toFixed(2)}秒·${summary.cacheHit ? "缓存命中" : "未命中缓存"}`;
@@ -278,6 +283,9 @@ function App() {
   const [sourceLanguage, setSourceLanguage] = useState("en");
   const [targetLanguage, setTargetLanguage] = useState("zh-CN");
   const [status, setStatus] = useState<TranslationStatus>("idle");
+  const [activeRequestMode, setActiveRequestMode] = useState<TranslationRequestMode | null>(null);
+  const [learningResult, setLearningResult] = useState<ParagraphLearningResult | null>(null);
+  const [learningModeSaving, setLearningModeSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [translationSummary, setTranslationSummary] = useState<TranslationSummary | null>(null);
@@ -306,6 +314,10 @@ function App() {
   const [resourceDownloadDialogMounted, setResourceDownloadDialogMounted] = useState(false);
   const [resourceDownloadTerminalState, setResourceDownloadTerminalState] = useState<Partial<Record<DownloadActivity["resource"], ResourceDownloadDialogStatus>>>({});
   const activeRequestId = useRef<string | null>(null);
+  const activeRequestModeRef = useRef<TranslationRequestMode | null>(null);
+  const activeRequestSourceTextRef = useRef<string | null>(null);
+  const activeRequestRawSourceTextRef = useRef<string | null>(null);
+  const sourceTextRef = useRef(sourceText);
   const translationStartedAt = useRef<number | null>(null);
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activePdfEngineOperationId = useRef<string | null>(null);
@@ -317,6 +329,10 @@ function App() {
   const dataTransferReturnFocusRef = useRef<HTMLElement | null>(null);
   const closeDialogReturnFocusRef = useRef<HTMLElement | null>(null);
   const downloadActivityTimersRef = useRef(new Map<string, number>());
+
+  useEffect(() => {
+    sourceTextRef.current = sourceText;
+  }, [sourceText]);
 
   const scheduleDownloadActivityRemoval = useCallback((resource: DownloadActivity["resource"], operationId: string, delayMs: number) => {
     const key = downloadActivityKey(resource, operationId);
@@ -513,6 +529,38 @@ function App() {
     }
   }, []);
 
+  const handleSourceTextChange = useCallback((value: string) => {
+    sourceTextRef.current = value;
+    setSourceText(value);
+    setLearningResult(null);
+  }, []);
+
+  const handleLearningModeChange = useCallback(async (enabled: boolean) => {
+    if (learningModeSaving) return;
+    const previous = snapshot.settings.paragraphLearningModeEnabled;
+    if (previous === enabled) return;
+    setLearningModeSaving(true);
+    setSnapshot((current) => ({
+      ...current,
+      settings: { ...current.settings, paragraphLearningModeEnabled: enabled },
+    }));
+    setError(null);
+    setNotice(null);
+    try {
+      await invokeCommand("save_paragraph_learning_mode", { enabled });
+      if (!enabled) setLearningResult(null);
+      setNotice(enabled ? "学习模式已开启" : "学习模式已关闭");
+    } catch (reason) {
+      setSnapshot((current) => ({
+        ...current,
+        settings: { ...current.settings, paragraphLearningModeEnabled: previous },
+      }));
+      setError(describeError(reason, "学习模式设置保存失败"));
+    } finally {
+      setLearningModeSaving(false);
+    }
+  }, [learningModeSaving, snapshot.settings.paragraphLearningModeEnabled]);
+
   const handleDictionaryHistoryChanged = useCallback((history: DictionaryHistoryEntry[]) => {
     setSnapshot((current) => ({ ...current, dictionaryHistory: history }));
   }, []);
@@ -563,7 +611,7 @@ function App() {
             const raw = await invokeCommand<unknown>("get_selection_request", { requestId: payload });
             const request = decodeSelectionRequest(raw);
             if (!request || disposed) return;
-            setSourceText(request.sourceText);
+            handleSourceTextChange(request.sourceText);
             setSourceLanguage(request.sourceLanguage);
             setTargetLanguage(request.targetLanguage);
             setTab("translate");
@@ -584,7 +632,7 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [handleSourceTextChange]);
 
   const openCloseDialog = useCallback(() => {
     closeDialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -622,11 +670,36 @@ function App() {
 
   const applyTranslationResult = useCallback((requestId: string, result: TranslationCommandResult) => {
     if (requestId !== activeRequestId.current) return;
+    const requestMode = activeRequestModeRef.current;
+    const requestSourceText = activeRequestSourceTextRef.current;
+    const requestRawSourceText = activeRequestRawSourceTextRef.current;
     activeRequestId.current = null;
+    activeRequestModeRef.current = null;
+    activeRequestSourceTextRef.current = null;
+    activeRequestRawSourceTextRef.current = null;
+    setActiveRequestMode(null);
     const startedAt = translationStartedAt.current;
     translationStartedAt.current = null;
     switch (result.outcome) {
       case "completed":
+        if (requestMode === "learning") {
+          const learning = requestSourceText === null
+            ? null
+            : decodeParagraphLearningResult(result.learning, requestSourceText);
+          if (!learning || requestRawSourceText === null || sourceTextRef.current !== requestRawSourceText) {
+            setLearningResult(null);
+            setTranslatedText("");
+            setTranslationSummary(null);
+            setError(requestRawSourceText !== null && sourceTextRef.current !== requestRawSourceText
+              ? "原文在翻译完成前已修改，学习结果已丢弃，请重新翻译。"
+              : "学习模式返回的结果无法与原文对应，请重试。");
+            setStatus("failed");
+            return;
+          }
+          setLearningResult(learning);
+        } else {
+          setLearningResult(null);
+        }
         setTranslatedText(result.content ?? "");
         setTranslationSummary({
           durationMs: startedAt === null ? 0 : Math.max(0, performance.now() - startedAt),
@@ -637,11 +710,13 @@ function App() {
         void refreshSnapshot();
         break;
       case "cancelled":
+        setLearningResult(null);
         setTranslationSummary(null);
         setError(null);
         setStatus("idle");
         break;
       case "failed":
+        setLearningResult(null);
         setTranslationSummary(null);
         setError(result.message ?? "翻译请求失败");
         setStatus("failed");
@@ -727,13 +802,16 @@ function App() {
         setStatus("streaming");
         break;
       case "delta":
-        setTranslatedText((current) => current + event.content);
+        if (activeRequestModeRef.current === "plain") {
+          setTranslatedText((current) => current + event.content);
+        }
         break;
       case "completed":
         applyTranslationResult(event.requestId, {
           outcome: "completed",
           content: event.content,
           cacheHit: event.cacheHit,
+          learning: event.learning,
           message: null,
         });
         break;
@@ -742,6 +820,7 @@ function App() {
           outcome: "cancelled",
           content: null,
           cacheHit: false,
+          learning: null,
           message: null,
         });
         break;
@@ -750,6 +829,7 @@ function App() {
           outcome: "failed",
           content: null,
           cacheHit: false,
+          learning: null,
           message: event.message,
         });
         break;
@@ -766,7 +846,7 @@ function App() {
       const results = await Promise.allSettled(EVENT_NAMES.map(async (name) => {
         return listenTo<unknown>(name, (payload) => {
           if (disposed) return;
-          const event = decodeTranslationEvent(name, payload);
+          const event = decodeTranslationEvent(name, payload, activeRequestSourceTextRef.current ?? undefined);
           if (event) handleEvent(event);
         });
       }));
@@ -1177,10 +1257,16 @@ function App() {
       setError("请先输入需要翻译的段落。");
       return;
     }
+    const requestMode: TranslationRequestMode = snapshot.settings.paragraphLearningModeEnabled ? "learning" : "plain";
     const requestId = crypto.randomUUID();
     activeRequestId.current = requestId;
+    activeRequestModeRef.current = requestMode;
+    activeRequestSourceTextRef.current = text;
+    activeRequestRawSourceTextRef.current = sourceText;
+    setActiveRequestMode(requestMode);
     setError(null);
     setNotice(null);
+    setLearningResult(null);
     setTranslatedText("");
     setTranslationSummary(null);
     translationStartedAt.current = performance.now();
@@ -1194,12 +1280,18 @@ function App() {
           targetLanguage,
           modelId: snapshot.provider.modelId,
           promptId: snapshot.provider.promptId,
+          learningMode: requestMode === "learning",
         },
       });
       if (activeRequestId.current !== requestId) return;
-      const result = decodeTranslationCommandResult(rawResult);
+      const result = decodeTranslationCommandResult(rawResult, text);
       if (!result) {
         activeRequestId.current = null;
+        activeRequestModeRef.current = null;
+        activeRequestSourceTextRef.current = null;
+        activeRequestRawSourceTextRef.current = null;
+        setActiveRequestMode(null);
+        setLearningResult(null);
         translationStartedAt.current = null;
         setError("翻译命令返回了无法识别的终态。");
         setStatus("failed");
@@ -1209,6 +1301,11 @@ function App() {
     } catch (reason) {
       if (activeRequestId.current !== requestId) return;
       activeRequestId.current = null;
+      activeRequestModeRef.current = null;
+      activeRequestSourceTextRef.current = null;
+      activeRequestRawSourceTextRef.current = null;
+      setActiveRequestMode(null);
+      setLearningResult(null);
       translationStartedAt.current = null;
       setTranslationSummary(null);
       setError(describeError(reason, "翻译请求失败"));
@@ -1229,6 +1326,11 @@ function App() {
         return;
       }
       if (!result) {
+        activeRequestModeRef.current = null;
+        activeRequestSourceTextRef.current = null;
+        activeRequestRawSourceTextRef.current = null;
+        setActiveRequestMode(null);
+        setLearningResult(null);
         translationStartedAt.current = null;
         setTranslationSummary(null);
         setError(null);
@@ -1290,13 +1392,18 @@ function App() {
                 targetLanguage={targetLanguage}
                 selectedModel={selectedModel}
                 status={status}
+                activeRequestMode={activeRequestMode}
+                learningModeEnabled={snapshot.settings.paragraphLearningModeEnabled}
+                learningModeSaving={learningModeSaving}
+                learningResult={learningResult}
                 error={error ?? translationEventsError}
                 notice={notice}
                 translationSummary={translationSummary}
                 eventsReady={translationEventsReady}
-                onSourceTextChange={setSourceText}
+                onSourceTextChange={handleSourceTextChange}
                 onSourceLanguageChange={setSourceLanguage}
                 onTargetLanguageChange={setTargetLanguage}
+                onLearningModeChange={(enabled) => { void handleLearningModeChange(enabled); }}
                 onTranslate={() => void handleTranslate()}
                 onCancel={() => void handleCancel()}
                 onCopy={() => void handleCopy()}
@@ -1751,6 +1858,10 @@ interface TranslateViewProps {
   targetLanguage: string;
   selectedModel: string;
   status: TranslationStatus;
+  activeRequestMode: TranslationRequestMode | null;
+  learningModeEnabled: boolean;
+  learningModeSaving: boolean;
+  learningResult: ParagraphLearningResult | null;
   error: string | null;
   notice: string | null;
   translationSummary: TranslationSummary | null;
@@ -1758,6 +1869,7 @@ interface TranslateViewProps {
   onSourceTextChange: (value: string) => void;
   onSourceLanguageChange: (value: string) => void;
   onTargetLanguageChange: (value: string) => void;
+  onLearningModeChange: (enabled: boolean) => void;
   onTranslate: () => void;
   onCancel: () => void;
   onCopy: () => void;
@@ -1900,6 +2012,7 @@ function LanguageSelect({
 
 function TranslateView(props: TranslateViewProps) {
   const isBusy = props.status === "streaming" || props.status === "cancelling";
+  const isLearningRequest = props.activeRequestMode === "learning";
   return (
     <section className="page-section translate-page">
       <div className="page-heading">
@@ -1910,6 +2023,18 @@ function TranslateView(props: TranslateViewProps) {
             <div className="page-title-meta" aria-label="当前翻译模型">
               <span>模型 {props.selectedModel || "未配置模型"}</span>
             </div>
+            <label className={`learning-mode-toggle ${props.learningModeEnabled ? "is-enabled" : ""}`} title="仅影响主段落翻译">
+              <input
+                type="checkbox"
+                checked={props.learningModeEnabled}
+                disabled={isBusy || props.learningModeSaving}
+                onChange={(event) => props.onLearningModeChange(event.target.checked)}
+                aria-label="段落翻译学习模式"
+              />
+              <span className="learning-mode-toggle-track" aria-hidden="true"><span /></span>
+              <span className="learning-mode-toggle-label">学习模式</span>
+              <span className="learning-mode-toggle-state">{props.learningModeSaving ? "保存中" : props.learningModeEnabled ? "已开启" : "未开启"}</span>
+            </label>
           </div>
         </div>
       </div>
@@ -1922,11 +2047,10 @@ function TranslateView(props: TranslateViewProps) {
           </div>
           <div className="translation-panel">
             <div className="translation-scroll-region">
-              <textarea
+              <SegmentedSourceEditor
                 value={props.sourceText}
-                onChange={(event) => props.onSourceTextChange(event.target.value)}
-                placeholder="粘贴需要翻译的英文段落……"
-                spellCheck={false}
+                learning={props.learningResult}
+                onChange={props.onSourceTextChange}
               />
             </div>
             <div className="panel-footer"><span>{props.sourceText.length} 字符</span></div>
@@ -1941,7 +2065,9 @@ function TranslateView(props: TranslateViewProps) {
           <div className="translation-panel result-panel">
             <div className="translation-scroll-region">
               <div className={`result-content ${props.translatedText ? "has-content" : ""}`}>
-                {props.translatedText || <span className="empty-result">译文会显示在这里</span>}
+                {props.translatedText || (isLearningRequest && isBusy
+                  ? <span className="learning-stream-status">正在整理学习分段……</span>
+                  : <span className="empty-result">译文会显示在这里</span>)}
                 {props.status === "streaming" && <span className="stream-caret" />}
               </div>
             </div>
