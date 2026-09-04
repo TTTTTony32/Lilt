@@ -184,15 +184,6 @@ textarea::placeholder { color: #b5b6ad; }
 .wide-field { grid-column: 1 / -1; }
 input, .form-grid select { width: 100%; height: 36px; padding: 0 10px; outline: none; border: 1px solid #deded5; border-radius: 6px; color: #4c554d; background: #fffefb; font-size: 12px; }
 input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 2px rgba(131, 169, 142, .12); }
-.settings-select-control { position: relative; display: block; width: 100%; }
-.settings-select { height: 40px; padding: 0 38px 0 12px; appearance: none; -webkit-appearance: none; border-color: #d6dfd5; border-radius: 9px; color: #506355; background: linear-gradient(135deg, #fffefb 0%, #f7faf5 100%); font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease), color var(--motion-fast-duration) var(--motion-ease); }
-.settings-select:hover { border-color: #a9bea9; color: #3f5946; background: #f5f8f3; }
-.settings-select:focus-visible { border-color: #78977d; box-shadow: 0 0 0 3px rgba(113, 145, 120, .16); }
-.settings-select:disabled { color: #a1aaa0; background: #f0f2ed; cursor: not-allowed; }
-.settings-select option { color: #4c5d50; background: #fffefb; font-weight: 400; }
-.settings-select-icon { position: absolute; top: 50%; right: 12px; color: #78907b; pointer-events: none; transform: translateY(-50%); transition: color var(--motion-fast-duration) var(--motion-ease), transform var(--motion-fast-duration) var(--motion-ease); }
-.settings-select:hover + .settings-select-icon, .settings-select:focus-visible + .settings-select-icon { color: #4f6c56; }
-.settings-select:focus-visible + .settings-select-icon { transform: translateY(-50%) rotate(180deg); }
 .form-actions { min-height: 38px; margin-top: 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .button-group { display: flex; gap: 8px; }
 .muted-text { color: #a1a39a; font-size: 11px; }
