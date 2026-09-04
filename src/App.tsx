@@ -547,7 +547,7 @@ function App() {
     setError(null);
     setNotice(null);
     try {
-      await invokeCommand("save_paragraph_learning_mode", { enabled });
+      await invokeCommand("set_paragraph_learning_mode", { enabled });
       if (!enabled) setLearningResult(null);
       setNotice(enabled ? "学习模式已开启" : "学习模式已关闭");
     } catch (reason) {
