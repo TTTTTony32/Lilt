@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type SelectHTMLAttributes } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Check, ChevronDown, Copy, FileText, FileType2, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
@@ -2324,6 +2324,15 @@ function PromptManager({
   );
 }
 
+function SettingsSelect({ children, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <span className="settings-select-control">
+      <select className="settings-select" {...props}>{children}</select>
+      <ChevronDown className="settings-select-icon" size={15} strokeWidth={1.8} aria-hidden="true" />
+    </span>
+  );
+}
+
 function SettingsView({
   snapshot,
   dictionaryProgress,
@@ -2509,8 +2518,8 @@ function SettingsView({
           <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>即将支持其他协议。</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" /></label>
-            <label>Model ID{availableModels ? <select value={modelId} onChange={(event) => setModelId(event.target.value)}>{!availableModels.some((model) => model.id === modelId) && <option value={modelId}>当前：{modelId}</option>}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select> : <input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" />}</label>
-            <label>思考强度<select value={thinkingEffort} onChange={(event) => setThinkingEffort(event.target.value as ThinkingEffort)}><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+            <label>Model ID{availableModels ? <SettingsSelect value={modelId} onChange={(event) => setModelId(event.target.value)}>{!availableModels.some((model) => model.id === modelId) && <option value={modelId}>当前：{modelId}</option>}{availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</SettingsSelect> : <input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" />}</label>
+            <label>思考强度<SettingsSelect value={thinkingEffort} onChange={(event) => setThinkingEffort(event.target.value as ThinkingEffort)}><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></SettingsSelect></label>
             <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
           </div>
           {providerMessage && <p className="notice-message settings-message">{providerMessage}</p>}
@@ -2541,7 +2550,7 @@ function SettingsView({
         <div className="simple-card selection-settings-card">
           <div className="card-heading"><div><strong>划词翻译</strong><span>从其他 Windows 应用读取选中文本，浮窗复用当前翻译方向。</span></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
           <div className="form-grid selection-settings-grid">
-            <label>触发方式<select value={selectionMode} onChange={(event) => setSelectionMode(event.target.value as AppSettings["selectionMode"])}><option value="shortcut">按快捷键</option><option value="automatic">自动监听选区</option></select></label>
+            <label>触发方式<SettingsSelect value={selectionMode} onChange={(event) => setSelectionMode(event.target.value as AppSettings["selectionMode"])}><option value="shortcut">按快捷键</option><option value="automatic">自动监听选区</option></SettingsSelect></label>
             <label>快捷键<input value={selectionShortcut} onChange={(event) => setSelectionShortcut(event.target.value)} placeholder="Ctrl+Shift+L" /></label>
           </div>
           <p className="settings-hint">快捷键格式使用 Ctrl+Shift+L 这样的组合。按快捷键模式读取当前选区；自动监听模式在选区稳定 500 毫秒后显示结果。自动模式仍保留快捷键设置，切换回来即可使用。</p>
