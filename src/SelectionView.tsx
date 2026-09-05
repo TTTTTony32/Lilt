@@ -81,9 +81,9 @@ export default function SelectionView() {
   useEffect(() => {
     if (!triggerNotice || selection) return;
     const window = getCurrentWindow();
-    const size = triggerStatus === "failed"
+    const size = triggerNotice.trigger === "automatic" && triggerStatus === "failed"
       ? new PhysicalSize(280, 80)
-      : triggerStatus === "available"
+      : triggerNotice.trigger === "automatic" && triggerStatus === "available"
         ? new PhysicalSize(48, 48)
         : null;
     if (!size) return;
@@ -411,7 +411,7 @@ export default function SelectionView() {
     activeTriggerId.current = notice.triggerId;
     activeSelectionId.current = null;
     setTriggerNotice(notice);
-    setTriggerStatus("available");
+    setTriggerStatus(notice.trigger === "shortcut" ? "reading" : "available");
     setTriggerError(null);
     setSelection(null);
     setRoute(null);
@@ -426,7 +426,7 @@ export default function SelectionView() {
 
   const activateTrigger = useCallback(async () => {
     const notice = triggerNotice;
-    if (!notice || triggerStatus !== "available") return;
+    if (!notice || notice.trigger !== "automatic" || triggerStatus !== "available") return;
     activeTriggerId.current = notice.triggerId;
     setTriggerStatus("reading");
     setTriggerError(null);
@@ -451,14 +451,31 @@ export default function SelectionView() {
           if (notice) handleTrigger(notice);
         } else if (name === "selection_available") {
           const notice = decodeSelectionNotice(payload);
-          if (notice) void handleNotice(notice);
+          if (notice) {
+            if (!activeTriggerId.current && !activeSelectionId.current) {
+              handleTrigger({
+                triggerId: notice.triggerId,
+                trigger: notice.trigger,
+                anchor: notice.anchor,
+              });
+            }
+            void handleNotice(notice);
+          }
         } else if (name === "selection_unavailable") {
           const value = decodeSelectionUnavailable(payload);
           if (value) {
+            if (!activeTriggerId.current && !activeSelectionId.current) {
+              handleTrigger({
+                triggerId: value.triggerId,
+                trigger: value.trigger,
+                anchor: null,
+              });
+            }
             if (activeTriggerId.current) {
               if (value.triggerId !== activeTriggerId.current) return;
               setTriggerStatus("failed");
               setTriggerError(value.message);
+              if (value.trigger === "shortcut") setError(value.message);
             } else if (!activeSelectionId.current) {
               setTranslationStatus("failed");
               setError(value.message);
@@ -561,7 +578,7 @@ export default function SelectionView() {
   const isBusy = dictionaryLoading || translationStatus === "loading" || translationStatus === "streaming" || translationStatus === "cancelling" || wordExample.status === "streaming";
   const resultText = route === "paragraph" ? translation : wordExample.translation;
 
-  if (triggerNotice && !selection && triggerStatus !== "hidden" && triggerStatus !== "reading") {
+  if (triggerNotice?.trigger === "automatic" && !selection && triggerStatus !== "hidden" && triggerStatus !== "reading") {
     return (
       <main className="selection-trigger-window" role="dialog" aria-label="Lilt 划词操作">
         <button

@@ -25,6 +25,12 @@ const SELECTION_STATUS_EVENT: &str = "selection_status_changed";
 const SELECTION_OPEN_MAIN_EVENT: &str = "selection_open_main";
 const SELECTION_TTL: Duration = Duration::from_secs(120);
 const AUTOMATIC_DEBOUNCE: Duration = Duration::from_millis(500);
+const FOCUS_POLL_INTERVAL: Duration = Duration::from_millis(120);
+const MOUSE_RELEASE_DELAY: Duration = Duration::from_millis(140);
+const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_millis(900);
+const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SHORTCUT_RELEASE_TIMEOUT: Duration = Duration::from_millis(700);
+const MAX_SELECTION_ANCESTORS: usize = 8;
 const DRAG_FOCUS_GRACE: Duration = Duration::from_millis(250);
 const RESIZE_FOCUS_GRACE: Duration = Duration::from_millis(750);
 const FOCUS_LOST_CHECK_DELAY: Duration = Duration::from_millis(320);
@@ -49,6 +55,7 @@ struct SelectionInner {
     latest: Option<StoredSelection>,
     current_trigger: Option<SelectionTriggerNotice>,
     pending_trigger: Option<SelectionTriggerNotice>,
+    pending_event: Option<PendingSelectionEvent>,
     window_ready: bool,
     last_signature: Option<SelectionSignature>,
     dragging: bool,
@@ -57,6 +64,11 @@ struct SelectionInner {
     focus_lost_generation: u64,
     content_width: i64,
     content_height: i64,
+}
+
+enum PendingSelectionEvent {
+    Available(SelectionNotice),
+    Unavailable(SelectionUnavailable),
 }
 
 struct StoredSelection {
@@ -83,17 +95,58 @@ type AgileTextRange =
     windows::core::AgileReference<windows::Win32::UI::Accessibility::IUIAutomationTextRange>;
 
 #[cfg(windows)]
+#[derive(Clone)]
 struct PreparedSelection {
     trigger_id: String,
     generation: u64,
     trigger: SelectionTrigger,
     anchor: Option<SelectionAnchor>,
-    ranges: Vec<AgileTextRange>,
+    source: PreparedSelectionSource,
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+enum PreparedSelectionSource {
+    UiAutomation(Vec<AgileTextRange>),
+    Clipboard(String),
+}
+
+#[cfg(windows)]
+struct MouseSelectionOperation {
+    process_id: u32,
+    x: i32,
+    y: i32,
+}
+
+#[cfg(windows)]
+struct MouseSelectionRelease {
+    process_id: u32,
+    anchor: SelectionAnchor,
+    generation: u64,
+    deadline: Instant,
+}
+
+#[cfg(windows)]
+struct SelectionCaptureFailure {
+    code: &'static str,
+    message: String,
+}
+
+#[cfg(windows)]
+impl SelectionCaptureFailure {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 enum WorkerCommand {
     SetAutomatic(bool),
-    ReadFocused,
+    ReadFocused {
+        trigger_id: String,
+    },
     ActivateTrigger {
         trigger_id: String,
     },
@@ -120,6 +173,7 @@ impl SelectionService {
                 latest: None,
                 current_trigger: None,
                 pending_trigger: None,
+                pending_event: None,
                 window_ready: false,
                 last_signature: None,
                 dragging: false,
@@ -275,42 +329,55 @@ impl SelectionService {
     }
 
     pub fn read_focused_selection(&self) {
-        self.send_worker(WorkerCommand::ReadFocused);
+        let trigger_id = Uuid::new_v4().to_string();
+        self.invalidate_for_new_selection();
+        self.publish_trigger(trigger_id.clone(), SelectionTrigger::Shortcut, None);
+        if !self.send_worker(WorkerCommand::ReadFocused {
+            trigger_id: trigger_id.clone(),
+        }) {
+            self.publish_unavailable(
+                &trigger_id,
+                SelectionTrigger::Shortcut,
+                "selection_worker_unavailable",
+                "划词工作线程不可用",
+            );
+        }
     }
 
     pub fn window_ready(&self) -> Option<SelectionTriggerNotice> {
-        let pending = {
+        let (pending, pending_event) = {
             let mut inner = self.inner.lock().ok()?;
             inner.window_ready = true;
-            inner.pending_trigger.take()
+            (inner.pending_trigger.take(), inner.pending_event.take())
         };
         if let Some(notice) = pending.as_ref() {
             if let Some(app) = self.app_handle() {
                 let _ = app.emit(SELECTION_TRIGGER_EVENT, notice);
             }
-            self.show_trigger(notice.anchor.as_ref());
+            self.show_for_trigger(notice);
+        }
+        if let Some(event) = pending_event {
+            match event {
+                PendingSelectionEvent::Available(notice) => {
+                    if let Some(app) = self.app_handle() {
+                        let _ = app.emit(SELECTION_EVENT, &notice);
+                    }
+                    self.show_window(notice.anchor.as_ref());
+                }
+                PendingSelectionEvent::Unavailable(notice) => {
+                    if let Some(app) = self.app_handle() {
+                        let _ = app.emit(SELECTION_UNAVAILABLE_EVENT, &notice);
+                    }
+                    if notice.trigger == SelectionTrigger::Shortcut {
+                        self.show_window(None);
+                    }
+                }
+            }
         }
         pending
     }
 
-    fn clear_trigger(&self, trigger_id: &str) {
-        if let Ok(mut inner) = self.inner.lock() {
-            if inner
-                .current_trigger
-                .as_ref()
-                .map(|notice| notice.trigger_id == trigger_id)
-                .unwrap_or(false)
-            {
-                inner.current_trigger = None;
-                inner.pending_trigger = None;
-            }
-        }
-    }
-
     pub fn activate_trigger(&self, trigger_id: &str) -> Result<(), String> {
-        if !self.status().ui_automation_ready {
-            return Err("UI Automation 当前不可用".to_string());
-        }
         let valid = self
             .inner
             .lock()
@@ -350,6 +417,7 @@ impl SelectionService {
             let active_id = inner.latest.take().map(|item| item.payload.request_id);
             let should_hide = inner.current_trigger.take().is_some() || active_id.is_some();
             inner.pending_trigger = None;
+            inner.pending_event = None;
             inner.last_signature = None;
             (active_id, should_hide)
         };
@@ -411,6 +479,7 @@ impl SelectionService {
                 if request_id.is_none() {
                     inner.current_trigger = None;
                     inner.pending_trigger = None;
+                    inner.pending_event = None;
                     inner.selection_generation = inner.selection_generation.wrapping_add(1);
                 }
                 (
@@ -563,20 +632,69 @@ impl SelectionService {
         code: &str,
         message: &str,
     ) {
+        self.publish_unavailable(trigger_id, trigger, code, message);
+    }
+
+    fn publish_unavailable(
+        &self,
+        trigger_id: &str,
+        trigger: SelectionTrigger,
+        code: &str,
+        message: &str,
+    ) {
+        let notice = SelectionUnavailable {
+            request_id: None,
+            trigger_id: trigger_id.to_string(),
+            trigger,
+            code: code.to_string(),
+            message: message.to_string(),
+        };
+        let window_ready = {
+            let mut inner = match self.inner.lock() {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            let owns_trigger = inner
+                .current_trigger
+                .as_ref()
+                .map(|value| value.trigger_id == trigger_id)
+                .unwrap_or(false)
+                || inner
+                    .pending_trigger
+                    .as_ref()
+                    .map(|value| value.trigger_id == trigger_id)
+                    .unwrap_or(false)
+                || matches!(
+                    inner.pending_event.as_ref(),
+                    Some(PendingSelectionEvent::Unavailable(value))
+                        if value.trigger_id == trigger_id
+                );
+            if !owns_trigger && inner.window_ready {
+                return;
+            }
+            inner.current_trigger = None;
+            inner.pending_event = if inner.window_ready {
+                None
+            } else {
+                Some(PendingSelectionEvent::Unavailable(notice.clone()))
+            };
+            if inner.window_ready {
+                inner.pending_trigger = None;
+            }
+            inner.window_ready
+        };
         diagnostics::warn(format!(
             "selection.capture.failed trigger={trigger:?} code={code}"
         ));
-        if let Some(app) = self.app_handle() {
-            let _ = app.emit(
-                SELECTION_UNAVAILABLE_EVENT,
-                SelectionUnavailable {
-                    request_id: None,
-                    trigger_id: trigger_id.to_string(),
-                    trigger,
-                    code: code.to_string(),
-                    message: message.to_string(),
-                },
-            );
+        if window_ready {
+            if let Some(app) = self.app_handle() {
+                let _ = app.emit(SELECTION_UNAVAILABLE_EVENT, &notice);
+            }
+            if trigger == SelectionTrigger::Shortcut {
+                self.show_window(None);
+            }
+        } else if code != "selection_window_unavailable" {
+            self.ensure_window(trigger_id, trigger);
         }
     }
 
@@ -639,6 +757,7 @@ impl SelectionService {
             inner.current_trigger = Some(notice.clone());
             let previous_id = inner.latest.take().map(|item| item.payload.request_id);
             inner.last_signature = None;
+            inner.pending_event = None;
             if inner.window_ready {
                 inner.pending_trigger = None;
             } else {
@@ -664,9 +783,17 @@ impl SelectionService {
             if let Some(app) = self.app_handle() {
                 let _ = app.emit(SELECTION_TRIGGER_EVENT, &notice);
             }
-            self.show_trigger(notice.anchor.as_ref());
+            self.show_for_trigger(&notice);
         } else {
             self.ensure_window(&notice.trigger_id, notice.trigger);
+        }
+    }
+
+    fn show_for_trigger(&self, notice: &SelectionTriggerNotice) {
+        if notice.trigger == SelectionTrigger::Shortcut {
+            self.show_window(notice.anchor.as_ref());
+        } else {
+            self.show_trigger(notice.anchor.as_ref());
         }
     }
 
@@ -680,6 +807,14 @@ impl SelectionService {
             Ok(value) => value,
             Err(_) => return false,
         };
+        if inner
+            .current_trigger
+            .as_ref()
+            .map(|notice| notice.trigger_id.as_str())
+            != Some(candidate.trigger_id.as_str())
+        {
+            return false;
+        }
         let signature = SelectionSignature {
             source_text: source_text.clone(),
             anchor: candidate.anchor.clone(),
@@ -688,7 +823,6 @@ impl SelectionService {
             return false;
         }
         inner.current_trigger = None;
-        inner.pending_trigger = None;
         inner.last_signature = Some(signature);
         let request_id = Uuid::new_v4().to_string();
         let previous_id = inner
@@ -709,11 +843,17 @@ impl SelectionService {
             trigger: payload.trigger,
             anchor: payload.anchor.clone(),
         };
+        let window_ready = inner.window_ready;
         inner.latest = Some(StoredSelection {
             payload,
             created_at: Instant::now(),
         });
-        let window_ready = inner.window_ready;
+        inner.pending_event = if window_ready {
+            inner.pending_trigger = None;
+            None
+        } else {
+            Some(PendingSelectionEvent::Available(notice.clone()))
+        };
         drop(inner);
         self.cancel_request(previous_id);
 
@@ -865,6 +1005,7 @@ fn worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: SelectionServic
         while let Ok(command) = receiver.recv() {
             match command {
                 WorkerCommand::ActivateTrigger { .. } => {}
+                WorkerCommand::ReadFocused { .. } => {}
                 WorkerCommand::Shutdown => break,
                 _ => {}
             }
@@ -879,45 +1020,182 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
         events::{CustomEventHandlerFn, UIEventHandler, UIEventType},
         types::TreeScope,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON;
 
     let automation = match UIAutomation::new() {
-        Ok(value) => {
-            service.set_uia_status(true, None);
-            value
-        }
+        Ok(value) => Some(value),
         Err(error) => {
             service.set_uia_status(false, Some(format!("UI Automation 初始化失败：{error}")));
-            while let Ok(command) = receiver.recv() {
-                match command {
-                    WorkerCommand::ActivateTrigger { .. } => {}
-                    WorkerCommand::Shutdown => break,
-                    _ => {}
-                }
+            None
+        }
+    };
+    let root = automation
+        .as_ref()
+        .and_then(|value| match value.get_root_element() {
+            Ok(root) => Some(root),
+            Err(error) => {
+                service.set_uia_status(false, Some(format!("UI Automation 根元素不可用：{error}")));
+                None
             }
-            return;
-        }
-    };
-    let root = match automation.get_root_element() {
-        Ok(value) => value,
-        Err(error) => {
-            service.set_uia_status(false, Some(format!("UI Automation 根元素不可用：{error}")));
-            return;
-        }
-    };
+        });
+    let walker = automation
+        .as_ref()
+        .and_then(|value| value.create_tree_walker().ok());
+    service.set_uia_status(
+        root.is_some() && walker.is_some(),
+        if root.is_some() && walker.is_some() {
+            None
+        } else {
+            Some("UI Automation 当前不可用，将使用剪贴板兜底".to_string())
+        },
+    );
+
     let mut handler: Option<UIEventHandler> = None;
     let mut automatic = false;
     let mut prepared: Option<PreparedSelection> = None;
     let mut pending_prepared: Option<(PreparedSelection, Instant)> = None;
+    let mut pending_mouse_release: Option<MouseSelectionRelease> = None;
+    let mut mouse_operation: Option<MouseSelectionOperation> = None;
+    let mut left_button_down = false;
+    let mut next_focus_poll = Instant::now();
 
     loop {
+        let now = Instant::now();
         if let Some((value, deadline)) = pending_prepared.take() {
-            if deadline <= Instant::now() && service.owns_generation(value.generation) {
+            if deadline <= now && service.owns_generation(value.generation) {
                 service.publish_prepared_notice(&value);
                 prepared = Some(value);
-            } else if deadline > Instant::now() {
+            } else if deadline > now && service.owns_generation(value.generation) {
                 pending_prepared = Some((value, deadline));
             }
         }
+
+        if automatic {
+            let button_down = key_is_down(VK_LBUTTON.0 as i32);
+            if button_down && !left_button_down {
+                left_button_down = true;
+                pending_mouse_release = None;
+                mouse_operation = cursor_position().and_then(|(x, y)| {
+                    let process_id = process_id_at_point(x, y)?;
+                    if process_id == std::process::id() {
+                        return None;
+                    }
+                    service.invalidate_for_new_selection();
+                    prepared = None;
+                    pending_prepared = None;
+                    Some(MouseSelectionOperation { process_id, x, y })
+                });
+            } else if !button_down && left_button_down {
+                left_button_down = false;
+                if let Some(operation) = mouse_operation.take() {
+                    if operation.process_id != std::process::id() {
+                        pending_mouse_release = Some(MouseSelectionRelease {
+                            process_id: operation.process_id,
+                            anchor: SelectionAnchor {
+                                x: operation.x,
+                                y: operation.y,
+                                width: 0,
+                                height: 0,
+                            },
+                            generation: service.current_generation(),
+                            deadline: now + MOUSE_RELEASE_DELAY,
+                        });
+                    }
+                }
+            }
+
+            if now >= next_focus_poll {
+                next_focus_poll = now + FOCUS_POLL_INTERVAL;
+                if let (Some(automation), Some(walker)) = (automation.as_ref(), walker.as_ref()) {
+                    if let Ok(element) = automation.get_focused_element() {
+                        if let Some(value) = prepare_element(
+                            &service,
+                            &element,
+                            SelectionTrigger::Automatic,
+                            walker,
+                            None,
+                        ) {
+                            accept_automatic_prepared(
+                                &service,
+                                value,
+                                &mut pending_prepared,
+                                &mut prepared,
+                            );
+                            pending_mouse_release = None;
+                        }
+                    }
+                }
+            }
+        } else {
+            left_button_down = false;
+            mouse_operation = None;
+            pending_mouse_release = None;
+        }
+
+        if let Some(release) = pending_mouse_release.take() {
+            if release.deadline > now {
+                pending_mouse_release = Some(release);
+            } else if automatic
+                && release.process_id != std::process::id()
+                && service.owns_generation(release.generation)
+            {
+                let has_prepared = pending_prepared
+                    .as_ref()
+                    .map(|(value, _)| value.generation == release.generation)
+                    .unwrap_or(false)
+                    || prepared
+                        .as_ref()
+                        .map(|value| value.generation == release.generation)
+                        .unwrap_or(false);
+                if !has_prepared {
+                    let focus_prepared = automation.as_ref().zip(walker.as_ref()).and_then(
+                        |(automation, walker)| {
+                            automation.get_focused_element().ok().and_then(|element| {
+                                prepare_element(
+                                    &service,
+                                    &element,
+                                    SelectionTrigger::Automatic,
+                                    walker,
+                                    None,
+                                )
+                            })
+                        },
+                    );
+                    if let Some(value) = focus_prepared {
+                        accept_automatic_prepared(
+                            &service,
+                            value,
+                            &mut pending_prepared,
+                            &mut prepared,
+                        );
+                    } else {
+                        match capture_clipboard_selection() {
+                            Ok(source_text) if service.owns_generation(release.generation) => {
+                                let value = PreparedSelection {
+                                    trigger_id: Uuid::new_v4().to_string(),
+                                    generation: release.generation,
+                                    trigger: SelectionTrigger::Automatic,
+                                    anchor: Some(release.anchor),
+                                    source: PreparedSelectionSource::Clipboard(source_text),
+                                };
+                                accept_automatic_prepared(
+                                    &service,
+                                    value,
+                                    &mut pending_prepared,
+                                    &mut prepared,
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => diagnostics::warn(format!(
+                                "selection.clipboard.failed trigger=automatic code={}",
+                                error.code
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+
         match receiver.recv_timeout(Duration::from_millis(40)) {
             Ok(WorkerCommand::SetAutomatic(enabled)) => {
                 if enabled == automatic {
@@ -926,85 +1204,137 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 service.invalidate_for_new_selection();
                 prepared = None;
                 pending_prepared = None;
+                pending_mouse_release = None;
+                mouse_operation = None;
+                left_button_down = false;
                 if enabled {
-                    let service_for_event = service.clone();
-                    let callback: Box<CustomEventHandlerFn> = Box::new(move |sender, _event| {
-                        if sender.get_process_id().ok() == Some(std::process::id()) {
-                            return Ok(());
+                    if let (Some(automation), Some(root), Some(walker)) =
+                        (automation.as_ref(), root.as_ref(), walker.as_ref())
+                    {
+                        let service_for_event = service.clone();
+                        let walker_for_event = walker.clone();
+                        let callback: Box<CustomEventHandlerFn> =
+                            Box::new(move |sender, _event| {
+                                if sender.get_process_id().ok() == Some(std::process::id()) {
+                                    return Ok(());
+                                }
+                                if let Some(value) = prepare_element(
+                                    &service_for_event,
+                                    sender,
+                                    SelectionTrigger::Automatic,
+                                    &walker_for_event,
+                                    None,
+                                ) {
+                                    service_for_event.enqueue_prepared(value);
+                                }
+                                Ok(())
+                            });
+                        let event_handler = UIEventHandler::from(callback);
+                        match automation.add_automation_event_handler(
+                            UIEventType::Text_TextSelectionChanged,
+                            root,
+                            TreeScope::Subtree,
+                            None,
+                            &event_handler,
+                        ) {
+                            Ok(()) => {
+                                handler = Some(event_handler);
+                                service.set_uia_status(true, None);
+                            }
+                            Err(error) => service
+                                .set_uia_status(false, Some(format!("自动选区监听失败：{error}"))),
                         }
-                        if let Some(value) =
-                            prepare_element(&service_for_event, sender, SelectionTrigger::Automatic)
-                        {
-                            service_for_event.enqueue_prepared(value);
-                        } else {
-                            service_for_event.invalidate_for_new_selection();
-                            service_for_event.send_worker(WorkerCommand::ClearPending);
-                        }
-                        Ok(())
-                    });
-                    let event_handler = UIEventHandler::from(callback);
-                    match automation.add_automation_event_handler(
-                        UIEventType::Text_TextSelectionChanged,
-                        &root,
-                        TreeScope::Subtree,
-                        None,
-                        &event_handler,
-                    ) {
-                        Ok(()) => {
-                            handler = Some(event_handler);
-                            automatic = true;
-                            service.set_uia_status(true, None);
-                        }
-                        Err(error) => service
-                            .set_uia_status(false, Some(format!("自动选区监听失败：{error}"))),
                     }
-                } else if let Some(event_handler) = handler.take() {
-                    let _ = automation.remove_automation_event_handler(
-                        UIEventType::Text_TextSelectionChanged,
-                        &root,
-                        &event_handler,
-                    );
+                    automatic = true;
+                } else {
+                    if let Some(event_handler) = handler.take() {
+                        if let (Some(automation), Some(root)) = (automation.as_ref(), root.as_ref())
+                        {
+                            let _ = automation.remove_automation_event_handler(
+                                UIEventType::Text_TextSelectionChanged,
+                                root,
+                                &event_handler,
+                            );
+                        }
+                    }
                     automatic = false;
-                    service.set_uia_status(true, None);
+                    service.set_uia_status(root.is_some() && walker.is_some(), None);
                 }
             }
-            Ok(WorkerCommand::ReadFocused) if !automatic => {
-                match automation.get_focused_element() {
-                    Ok(element) => {
-                        service.invalidate_for_new_selection();
-                        if let Some(value) =
-                            prepare_element(&service, &element, SelectionTrigger::Shortcut)
-                        {
-                            pending_prepared = None;
-                            service.publish_prepared_notice(&value);
-                            prepared = Some(value);
+            Ok(WorkerCommand::ReadFocused { trigger_id }) if !automatic => {
+                if !service.owns_current_trigger(&trigger_id) {
+                    continue;
+                }
+                let generation = service.current_generation();
+                let uia_candidate =
+                    automation
+                        .as_ref()
+                        .zip(walker.as_ref())
+                        .and_then(|(automation, walker)| {
+                            automation.get_focused_element().ok().and_then(|element| {
+                                prepare_element(
+                                    &service,
+                                    &element,
+                                    SelectionTrigger::Shortcut,
+                                    walker,
+                                    Some(trigger_id.clone()),
+                                )
+                                .and_then(|prepared| read_prepared_selection(&prepared))
+                            })
+                        });
+                if let Some(candidate) = uia_candidate {
+                    if service.owns_generation(generation)
+                        && service.owns_current_trigger(&trigger_id)
+                    {
+                        let _ = service.publish_candidate(candidate);
+                        continue;
+                    }
+                }
+
+                if let Err(error) = wait_for_shortcut_release() {
+                    service.emit_unavailable(
+                        &trigger_id,
+                        SelectionTrigger::Shortcut,
+                        error.code,
+                        &error.message,
+                    );
+                    continue;
+                }
+                if !service.owns_generation(generation)
+                    || !service.owns_current_trigger(&trigger_id)
+                {
+                    continue;
+                }
+                let anchor = cursor_position().map(|(x, y)| SelectionAnchor {
+                    x,
+                    y,
+                    width: 0,
+                    height: 0,
+                });
+                match capture_clipboard_selection() {
+                    Ok(source_text) => {
+                        let candidate = SelectionCandidate {
+                            trigger_id,
+                            source_text,
+                            anchor,
+                            trigger: SelectionTrigger::Shortcut,
+                        };
+                        if service.owns_current_trigger(&candidate.trigger_id) {
+                            let _ = service.publish_candidate(candidate);
                         }
                     }
                     Err(error) => service.emit_unavailable(
-                        &Uuid::new_v4().to_string(),
+                        &trigger_id,
                         SelectionTrigger::Shortcut,
-                        "uia_unavailable",
-                        &format!("无法读取当前应用的选区：{error}"),
+                        error.code,
+                        &error.message,
                     ),
                 }
             }
-            Ok(WorkerCommand::Prepared(mut value))
+            Ok(WorkerCommand::Prepared(value))
                 if value.trigger == SelectionTrigger::Automatic && automatic =>
             {
-                let duplicate = pending_prepared
-                    .as_ref()
-                    .map(|(current, _)| same_prepared_selection(current, &value))
-                    .unwrap_or(false)
-                    || prepared
-                        .as_ref()
-                        .map(|current| same_prepared_selection(current, &value))
-                        .unwrap_or(false);
-                if !duplicate && service.owns_generation(value.generation) {
-                    service.invalidate_for_new_selection();
-                    value.generation = service.current_generation();
-                    prepared = None;
-                    pending_prepared = Some((value, Instant::now() + AUTOMATIC_DEBOUNCE));
-                }
+                accept_automatic_prepared(&service, value, &mut pending_prepared, &mut prepared);
             }
             Ok(WorkerCommand::ActivateTrigger { trigger_id }) => {
                 let matches_prepared = prepared
@@ -1026,10 +1356,9 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                 ));
                             }
                         } else {
-                            service.clear_trigger(&trigger_id);
                             service.emit_unavailable(
                                 &trigger_id,
-                                value.trigger,
+                                SelectionTrigger::Automatic,
                                 "selection_read_failed",
                                 "点击后无法读取当前选区",
                             );
@@ -1044,20 +1373,50 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
             Ok(WorkerCommand::ClearPending) => {
                 prepared = None;
                 pending_prepared = None;
+                pending_mouse_release = None;
             }
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(WorkerCommand::ReadFocused) => {}
+            Ok(WorkerCommand::ReadFocused { .. }) => {}
             Ok(WorkerCommand::Prepared(_)) => {}
         }
     }
     if let Some(event_handler) = handler {
-        let _ = automation.remove_automation_event_handler(
-            UIEventType::Text_TextSelectionChanged,
-            &root,
-            &event_handler,
-        );
+        if let (Some(automation), Some(root)) = (automation.as_ref(), root.as_ref()) {
+            let _ = automation.remove_automation_event_handler(
+                UIEventType::Text_TextSelectionChanged,
+                root,
+                &event_handler,
+            );
+        }
     }
+}
+
+#[cfg(windows)]
+fn accept_automatic_prepared(
+    service: &SelectionService,
+    mut value: PreparedSelection,
+    pending_prepared: &mut Option<(PreparedSelection, Instant)>,
+    prepared: &mut Option<PreparedSelection>,
+) {
+    if !service.owns_generation(value.generation) {
+        return;
+    }
+    let duplicate = pending_prepared
+        .as_ref()
+        .map(|(current, _)| same_prepared_selection(current, &value))
+        .unwrap_or(false)
+        || prepared
+            .as_ref()
+            .map(|current| same_prepared_selection(current, &value))
+            .unwrap_or(false);
+    if duplicate {
+        return;
+    }
+    service.invalidate_for_new_selection();
+    value.generation = service.current_generation();
+    *prepared = None;
+    *pending_prepared = Some((value, Instant::now() + AUTOMATIC_DEBOUNCE));
 }
 
 #[cfg(windows)]
@@ -1065,146 +1424,290 @@ fn prepare_element(
     service: &SelectionService,
     element: &uiautomation::UIElement,
     trigger: SelectionTrigger,
+    walker: &uiautomation::UITreeWalker,
+    trigger_id: Option<String>,
 ) -> Option<PreparedSelection> {
     use uiautomation::patterns::UITextPattern;
     use uiautomation::types::TextPatternRangeEndpoint;
 
-    let trigger_id = Uuid::new_v4().to_string();
-    if element.get_process_id().ok() == Some(std::process::id()) {
-        return None;
-    }
-    let pattern = match element.get_pattern::<UITextPattern>() {
-        Ok(value) => value,
-        Err(error) => {
-            if trigger == SelectionTrigger::Shortcut {
-                service.emit_unavailable(
-                    &trigger_id,
-                    trigger,
-                    "unsupported_control",
-                    &format!("目标应用不支持读取文本选区：{error}"),
-                );
-            }
+    let trigger_id = trigger_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut current = element.clone();
+    for _ in 0..=MAX_SELECTION_ANCESTORS {
+        if current.get_process_id().ok() == Some(std::process::id()) {
             return None;
         }
-    };
-    let ranges = match pattern.get_selection() {
-        Ok(value) => value,
-        Err(error) => {
-            if trigger == SelectionTrigger::Shortcut {
-                service.emit_unavailable(
-                    &trigger_id,
-                    trigger,
-                    "no_selection",
-                    &format!("当前没有可读取的选区：{error}"),
-                );
-            }
-            return None;
-        }
-    };
-    let ranges = ranges
-        .into_iter()
-        .filter(|range| {
-            range
-                .compare_endpoints(
-                    TextPatternRangeEndpoint::Start,
-                    range,
-                    TextPatternRangeEndpoint::End,
-                )
-                .map(|distance| distance < 0)
-                .unwrap_or(false)
-        })
-        .collect::<Vec<_>>();
-    if ranges.is_empty() {
-        if trigger == SelectionTrigger::Shortcut {
-            service.emit_unavailable(
-                &trigger_id,
-                trigger,
-                "no_selection",
-                "当前没有可读取的选区：选区为空或处于光标位置",
-            );
-        }
-        return None;
-    }
-    let mut anchor = None;
-    let mut agile_ranges = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        if anchor.is_none() {
-            anchor = range
-                .get_enclosing_element()
-                .ok()
-                .and_then(|value| value.get_bounding_rectangle().ok())
-                .map(|rect| SelectionAnchor {
-                    x: rect.get_left(),
-                    y: rect.get_top(),
-                    width: rect.get_width(),
-                    height: rect.get_height(),
-                });
-        }
-        match windows::core::AgileReference::new(range.as_ref()) {
-            Ok(value) => agile_ranges.push(value),
-            Err(error) => {
-                if trigger == SelectionTrigger::Shortcut {
-                    service.emit_unavailable(
-                        &trigger_id,
+        if let Ok(pattern) = current.get_pattern::<UITextPattern>() {
+            if let Ok(ranges) = pattern.get_selection() {
+                let ranges = ranges
+                    .into_iter()
+                    .filter(|range| {
+                        range
+                            .compare_endpoints(
+                                TextPatternRangeEndpoint::Start,
+                                range,
+                                TextPatternRangeEndpoint::End,
+                            )
+                            .map(|distance| distance < 0)
+                            .unwrap_or(false)
+                    })
+                    .collect::<Vec<_>>();
+                if !ranges.is_empty() {
+                    let anchor = ranges.first().and_then(|range| {
+                        range
+                            .get_enclosing_element()
+                            .ok()
+                            .and_then(|value| value.get_bounding_rectangle().ok())
+                            .map(|rect| SelectionAnchor {
+                                x: rect.get_left(),
+                                y: rect.get_top(),
+                                width: rect.get_width(),
+                                height: rect.get_height(),
+                            })
+                    });
+                    let mut agile_ranges = Vec::with_capacity(ranges.len());
+                    for range in ranges {
+                        let value = windows::core::AgileReference::new(range.as_ref()).ok()?;
+                        agile_ranges.push(value);
+                    }
+                    return Some(PreparedSelection {
+                        trigger_id,
+                        generation: service.current_generation(),
                         trigger,
-                        "selection_unavailable",
-                        &format!("无法暂存当前选区：{error}"),
-                    );
+                        anchor,
+                        source: PreparedSelectionSource::UiAutomation(agile_ranges),
+                    });
                 }
-                return None;
             }
         }
+        current = walker.get_parent(&current).ok()?;
     }
-
-    Some(PreparedSelection {
-        trigger_id,
-        generation: service.current_generation(),
-        trigger,
-        anchor,
-        ranges: agile_ranges,
-    })
+    None
 }
 
 #[cfg(windows)]
 fn same_prepared_selection(left: &PreparedSelection, right: &PreparedSelection) -> bool {
     use uiautomation::patterns::UITextRange;
 
-    if left.ranges.len() != right.ranges.len() {
-        return false;
+    match (&left.source, &right.source) {
+        (
+            PreparedSelectionSource::Clipboard(left_text),
+            PreparedSelectionSource::Clipboard(right_text),
+        ) => left_text == right_text && left.anchor == right.anchor,
+        (
+            PreparedSelectionSource::UiAutomation(left_ranges),
+            PreparedSelectionSource::UiAutomation(right_ranges),
+        ) => {
+            if left_ranges.len() != right_ranges.len() {
+                return false;
+            }
+            left_ranges
+                .iter()
+                .zip(right_ranges.iter())
+                .all(|(left_range, right_range)| {
+                    let Ok(left_range) = left_range.resolve() else {
+                        return false;
+                    };
+                    let Ok(right_range) = right_range.resolve() else {
+                        return false;
+                    };
+                    UITextRange::from(left_range)
+                        .compare(&UITextRange::from(right_range))
+                        .unwrap_or(false)
+                })
+        }
+        _ => false,
     }
-    left.ranges
-        .iter()
-        .zip(right.ranges.iter())
-        .all(|(left_range, right_range)| {
-            let Ok(left_range) = left_range.resolve() else {
-                return false;
-            };
-            let Ok(right_range) = right_range.resolve() else {
-                return false;
-            };
-            UITextRange::from(left_range)
-                .compare(&UITextRange::from(right_range))
-                .unwrap_or(false)
-        })
 }
 
 #[cfg(windows)]
 fn read_prepared_selection(prepared: &PreparedSelection) -> Option<SelectionCandidate> {
-    use uiautomation::patterns::UITextRange;
-    let mut text = String::new();
-    for agile_range in &prepared.ranges {
-        let range = UITextRange::from(agile_range.resolve().ok()?);
-        text.push_str(&range.get_text(-1).ok()?);
-    }
-    if text.trim().is_empty() {
+    let source_text = match &prepared.source {
+        PreparedSelectionSource::Clipboard(text) => text.clone(),
+        PreparedSelectionSource::UiAutomation(ranges) => {
+            use uiautomation::patterns::UITextRange;
+            let mut text = String::new();
+            for agile_range in ranges {
+                let range = UITextRange::from(agile_range.resolve().ok()?);
+                text.push_str(&range.get_text(-1).ok()?);
+            }
+            text
+        }
+    };
+    if source_text.trim().is_empty() {
         return None;
     }
     Some(SelectionCandidate {
         trigger_id: prepared.trigger_id.clone(),
-        source_text: text,
+        source_text,
         anchor: prepared.anchor.clone(),
         trigger: prepared.trigger,
     })
+}
+
+#[cfg(windows)]
+fn key_is_down(key: i32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+    unsafe { GetAsyncKeyState(key) < 0 }
+}
+
+#[cfg(windows)]
+fn cursor_position() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point).ok()? };
+    Some((point.x, point.y))
+}
+
+#[cfg(windows)]
+fn process_id_at_point(x: i32, y: i32) -> Option<u32> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, WindowFromPoint};
+
+    let window = unsafe { WindowFromPoint(POINT { x, y }) };
+    if window.0.is_null() {
+        return None;
+    }
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    (thread_id != 0 && process_id != 0).then_some(process_id)
+}
+
+#[cfg(windows)]
+fn wait_for_shortcut_release() -> Result<(), SelectionCaptureFailure> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let modifiers = [
+        VK_CONTROL.0 as i32,
+        VK_SHIFT.0 as i32,
+        VK_MENU.0 as i32,
+        VK_LWIN.0 as i32,
+        VK_RWIN.0 as i32,
+    ];
+    let deadline = Instant::now() + SHORTCUT_RELEASE_TIMEOUT;
+    while modifiers.iter().any(|key| key_is_down(*key)) {
+        if Instant::now() >= deadline {
+            return Err(SelectionCaptureFailure::new(
+                "shortcut_release_timeout",
+                "等待快捷键释放超时，未读取剪贴板选区",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clipboard_has_unsafe_formats(
+    clipboard: &uiautomation::clipboards::Clipboard,
+) -> Result<(), SelectionCaptureFailure> {
+    use windows::Win32::System::DataExchange::EnumClipboardFormats;
+
+    let mut format = 0;
+    loop {
+        let next = unsafe { EnumClipboardFormats(format) };
+        if next == 0 {
+            break;
+        }
+        if matches!(
+            next,
+            2 | 3 | 9 | 10 | 14 | 15 | 128 | 129 | 130 | 131 | 142
+                | 512..=767
+                | 768..=1023
+        ) {
+            return Err(SelectionCaptureFailure::new(
+                "clipboard_format_unsafe",
+                "当前剪贴板包含无法安全恢复的格式",
+            ));
+        }
+        format = next;
+    }
+    let _ = clipboard;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn capture_clipboard_selection() -> Result<String, SelectionCaptureFailure> {
+    use uiautomation::clipboards::Clipboard;
+    use uiautomation::inputs::Keyboard;
+
+    let snapshot = {
+        let clipboard = Clipboard::open().map_err(|error| {
+            SelectionCaptureFailure::new(
+                "clipboard_open_failed",
+                format!("无法打开系统剪贴板：{error}"),
+            )
+        })?;
+        clipboard_has_unsafe_formats(&clipboard)?;
+        clipboard.snapshot().map_err(|error| {
+            SelectionCaptureFailure::new(
+                "clipboard_snapshot_failed",
+                format!("无法安全保存系统剪贴板：{error}"),
+            )
+        })?
+    };
+    let sentinel = format!("__lilt_selection_sentinel_{}__", Uuid::new_v4());
+    let capture_result = (|| {
+        {
+            let clipboard = Clipboard::open().map_err(|error| {
+                SelectionCaptureFailure::new(
+                    "clipboard_open_failed",
+                    format!("无法准备系统剪贴板：{error}"),
+                )
+            })?;
+            clipboard.set_text(&sentinel).map_err(|error| {
+                SelectionCaptureFailure::new(
+                    "clipboard_write_failed",
+                    format!("无法准备剪贴板选区读取：{error}"),
+                )
+            })?;
+        }
+        Keyboard::new()
+            .interval(0)
+            .send_keys("{ctrl}(c)")
+            .map_err(|error| {
+                SelectionCaptureFailure::new(
+                    "clipboard_copy_failed",
+                    format!("无法请求目标应用复制选区：{error}"),
+                )
+            })?;
+        let deadline = Instant::now() + CLIPBOARD_CAPTURE_TIMEOUT;
+        loop {
+            if let Ok(clipboard) = Clipboard::open() {
+                if let Ok(text) = clipboard.get_text() {
+                    if text != sentinel && !text.trim().is_empty() {
+                        return Ok(text);
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(CLIPBOARD_POLL_INTERVAL);
+        }
+        Err(SelectionCaptureFailure::new(
+            "no_selection",
+            "当前没有可读取的文本选区",
+        ))
+    })();
+    let restore_result = Clipboard::open()
+        .map_err(|error| format!("无法重新打开系统剪贴板：{error}"))
+        .and_then(|clipboard| {
+            clipboard
+                .restore(snapshot)
+                .map_err(|error| format!("无法恢复系统剪贴板：{error}"))
+        });
+    match restore_result {
+        Ok(()) => capture_result,
+        Err(message) => Err(SelectionCaptureFailure::new(
+            "clipboard_restore_failed",
+            message,
+        )),
+    }
 }
 
 #[cfg(test)]
