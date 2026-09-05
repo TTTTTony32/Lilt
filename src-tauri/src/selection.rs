@@ -113,15 +113,13 @@ enum PreparedSelectionSource {
 
 #[cfg(windows)]
 struct MouseSelectionOperation {
-    process_id: u32,
-    x: i32,
-    y: i32,
+    process_id: Option<u32>,
 }
 
 #[cfg(windows)]
 struct MouseSelectionRelease {
-    process_id: u32,
-    anchor: SelectionAnchor,
+    process_id: Option<u32>,
+    anchor: Option<SelectionAnchor>,
     generation: u64,
     deadline: Instant,
 }
@@ -642,6 +640,27 @@ impl SelectionService {
         code: &str,
         message: &str,
     ) {
+        self.publish_unavailable_with_options(trigger_id, trigger, code, message, false);
+    }
+
+    fn publish_activation_unavailable(
+        &self,
+        trigger_id: &str,
+        trigger: SelectionTrigger,
+        code: &str,
+        message: &str,
+    ) {
+        self.publish_unavailable_with_options(trigger_id, trigger, code, message, true);
+    }
+
+    fn publish_unavailable_with_options(
+        &self,
+        trigger_id: &str,
+        trigger: SelectionTrigger,
+        code: &str,
+        message: &str,
+        preserve_trigger: bool,
+    ) {
         let notice = SelectionUnavailable {
             request_id: None,
             trigger_id: trigger_id.to_string(),
@@ -672,7 +691,9 @@ impl SelectionService {
             if !owns_trigger && inner.window_ready {
                 return;
             }
-            inner.current_trigger = None;
+            if !preserve_trigger {
+                inner.current_trigger = None;
+            }
             inner.pending_event = if inner.window_ready {
                 None
             } else {
@@ -736,6 +757,30 @@ impl SelectionService {
             .as_ref()
             .map(|notice| notice.trigger_id == trigger_id)
             .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    fn has_current_automatic_trigger(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .current_trigger
+                    .as_ref()
+                    .map(|notice| notice.trigger == SelectionTrigger::Automatic)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    fn current_trigger_anchor(&self, trigger_id: &str) -> Option<SelectionAnchor> {
+        self.inner
+            .lock()
+            .ok()?
+            .current_trigger
+            .as_ref()
+            .and_then(|notice| (notice.trigger_id == trigger_id).then(|| notice.anchor.clone()))?
     }
 
     fn publish_trigger(
@@ -913,12 +958,12 @@ impl SelectionService {
     }
 
     fn show_trigger(&self, anchor: Option<&SelectionAnchor>) {
-        self.show_at(anchor, 48.0, 48.0, false);
+        self.show_at(anchor, 48.0, 48.0, false, true);
     }
 
     fn show_window(&self, anchor: Option<&SelectionAnchor>) {
         let (width, height) = self.window_size();
-        self.show_at(anchor, width as f64, height as f64, true);
+        self.show_at(anchor, width as f64, height as f64, true, false);
     }
 
     fn show_at(
@@ -927,6 +972,7 @@ impl SelectionService {
         desired_width: f64,
         desired_height: f64,
         resizable: bool,
+        trigger: bool,
     ) {
         let Some(app) = self.app_handle() else { return };
         let Some(window) = app.get_webview_window("selection") else {
@@ -949,29 +995,100 @@ impl SelectionService {
                 desired_height.max(1.0) as u32,
             )
         });
-        let desired = anchor.map(|value| (value.x, value.y + value.height + 8));
-        let monitor = desired
+        let monitor_point = anchor.map(|value| {
+            if trigger {
+                (value.x, value.y)
+            } else {
+                (
+                    value.x,
+                    value.y.saturating_add(value.height).saturating_add(8),
+                )
+            }
+        });
+        let monitor = monitor_point
             .and_then(|(x, y)| window.monitor_from_point(x as f64, y as f64).ok().flatten())
             .or_else(|| window.current_monitor().ok().flatten())
             .or_else(|| window.primary_monitor().ok().flatten());
         if let Some(monitor) = monitor {
             let work_area = monitor.work_area();
-            let min_x = work_area.position.x;
-            let min_y = work_area.position.y;
-            let max_x = min_x + work_area.size.width as i32 - size.width as i32;
-            let max_y = min_y + work_area.size.height as i32 - size.height as i32;
-            let (desired_x, desired_y) = desired.unwrap_or((
-                min_x + (work_area.size.width as i32 - size.width as i32).max(0) / 2,
-                min_y + (work_area.size.height as i32 - size.height as i32).max(0) / 3,
-            ));
-            let position = tauri::PhysicalPosition::new(
-                desired_x.clamp(min_x, max_x.max(min_x)),
-                desired_y.clamp(min_y, max_y.max(min_y)),
+            let work_area = WindowWorkArea {
+                x: work_area.position.x,
+                y: work_area.position.y,
+                width: work_area.size.width.min(i32::MAX as u32) as i32,
+                height: work_area.size.height.min(i32::MAX as u32) as i32,
+            };
+            let (desired_x, desired_y) = selection_window_position(
+                anchor,
+                (
+                    size.width.min(i32::MAX as u32) as i32,
+                    size.height.min(i32::MAX as u32) as i32,
+                ),
+                work_area,
+                trigger,
             );
+            let position = tauri::PhysicalPosition::new(desired_x, desired_y);
             let _ = window.set_position(position);
         }
         let _ = window.show();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowWorkArea {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn selection_window_position(
+    anchor: Option<&SelectionAnchor>,
+    window_size: (i32, i32),
+    work_area: WindowWorkArea,
+    trigger: bool,
+) -> (i32, i32) {
+    let window_width = i64::from(window_size.0.max(1));
+    let window_height = i64::from(window_size.1.max(1));
+    let work_x = i64::from(work_area.x);
+    let work_y = i64::from(work_area.y);
+    let work_width = i64::from(work_area.width.max(0));
+    let work_height = i64::from(work_area.height.max(0));
+    let max_x = work_x + (work_width - window_width).max(0);
+    let max_y = work_y + (work_height - window_height).max(0);
+    let work_right = work_x + work_width;
+
+    let (desired_x, desired_y) = match anchor {
+        Some(anchor) if trigger => {
+            let anchor_x = i64::from(anchor.x);
+            let anchor_y = i64::from(anchor.y);
+            let anchor_width = i64::from(anchor.width.max(0));
+            let anchor_height = i64::from(anchor.height.max(0));
+            let right_x = anchor_x + anchor_width + 8;
+            let aligned_y = anchor_y + (anchor_height - window_height).max(0) / 2;
+            if right_x + window_width <= work_right {
+                (right_x, aligned_y)
+            } else {
+                (anchor_x, anchor_y + anchor_height + 8)
+            }
+        }
+        Some(anchor) => (
+            i64::from(anchor.x),
+            i64::from(anchor.y) + i64::from(anchor.height) + 8,
+        ),
+        None => (
+            work_x + (work_width - window_width).max(0) / 2,
+            work_y + (work_height - window_height).max(0) / 3,
+        ),
+    };
+
+    (
+        desired_x
+            .clamp(work_x, max_x)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        desired_y
+            .clamp(work_y, max_y)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+    )
 }
 
 fn recently_resized(last_resized_at: Option<Instant>) -> bool {
@@ -1076,27 +1193,22 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 left_button_down = true;
                 pending_mouse_release = None;
                 mouse_operation = cursor_position().and_then(|(x, y)| {
-                    let process_id = process_id_at_point(x, y)?;
-                    if process_id == std::process::id() {
+                    let process_id = process_id_at_point(x, y);
+                    if process_id == Some(std::process::id()) {
                         return None;
                     }
                     service.invalidate_for_new_selection();
                     prepared = None;
                     pending_prepared = None;
-                    Some(MouseSelectionOperation { process_id, x, y })
+                    Some(MouseSelectionOperation { process_id })
                 });
             } else if !button_down && left_button_down {
                 left_button_down = false;
                 if let Some(operation) = mouse_operation.take() {
-                    if operation.process_id != std::process::id() {
+                    if operation.process_id != Some(std::process::id()) {
                         pending_mouse_release = Some(MouseSelectionRelease {
                             process_id: operation.process_id,
-                            anchor: SelectionAnchor {
-                                x: operation.x,
-                                y: operation.y,
-                                width: 0,
-                                height: 0,
-                            },
+                            anchor: cursor_position().map(point_selection_anchor),
                             generation: service.current_generation(),
                             deadline: now + MOUSE_RELEASE_DELAY,
                         });
@@ -1114,6 +1226,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                             SelectionTrigger::Automatic,
                             walker,
                             None,
+                            cursor_position().map(point_selection_anchor),
                         ) {
                             accept_automatic_prepared(
                                 &service,
@@ -1136,7 +1249,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
             if release.deadline > now {
                 pending_mouse_release = Some(release);
             } else if automatic
-                && release.process_id != std::process::id()
+                && release.process_id != Some(std::process::id())
                 && service.owns_generation(release.generation)
             {
                 let has_prepared = pending_prepared
@@ -1157,6 +1270,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                     SelectionTrigger::Automatic,
                                     walker,
                                     None,
+                                    release.anchor.clone(),
                                 )
                             })
                         },
@@ -1175,7 +1289,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                     trigger_id: Uuid::new_v4().to_string(),
                                     generation: release.generation,
                                     trigger: SelectionTrigger::Automatic,
-                                    anchor: Some(release.anchor),
+                                    anchor: release.anchor.clone(),
                                     source: PreparedSelectionSource::Clipboard(source_text),
                                 };
                                 accept_automatic_prepared(
@@ -1224,6 +1338,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                     SelectionTrigger::Automatic,
                                     &walker_for_event,
                                     None,
+                                    cursor_position().map(point_selection_anchor),
                                 ) {
                                     service_for_event.enqueue_prepared(value);
                                 }
@@ -1278,6 +1393,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                     SelectionTrigger::Shortcut,
                                     walker,
                                     Some(trigger_id.clone()),
+                                    cursor_position().map(point_selection_anchor),
                                 )
                                 .and_then(|prepared| read_prepared_selection(&prepared))
                             })
@@ -1337,37 +1453,70 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 accept_automatic_prepared(&service, value, &mut pending_prepared, &mut prepared);
             }
             Ok(WorkerCommand::ActivateTrigger { trigger_id }) => {
-                let matches_prepared = prepared
-                    .as_ref()
-                    .map(|value| value.trigger_id == trigger_id)
-                    .unwrap_or(false);
-                if matches_prepared && service.owns_current_trigger(&trigger_id) {
-                    if let Some(value) = prepared.take() {
-                        if let Some(candidate) = read_prepared_selection(&value) {
-                            if service.owns_current_trigger(&trigger_id)
-                                && service.publish_candidate(candidate)
-                            {
-                                diagnostics::info(format!(
-                                    "selection.trigger.read.completed trigger_id={trigger_id}"
-                                ));
-                            } else {
-                                diagnostics::info(format!(
-                                    "selection.trigger.read.discarded trigger_id={trigger_id}"
-                                ));
-                            }
-                        } else {
-                            service.emit_unavailable(
-                                &trigger_id,
-                                SelectionTrigger::Automatic,
-                                "selection_read_failed",
-                                "点击后无法读取当前选区",
-                            );
-                        }
-                    }
-                } else {
+                if !service.owns_current_trigger(&trigger_id) {
                     diagnostics::info(format!(
                         "selection.trigger.read.discarded trigger_id={trigger_id}"
                     ));
+                    continue;
+                }
+
+                let anchor = service.current_trigger_anchor(&trigger_id);
+                let mut candidate = prepared
+                    .as_ref()
+                    .filter(|value| value.trigger_id == trigger_id)
+                    .and_then(read_prepared_selection);
+                let mut failure = candidate.is_none().then(|| {
+                    SelectionCaptureFailure::new("selection_read_failed", "点击后无法读取当前选区")
+                });
+
+                if candidate.is_none() && service.owns_current_trigger(&trigger_id) {
+                    match capture_clipboard_selection() {
+                        Ok(source_text) => {
+                            candidate = Some(SelectionCandidate {
+                                trigger_id: trigger_id.clone(),
+                                source_text,
+                                anchor,
+                                trigger: SelectionTrigger::Automatic,
+                            });
+                            failure = None;
+                        }
+                        Err(error) => failure = Some(error),
+                    }
+                }
+
+                if let Some(candidate) = candidate {
+                    if service.owns_current_trigger(&trigger_id)
+                        && service.publish_candidate(candidate)
+                    {
+                        prepared = None;
+                        diagnostics::info(format!(
+                            "selection.trigger.read.completed trigger_id={trigger_id}"
+                        ));
+                    } else if service.owns_current_trigger(&trigger_id) {
+                        service.publish_activation_unavailable(
+                            &trigger_id,
+                            SelectionTrigger::Automatic,
+                            "selection_read_failed",
+                            "点击后无法归属当前选区读取结果",
+                        );
+                    } else {
+                        diagnostics::info(format!(
+                            "selection.trigger.read.discarded trigger_id={trigger_id}"
+                        ));
+                    }
+                } else if service.owns_current_trigger(&trigger_id) {
+                    let error = failure.unwrap_or_else(|| {
+                        SelectionCaptureFailure::new(
+                            "selection_read_failed",
+                            "点击后无法读取当前选区",
+                        )
+                    });
+                    service.publish_activation_unavailable(
+                        &trigger_id,
+                        SelectionTrigger::Automatic,
+                        error.code,
+                        &error.message,
+                    );
                 }
             }
             Ok(WorkerCommand::ClearPending) => {
@@ -1402,6 +1551,9 @@ fn accept_automatic_prepared(
     if !service.owns_generation(value.generation) {
         return;
     }
+    if service.has_current_automatic_trigger() {
+        return;
+    }
     let duplicate = pending_prepared
         .as_ref()
         .map(|(current, _)| same_prepared_selection(current, &value))
@@ -1426,6 +1578,7 @@ fn prepare_element(
     trigger: SelectionTrigger,
     walker: &uiautomation::UITreeWalker,
     trigger_id: Option<String>,
+    fallback_anchor: Option<SelectionAnchor>,
 ) -> Option<PreparedSelection> {
     use uiautomation::patterns::UITextPattern;
     use uiautomation::types::TextPatternRangeEndpoint;
@@ -1452,18 +1605,24 @@ fn prepare_element(
                     })
                     .collect::<Vec<_>>();
                 if !ranges.is_empty() {
-                    let anchor = ranges.first().and_then(|range| {
-                        range
-                            .get_enclosing_element()
-                            .ok()
-                            .and_then(|value| value.get_bounding_rectangle().ok())
-                            .map(|rect| SelectionAnchor {
-                                x: rect.get_left(),
-                                y: rect.get_top(),
-                                width: rect.get_width(),
-                                height: rect.get_height(),
+                    let anchor = selection_anchor_from_text_ranges(&ranges)
+                        .or(fallback_anchor)
+                        .or_else(|| {
+                            ranges.first().and_then(|range| {
+                                range
+                                    .get_enclosing_element()
+                                    .ok()
+                                    .and_then(|value| value.get_bounding_rectangle().ok())
+                                    .and_then(|rect| {
+                                        selection_anchor_from_bounding_rectangles(&[
+                                            rect.get_left() as f64,
+                                            rect.get_top() as f64,
+                                            rect.get_width() as f64,
+                                            rect.get_height() as f64,
+                                        ])
+                                    })
                             })
-                    });
+                        });
                     let mut agile_ranges = Vec::with_capacity(ranges.len());
                     for range in ranges {
                         let value = windows::core::AgileReference::new(range.as_ref()).ok()?;
@@ -1482,6 +1641,120 @@ fn prepare_element(
         current = walker.get_parent(&current).ok()?;
     }
     None
+}
+
+#[cfg(windows)]
+fn point_selection_anchor((x, y): (i32, i32)) -> SelectionAnchor {
+    SelectionAnchor {
+        x,
+        y,
+        width: 0,
+        height: 0,
+    }
+}
+
+#[cfg(windows)]
+fn selection_anchor_from_text_ranges(
+    ranges: &[uiautomation::patterns::UITextRange],
+) -> Option<SelectionAnchor> {
+    use windows::Win32::System::Ole::SafeArrayDestroy;
+
+    let mut rectangles = Vec::new();
+    for range in ranges {
+        let Ok(array) = (unsafe { range.as_ref().GetBoundingRectangles() }) else {
+            continue;
+        };
+        if array.is_null() {
+            continue;
+        }
+        if let Some(values) = safe_array_f64_values(array) {
+            rectangles.extend(values);
+        }
+        unsafe {
+            let _ = SafeArrayDestroy(array);
+        }
+    }
+    selection_anchor_from_bounding_rectangles(&rectangles)
+}
+
+#[cfg(windows)]
+fn safe_array_f64_values(array: *const windows::Win32::System::Com::SAFEARRAY) -> Option<Vec<f64>> {
+    use std::{ffi::c_void, ptr::null_mut, slice};
+    use windows::Win32::System::Ole::{
+        SafeArrayAccessData, SafeArrayGetDim, SafeArrayGetLBound, SafeArrayGetUBound,
+        SafeArrayUnaccessData,
+    };
+
+    unsafe {
+        if array.is_null() || SafeArrayGetDim(array) != 1 {
+            return None;
+        }
+        let lower = SafeArrayGetLBound(array, 1).ok()?;
+        let upper = SafeArrayGetUBound(array, 1).ok()?;
+        let count = i64::from(upper) - i64::from(lower) + 1;
+        if count <= 0 || count > 4096 || count % 4 != 0 {
+            return None;
+        }
+
+        let mut data: *mut c_void = null_mut();
+        SafeArrayAccessData(array, &mut data).ok()?;
+        let values = slice::from_raw_parts(data.cast::<f64>(), count as usize).to_vec();
+        let _ = SafeArrayUnaccessData(array);
+        Some(values)
+    }
+}
+
+#[cfg(windows)]
+fn selection_anchor_from_bounding_rectangles(values: &[f64]) -> Option<SelectionAnchor> {
+    let mut bounds: Option<(f64, f64, f64, f64)> = None;
+    for rectangle in values.chunks_exact(4) {
+        let [left, top, width, height] = rectangle else {
+            continue;
+        };
+        if !left.is_finite()
+            || !top.is_finite()
+            || !width.is_finite()
+            || !height.is_finite()
+            || *width <= 0.0
+            || *height <= 0.0
+        {
+            continue;
+        }
+        let right = *left + *width;
+        let bottom = *top + *height;
+        if !right.is_finite() || !bottom.is_finite() {
+            continue;
+        }
+        bounds = Some(match bounds {
+            Some((min_left, min_top, max_right, max_bottom)) => (
+                min_left.min(*left),
+                min_top.min(*top),
+                max_right.max(right),
+                max_bottom.max(bottom),
+            ),
+            None => (*left, *top, right, bottom),
+        });
+    }
+
+    let (left, top, right, bottom) = bounds?;
+    let x = finite_i32(left)?;
+    let y = finite_i32(top)?;
+    let right = finite_i32(right)?;
+    let bottom = finite_i32(bottom)?;
+    let width = right.checked_sub(x)?;
+    let height = bottom.checked_sub(y)?;
+    (width > 0 && height > 0).then_some(SelectionAnchor {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+#[cfg(windows)]
+fn finite_i32(value: f64) -> Option<i32> {
+    (value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
+        .then_some(value.round() as i32)
 }
 
 #[cfg(windows)]
@@ -1712,7 +1985,12 @@ fn capture_clipboard_selection() -> Result<String, SelectionCaptureFailure> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SelectionService, normalize_shortcut, recently_resized};
+    #[cfg(windows)]
+    use super::selection_anchor_from_bounding_rectangles;
+    use super::{
+        SelectionAnchor, SelectionService, WindowWorkArea, normalize_shortcut, recently_resized,
+        selection_window_position,
+    };
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
@@ -1746,5 +2024,91 @@ mod tests {
     fn normalize_shortcut_accepts_common_modifier_aliases() {
         assert_eq!(normalize_shortcut(" ctrl + shift + l "), "Control+Shift+l");
         assert_eq!(normalize_shortcut("cmd+alt+k"), "Super+Alt+k");
+    }
+
+    #[test]
+    fn trigger_window_prefers_the_right_edge_of_the_selection() {
+        let anchor = SelectionAnchor {
+            x: 100,
+            y: 200,
+            width: 80,
+            height: 24,
+        };
+        let position = selection_window_position(
+            Some(&anchor),
+            (48, 48),
+            WindowWorkArea {
+                x: 0,
+                y: 0,
+                width: 1200,
+                height: 800,
+            },
+            true,
+        );
+        assert_eq!(position, (188, 200));
+    }
+
+    #[test]
+    fn trigger_window_falls_below_and_stays_inside_work_area() {
+        let anchor = SelectionAnchor {
+            x: 1160,
+            y: 740,
+            width: 30,
+            height: 20,
+        };
+        let position = selection_window_position(
+            Some(&anchor),
+            (48, 48),
+            WindowWorkArea {
+                x: 0,
+                y: 0,
+                width: 1200,
+                height: 800,
+            },
+            true,
+        );
+        assert_eq!(position, (1152, 752));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selection_anchor_covers_all_visible_text_rectangles() {
+        let anchor = selection_anchor_from_bounding_rectangles(&[
+            10.0,
+            20.0,
+            40.0,
+            12.0,
+            10.0,
+            40.0,
+            30.0,
+            12.0,
+            f64::NAN,
+            0.0,
+            20.0,
+            20.0,
+        ]);
+
+        assert_eq!(
+            anchor,
+            Some(SelectionAnchor {
+                x: 10,
+                y: 20,
+                width: 40,
+                height: 32,
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selection_anchor_rejects_invalid_rectangles() {
+        assert_eq!(
+            selection_anchor_from_bounding_rectangles(&[0.0, 0.0, 0.0, 10.0]),
+            None
+        );
+        assert_eq!(
+            selection_anchor_from_bounding_rectangles(&[0.0, 0.0, f64::INFINITY, 10.0]),
+            None
+        );
     }
 }
