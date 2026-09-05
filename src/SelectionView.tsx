@@ -81,11 +81,13 @@ export default function SelectionView() {
   useEffect(() => {
     if (!triggerNotice || selection) return;
     const window = getCurrentWindow();
-    const size = triggerNotice.trigger === "automatic" && triggerStatus === "failed"
-      ? new PhysicalSize(280, 80)
-      : triggerNotice.trigger === "automatic" && triggerStatus === "available"
-        ? new PhysicalSize(48, 48)
-        : null;
+    const size = triggerNotice.trigger !== "automatic"
+      ? null
+      : triggerStatus === "reading"
+        ? new PhysicalSize(280, 72)
+        : triggerStatus === "failed"
+          ? new PhysicalSize(320, 80)
+          : new PhysicalSize(48, 48);
     if (!size) return;
     void window.setSize(size).catch(() => undefined);
   }, [triggerNotice, triggerStatus, selection]);
@@ -426,7 +428,8 @@ export default function SelectionView() {
 
   const activateTrigger = useCallback(async () => {
     const notice = triggerNotice;
-    if (!notice || notice.trigger !== "automatic" || triggerStatus !== "available") return;
+    if (!notice || notice.trigger !== "automatic" || triggerStatus === "reading") return;
+    if (triggerStatus !== "available" && triggerStatus !== "failed") return;
     activeTriggerId.current = notice.triggerId;
     setTriggerStatus("reading");
     setTriggerError(null);
@@ -578,16 +581,17 @@ export default function SelectionView() {
   const isBusy = dictionaryLoading || translationStatus === "loading" || translationStatus === "streaming" || translationStatus === "cancelling" || wordExample.status === "streaming";
   const resultText = route === "paragraph" ? translation : wordExample.translation;
 
-  if (triggerNotice?.trigger === "automatic" && !selection && triggerStatus !== "hidden" && triggerStatus !== "reading") {
+  if (triggerNotice?.trigger === "automatic" && !selection && triggerStatus !== "hidden") {
     return (
-      <main className="selection-trigger-window" role="dialog" aria-label="Lilt 划词操作">
+      <main className={`selection-trigger-window${triggerStatus === "reading" ? " is-reading" : ""}`} role="dialog" aria-label="Lilt 划词操作">
         <button
           className="selection-trigger-button"
           type="button"
-          aria-label="读取选中文本"
-          disabled={triggerStatus !== "available"}
+          aria-label={triggerStatus === "failed" ? "重试读取选中文本" : "读取选中文本"}
+          disabled={triggerStatus === "reading"}
           onClick={() => void activateTrigger()}
-        ><img src={liltLogo} alt="" /></button>
+        >{triggerStatus === "reading" ? <LoaderCircle className="spin" size={22} /> : <img src={liltLogo} alt="" />}</button>
+        {triggerStatus === "reading" && <span className="selection-trigger-reading">正在读取选中文本……</span>}
         {triggerStatus === "failed" && triggerError && <span className="selection-trigger-error">{triggerError}</span>}
       </main>
     );
