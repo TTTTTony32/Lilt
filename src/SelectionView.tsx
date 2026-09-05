@@ -73,7 +73,6 @@ export default function SelectionView() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const activeTriggerId = useRef<string | null>(null);
-  const activatingTriggerId = useRef<string | null>(null);
   const activeSelectionId = useRef<string | null>(null);
   const activeTranslationId = useRef<string | null>(null);
   const activeWordExampleId = useRef<string | null>(null);
@@ -148,7 +147,6 @@ export default function SelectionView() {
   }, []);
 
   const cancelCurrent = useCallback(() => {
-    activatingTriggerId.current = null;
     const translationId = activeTranslationId.current;
     const wordExampleId = activeWordExampleId.current;
     activeTranslationId.current = null;
@@ -372,7 +370,6 @@ export default function SelectionView() {
 
   const handleNotice = useCallback(async (notice: SelectionNotice) => {
     if (activeTriggerId.current !== notice.triggerId) return;
-    activatingTriggerId.current = null;
     cancelCurrent();
     if (activeTriggerId.current !== notice.triggerId) return;
     activeSelectionId.current = notice.requestId;
@@ -410,7 +407,6 @@ export default function SelectionView() {
 
   const handleTrigger = useCallback((notice: SelectionTriggerNotice) => {
     if (activeTriggerId.current === notice.triggerId) return;
-    activatingTriggerId.current = null;
     cancelCurrent();
     activeTriggerId.current = notice.triggerId;
     activeSelectionId.current = null;
@@ -430,13 +426,7 @@ export default function SelectionView() {
 
   const activateTrigger = useCallback(async () => {
     const notice = triggerNotice;
-    if (
-      !notice
-      || notice.trigger !== "automatic"
-      || (triggerStatus !== "available" && triggerStatus !== "failed")
-      || activatingTriggerId.current === notice.triggerId
-    ) return;
-    activatingTriggerId.current = notice.triggerId;
+    if (!notice || notice.trigger !== "automatic" || triggerStatus !== "available") return;
     activeTriggerId.current = notice.triggerId;
     setTriggerStatus("reading");
     setTriggerError(null);
@@ -444,7 +434,6 @@ export default function SelectionView() {
       await invokeCommand("activate_selection", { triggerId: notice.triggerId });
     } catch (reason) {
       if (activeTriggerId.current !== notice.triggerId) return;
-      activatingTriggerId.current = null;
       setTriggerStatus("failed");
       setTriggerError(describeError(reason, "无法读取选中文本"));
     }
@@ -484,7 +473,6 @@ export default function SelectionView() {
             }
             if (activeTriggerId.current) {
               if (value.triggerId !== activeTriggerId.current) return;
-              activatingTriggerId.current = null;
               setTriggerStatus("failed");
               setTriggerError(value.message);
               if (value.trigger === "shortcut") setError(value.message);
@@ -530,7 +518,6 @@ export default function SelectionView() {
         event.preventDefault();
         const requestId = activeSelectionId.current;
         activeTriggerId.current = null;
-        activatingTriggerId.current = null;
         activeSelectionId.current = null;
         cancelCurrent();
         setTriggerNotice(null);
@@ -550,7 +537,6 @@ export default function SelectionView() {
     const requestId = activeSelectionId.current;
     setTranslationStatus("cancelling");
     activeTriggerId.current = null;
-    activatingTriggerId.current = null;
     activeSelectionId.current = null;
     setTriggerNotice(null);
     setTriggerStatus("hidden");
@@ -581,7 +567,6 @@ export default function SelectionView() {
   const closeSelection = () => {
     const requestId = activeSelectionId.current;
     activeTriggerId.current = null;
-    activatingTriggerId.current = null;
     activeSelectionId.current = null;
     cancelCurrent();
     setTriggerNotice(null);
@@ -600,6 +585,7 @@ export default function SelectionView() {
           className="selection-trigger-button"
           type="button"
           aria-label="读取选中文本"
+          disabled={triggerStatus !== "available"}
           onClick={() => void activateTrigger()}
         ><img src={liltLogo} alt="" /></button>
         {triggerStatus === "failed" && triggerError && <span className="selection-trigger-error">{triggerError}</span>}
