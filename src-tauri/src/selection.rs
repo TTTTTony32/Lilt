@@ -155,6 +155,15 @@ struct SelectionSourceContext {
 }
 
 #[cfg(windows)]
+struct PrepareElementRequest {
+    trigger: SelectionTrigger,
+    trigger_id: Option<String>,
+    fallback_anchor: Option<SelectionAnchor>,
+    source_context: Option<SelectionSourceContext>,
+    allow_clipboard_fallback: bool,
+}
+
+#[cfg(windows)]
 struct MouseSelectionOperation {
     context: SelectionSourceContext,
 }
@@ -1438,12 +1447,14 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                     prepare_element(
                                         &service,
                                         &element,
-                                        SelectionTrigger::Automatic,
                                         walker,
-                                        None,
-                                        Some(anchor.clone()),
-                                        Some(context),
-                                        true,
+                                        PrepareElementRequest {
+                                            trigger: SelectionTrigger::Automatic,
+                                            trigger_id: None,
+                                            fallback_anchor: Some(anchor.clone()),
+                                            source_context: Some(context),
+                                            allow_clipboard_fallback: true,
+                                        },
                                     )
                                 })
                         });
@@ -1488,12 +1499,14 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                 prepare_element(
                                     &service,
                                     &element,
-                                    SelectionTrigger::Automatic,
                                     walker,
-                                    None,
-                                    Some(anchor.clone()),
-                                    Some(context),
-                                    false,
+                                    PrepareElementRequest {
+                                        trigger: SelectionTrigger::Automatic,
+                                        trigger_id: None,
+                                        fallback_anchor: Some(anchor.clone()),
+                                        source_context: Some(context),
+                                        allow_clipboard_fallback: false,
+                                    },
                                 )
                             })
                         });
@@ -1581,12 +1594,14 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                                 if let Some(value) = prepare_element(
                                     &service_for_event,
                                     sender,
-                                    SelectionTrigger::Automatic,
                                     &walker_for_event,
-                                    None,
-                                    Some(anchor),
-                                    Some(context),
-                                    false,
+                                    PrepareElementRequest {
+                                        trigger: SelectionTrigger::Automatic,
+                                        trigger_id: None,
+                                        fallback_anchor: Some(anchor),
+                                        source_context: Some(context),
+                                        allow_clipboard_fallback: false,
+                                    },
                                 ) {
                                     service_for_event.enqueue_prepared(value);
                                 }
@@ -1649,12 +1664,14 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                         prepare_element(
                             &service,
                             element,
-                            SelectionTrigger::Shortcut,
                             walker,
-                            Some(trigger_id.clone()),
-                            anchor.clone(),
-                            source_context,
-                            false,
+                            PrepareElementRequest {
+                                trigger: SelectionTrigger::Shortcut,
+                                trigger_id: Some(trigger_id.clone()),
+                                fallback_anchor: anchor.clone(),
+                                source_context,
+                                allow_clipboard_fallback: false,
+                            },
                         )
                     })
                 });
@@ -1797,16 +1814,19 @@ fn accept_automatic_prepared(
 fn prepare_element(
     service: &SelectionService,
     element: &uiautomation::UIElement,
-    trigger: SelectionTrigger,
     walker: &uiautomation::UITreeWalker,
-    trigger_id: Option<String>,
-    fallback_anchor: Option<SelectionAnchor>,
-    source_context: Option<SelectionSourceContext>,
-    allow_clipboard_fallback: bool,
+    request: PrepareElementRequest,
 ) -> Option<PreparedSelection> {
     use uiautomation::patterns::{UITextEditPattern, UITextPattern};
     use uiautomation::types::TextPatternRangeEndpoint;
 
+    let PrepareElementRequest {
+        trigger,
+        trigger_id,
+        fallback_anchor,
+        source_context,
+        allow_clipboard_fallback,
+    } = request;
     let trigger_id = trigger_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let mut current = element.clone();
     let mut text_capable = false;
