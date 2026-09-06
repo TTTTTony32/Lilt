@@ -96,6 +96,31 @@ struct SelectionCandidate {
     trigger: SelectionTrigger,
 }
 
+const CLIPBOARD_SOURCE_PROCESS_WHITELIST: &[&str] = &["zotero.exe"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceComparison {
+    Exact,
+    PartialOverlap,
+    NoOverlap,
+    ClipboardUnavailable,
+    UiAutomationUnavailable,
+    BothUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceChoice {
+    UiAutomation,
+    Clipboard,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceReconciliation {
+    comparison: SourceComparison,
+    choice: SourceChoice,
+}
+
 #[cfg(windows)]
 type AgileTextRange =
     windows::core::AgileReference<windows::Win32::UI::Accessibility::IUIAutomationTextRange>;
@@ -1138,6 +1163,94 @@ fn trigger_position(
     )
 }
 
+fn normalize_source_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn longest_common_contiguous_valid_chars(left: &str, right: &str) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.is_empty() || right.is_empty() {
+        return 0;
+    }
+
+    let mut previous_lengths = vec![0usize; right.len() + 1];
+    let mut previous_valid = vec![false; right.len() + 1];
+    let mut longest = 0;
+    for left_char in left {
+        let mut current_lengths = vec![0usize; right.len() + 1];
+        let mut current_valid = vec![false; right.len() + 1];
+        for (index, right_char) in right.iter().enumerate() {
+            if left_char != *right_char {
+                continue;
+            }
+            let end = index + 1;
+            current_lengths[end] = previous_lengths[index] + 1;
+            current_valid[end] = previous_valid[index] || left_char.is_alphanumeric();
+            if current_valid[end] {
+                longest = longest.max(current_lengths[end]);
+            }
+        }
+        previous_lengths = current_lengths;
+        previous_valid = current_valid;
+    }
+    longest
+}
+
+fn is_clipboard_process_name_allowed(image_path: &str) -> bool {
+    let image_name = image_path.rsplit(['\\', '/']).next().unwrap_or_default();
+    CLIPBOARD_SOURCE_PROCESS_WHITELIST
+        .iter()
+        .any(|allowed| image_name.eq_ignore_ascii_case(allowed))
+}
+
+fn reconcile_source_texts(
+    uia_text: Option<&str>,
+    clipboard_text: Result<Option<&str>, ()>,
+) -> SourceReconciliation {
+    let uia_text = uia_text
+        .map(normalize_source_text)
+        .filter(|text| !text.is_empty());
+    let clipboard_text = clipboard_text
+        .ok()
+        .flatten()
+        .map(normalize_source_text)
+        .filter(|text| !text.is_empty());
+
+    match (uia_text.as_deref(), clipboard_text.as_deref()) {
+        (Some(uia_text), Some(clipboard_text)) if uia_text == clipboard_text => {
+            SourceReconciliation {
+                comparison: SourceComparison::Exact,
+                choice: SourceChoice::UiAutomation,
+            }
+        }
+        (Some(uia_text), Some(clipboard_text))
+            if longest_common_contiguous_valid_chars(uia_text, clipboard_text) > 0 =>
+        {
+            SourceReconciliation {
+                comparison: SourceComparison::PartialOverlap,
+                choice: SourceChoice::Clipboard,
+            }
+        }
+        (Some(_), Some(_)) => SourceReconciliation {
+            comparison: SourceComparison::NoOverlap,
+            choice: SourceChoice::UiAutomation,
+        },
+        (Some(_), None) => SourceReconciliation {
+            comparison: SourceComparison::ClipboardUnavailable,
+            choice: SourceChoice::UiAutomation,
+        },
+        (None, Some(_)) => SourceReconciliation {
+            comparison: SourceComparison::UiAutomationUnavailable,
+            choice: SourceChoice::Clipboard,
+        },
+        (None, None) => SourceReconciliation {
+            comparison: SourceComparison::BothUnavailable,
+            choice: SourceChoice::Unavailable,
+        },
+    }
+}
+
 fn normalize_shortcut(shortcut: &str) -> String {
     shortcut
         .split('+')
@@ -1527,7 +1640,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                         source_context_from_element(element, generation, anchor.as_ref())
                     })
                     .or_else(|| foreground_source_context(generation, anchor.as_ref()));
-                let uia_candidate = focused_element.as_ref().and_then(|element| {
+                let prepared = focused_element.as_ref().and_then(|element| {
                     walker.as_ref().and_then(|walker| {
                         prepare_element(
                             &service,
@@ -1539,65 +1652,30 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                             source_context,
                             false,
                         )
-                        .and_then(|prepared| read_prepared_selection(&prepared))
                     })
                 });
-                if let Some(candidate) = uia_candidate {
-                    if service.owns_generation(generation)
-                        && service.owns_current_trigger(&trigger_id)
+                let candidate_result = resolve_active_selection(
+                    trigger_id.clone(),
+                    SelectionTrigger::Shortcut,
+                    prepared
+                        .as_ref()
+                        .and_then(|value| value.anchor.clone())
+                        .or_else(|| anchor.clone()),
+                    prepared.as_ref().and_then(read_prepared_uia_text),
+                    prepared
+                        .as_ref()
+                        .and_then(|value| value.source_context)
+                        .or(source_context),
+                    true,
+                );
+                match candidate_result {
+                    Ok(candidate)
+                        if service.owns_generation(generation)
+                            && service.owns_current_trigger(&trigger_id) =>
                     {
                         let _ = service.publish_candidate(candidate);
-                        continue;
                     }
-                }
-
-                if let Err(error) = wait_for_shortcut_release() {
-                    service.emit_unavailable(
-                        &trigger_id,
-                        SelectionTrigger::Shortcut,
-                        error.code,
-                        &error.message,
-                    );
-                    continue;
-                }
-                if !service.owns_generation(generation)
-                    || !service.owns_current_trigger(&trigger_id)
-                {
-                    continue;
-                }
-                let Some(context) = source_context.or_else(|| {
-                    foreground_source_context(
-                        generation,
-                        cursor_position()
-                            .map(|(x, y)| SelectionAnchor {
-                                x,
-                                y,
-                                width: 0,
-                                height: 0,
-                            })
-                            .as_ref(),
-                    )
-                }) else {
-                    service.emit_unavailable(
-                        &trigger_id,
-                        SelectionTrigger::Shortcut,
-                        "source_window_unavailable",
-                        "无法确认当前选区所属的源窗口",
-                    );
-                    continue;
-                };
-                match capture_clipboard_selection(&context) {
-                    Ok(source_text) => {
-                        let candidate = SelectionCandidate {
-                            trigger_id,
-                            source_text,
-                            anchor: context_anchor(&context),
-                            trigger: SelectionTrigger::Shortcut,
-                        };
-                        if service.owns_current_trigger(&candidate.trigger_id) {
-                            let _ = service.publish_candidate(candidate);
-                        }
-                    }
+                    Ok(_) => {}
                     Err(error) => service.emit_unavailable(
                         &trigger_id,
                         SelectionTrigger::Shortcut,
@@ -1630,41 +1708,12 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                     ));
                     continue;
                 }
-                if let Some(candidate) = read_prepared_selection(&value) {
-                    prepared = None;
-                    if service.owns_current_trigger(&trigger_id)
-                        && service.publish_candidate(candidate)
-                    {
-                        diagnostics::info(format!(
-                            "selection.trigger.read.completed trigger_id={trigger_id}"
-                        ));
-                    } else {
-                        diagnostics::info(format!(
-                            "selection.trigger.read.discarded trigger_id={trigger_id}"
-                        ));
-                    }
-                    continue;
-                }
-
-                let capture_result = match value.source_context {
-                    Some(context) => capture_clipboard_selection(&context),
-                    None => Err(SelectionCaptureFailure::new(
-                        "source_window_unavailable",
-                        "无法确认当前选区所属的源窗口",
-                    )),
-                };
-                match capture_result {
-                    Ok(source_text)
+                match read_prepared_selection(&value, false) {
+                    Ok(candidate)
                         if service.owns_current_trigger(&trigger_id)
                             && service.owns_generation(value.generation) =>
                     {
                         prepared = None;
-                        let candidate = SelectionCandidate {
-                            trigger_id: trigger_id.clone(),
-                            source_text,
-                            anchor: value.anchor.clone(),
-                            trigger: SelectionTrigger::Automatic,
-                        };
                         if service.publish_candidate(candidate) {
                             diagnostics::info(format!(
                                 "selection.trigger.read.completed trigger_id={trigger_id}"
@@ -1829,7 +1878,10 @@ fn prepare_element(
     if trigger == SelectionTrigger::Automatic
         && allow_clipboard_fallback
         && text_capable
-        && source_context.is_some()
+        && source_context
+            .as_ref()
+            .map(clipboard_source_allowed)
+            .unwrap_or(false)
     {
         return Some(PreparedSelection {
             trigger_id,
@@ -1894,7 +1946,7 @@ fn same_prepared_selection(left: &PreparedSelection, right: &PreparedSelection) 
 }
 
 #[cfg(windows)]
-fn read_prepared_selection(prepared: &PreparedSelection) -> Option<SelectionCandidate> {
+fn read_prepared_uia_text(prepared: &PreparedSelection) -> Option<String> {
     let source_text = match &prepared.source {
         PreparedSelectionSource::ClipboardOnActivate => return None,
         PreparedSelectionSource::UiAutomation(ranges) => {
@@ -1907,15 +1959,84 @@ fn read_prepared_selection(prepared: &PreparedSelection) -> Option<SelectionCand
             text
         }
     };
-    if source_text.trim().is_empty() {
-        return None;
-    }
-    Some(SelectionCandidate {
-        trigger_id: prepared.trigger_id.clone(),
+    (!source_text.trim().is_empty()).then_some(source_text)
+}
+
+#[cfg(windows)]
+fn no_selection_failure() -> SelectionCaptureFailure {
+    SelectionCaptureFailure::new("no_selection", "当前没有可读取的文本选区")
+}
+
+#[cfg(windows)]
+fn resolve_active_selection(
+    trigger_id: String,
+    trigger: SelectionTrigger,
+    anchor: Option<SelectionAnchor>,
+    uia_text: Option<String>,
+    source_context: Option<SelectionSourceContext>,
+    wait_for_shortcut_release_before_clipboard: bool,
+) -> Result<SelectionCandidate, SelectionCaptureFailure> {
+    let make_candidate = |source_text| SelectionCandidate {
+        trigger_id: trigger_id.clone(),
         source_text,
-        anchor: prepared.anchor.clone(),
-        trigger: prepared.trigger,
-    })
+        anchor: anchor.clone(),
+        trigger,
+    };
+
+    let Some(context) = source_context else {
+        return uia_text
+            .map(make_candidate)
+            .ok_or_else(no_selection_failure);
+    };
+    if !clipboard_source_allowed(&context) {
+        return uia_text
+            .map(make_candidate)
+            .ok_or_else(no_selection_failure);
+    }
+
+    let clipboard_result = if wait_for_shortcut_release_before_clipboard {
+        wait_for_shortcut_release().and_then(|_| capture_clipboard_selection(&context))
+    } else {
+        capture_clipboard_selection(&context)
+    };
+    let clipboard_text = clipboard_result
+        .as_ref()
+        .map(|text| (!text.trim().is_empty()).then_some(text.as_str()))
+        .map_err(|_| ());
+    let reconciliation = reconcile_source_texts(uia_text.as_deref(), clipboard_text);
+    diagnostics::info(format!(
+        "selection.source.reconciled comparison={:?} choice={:?}",
+        reconciliation.comparison, reconciliation.choice
+    ));
+
+    match reconciliation.choice {
+        SourceChoice::UiAutomation => uia_text
+            .map(make_candidate)
+            .ok_or_else(no_selection_failure),
+        SourceChoice::Clipboard => match clipboard_result {
+            Ok(source_text) if !source_text.trim().is_empty() => Ok(make_candidate(source_text)),
+            Ok(_) => Err(no_selection_failure()),
+            Err(error) => Err(error),
+        },
+        SourceChoice::Unavailable => {
+            Err(clipboard_result.err().unwrap_or_else(no_selection_failure))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_prepared_selection(
+    prepared: &PreparedSelection,
+    wait_for_shortcut_release_before_clipboard: bool,
+) -> Result<SelectionCandidate, SelectionCaptureFailure> {
+    resolve_active_selection(
+        prepared.trigger_id.clone(),
+        prepared.trigger,
+        prepared.anchor.clone(),
+        read_prepared_uia_text(prepared),
+        prepared.source_context,
+        wait_for_shortcut_release_before_clipboard,
+    )
 }
 
 #[cfg(windows)]
@@ -2053,6 +2174,42 @@ fn process_id_from_root(root_window: isize) -> Option<u32> {
 }
 
 #[cfg(windows)]
+fn clipboard_source_allowed(context: &SelectionSourceContext) -> bool {
+    process_image_path(context.process_id)
+        .as_deref()
+        .map(is_clipboard_process_name_allowed)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_image_path(process_id: u32) -> Option<String> {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{
+            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        },
+    };
+
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
+    let mut buffer = vec![0u16; 32_768];
+    let mut length = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    result.ok()?;
+    let length = usize::try_from(length).ok()?;
+    String::from_utf16(buffer.get(..length)?).ok()
+}
+
+#[cfg(windows)]
 fn element_matches_source_context(
     element: &uiautomation::UIElement,
     context: &SelectionSourceContext,
@@ -2098,16 +2255,6 @@ fn is_real_drag(press_point: Option<(i32, i32)>, release_point: Option<(i32, i32
     let dx = (release_x as i64 - press_x as i64).abs();
     let dy = (release_y as i64 - press_y as i64).abs();
     dx.max(dy) >= MIN_AUTOMATIC_DRAG_DISTANCE as i64
-}
-
-#[cfg(windows)]
-fn context_anchor(context: &SelectionSourceContext) -> Option<SelectionAnchor> {
-    context.release_point.map(|(x, y)| SelectionAnchor {
-        x,
-        y,
-        width: 0,
-        height: 0,
-    })
 }
 
 #[cfg(windows)]
@@ -2300,7 +2447,9 @@ fn capture_clipboard_selection(
 #[cfg(test)]
 mod tests {
     use super::{
-        SelectionAnchor, SelectionService, is_real_drag, normalize_shortcut, recently_resized,
+        SelectionAnchor, SelectionService, SourceChoice, SourceComparison, SourceReconciliation,
+        is_clipboard_process_name_allowed, is_real_drag, longest_common_contiguous_valid_chars,
+        normalize_shortcut, normalize_source_text, recently_resized, reconcile_source_texts,
         trigger_position,
     };
     use std::{
@@ -2368,5 +2517,99 @@ mod tests {
         assert!(!is_real_drag(None, Some((4, 4))));
         assert!(!is_real_drag(Some((10, 10)), Some((13, 13))));
         assert!(is_real_drag(Some((10, 10)), Some((14, 10))));
+    }
+
+    #[test]
+    fn source_text_normalization_trims_and_collapses_unicode_whitespace() {
+        assert_eq!(
+            normalize_source_text("\u{2003}中文\t\n文本\u{00a0}"),
+            "中文 文本"
+        );
+        assert_eq!(normalize_source_text(" \t\n"), "");
+    }
+
+    #[test]
+    fn exact_source_match_keeps_the_uia_text() {
+        assert_eq!(
+            reconcile_source_texts(Some("  中文\t文本 "), Ok(Some("中文 文本")),),
+            SourceReconciliation {
+                comparison: SourceComparison::Exact,
+                choice: SourceChoice::UiAutomation,
+            }
+        );
+    }
+
+    #[test]
+    fn partial_contiguous_overlap_prefers_clipboard_text() {
+        assert_eq!(
+            reconcile_source_texts(Some("前置中文文本"), Ok(Some("中文文本后缀"))),
+            SourceReconciliation {
+                comparison: SourceComparison::PartialOverlap,
+                choice: SourceChoice::Clipboard,
+            }
+        );
+    }
+
+    #[test]
+    fn no_valid_overlap_keeps_uia_text() {
+        assert_eq!(
+            reconcile_source_texts(Some("中文文本"), Ok(Some("English words"))),
+            SourceReconciliation {
+                comparison: SourceComparison::NoOverlap,
+                choice: SourceChoice::UiAutomation,
+            }
+        );
+        assert_eq!(
+            reconcile_source_texts(Some("..."), Ok(Some("!?"))),
+            SourceReconciliation {
+                comparison: SourceComparison::NoOverlap,
+                choice: SourceChoice::UiAutomation,
+            }
+        );
+    }
+
+    #[test]
+    fn source_reconciliation_distinguishes_unavailable_inputs() {
+        assert_eq!(
+            reconcile_source_texts(Some("UIA"), Err(())),
+            SourceReconciliation {
+                comparison: SourceComparison::ClipboardUnavailable,
+                choice: SourceChoice::UiAutomation,
+            }
+        );
+        assert_eq!(
+            reconcile_source_texts(None, Ok(Some("clipboard"))),
+            SourceReconciliation {
+                comparison: SourceComparison::UiAutomationUnavailable,
+                choice: SourceChoice::Clipboard,
+            }
+        );
+        assert_eq!(
+            reconcile_source_texts(None, Err(())),
+            SourceReconciliation {
+                comparison: SourceComparison::BothUnavailable,
+                choice: SourceChoice::Unavailable,
+            }
+        );
+    }
+
+    #[test]
+    fn common_substring_counts_unicode_characters_not_utf8_bytes() {
+        assert_eq!(
+            longest_common_contiguous_valid_chars("前中文后", "另中文段"),
+            2
+        );
+    }
+
+    #[test]
+    fn clipboard_whitelist_matches_only_zotero_image_names() {
+        assert!(is_clipboard_process_name_allowed(
+            r"C:\\Program Files\\Zotero\\zotero.exe"
+        ));
+        assert!(is_clipboard_process_name_allowed("/opt/ZOTERO/ZOTERO.EXE"));
+        assert!(!is_clipboard_process_name_allowed(
+            r"C:\\Chrome\\chrome.exe"
+        ));
+        assert!(!is_clipboard_process_name_allowed("zotero.exe.bak"));
     }
 }
