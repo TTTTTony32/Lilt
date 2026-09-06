@@ -1197,8 +1197,12 @@ fn longest_common_contiguous_valid_chars(left: &str, right: &str) -> usize {
     longest
 }
 
+fn process_image_name(image_path: &str) -> &str {
+    image_path.rsplit(['\\', '/']).next().unwrap_or_default()
+}
+
 fn is_clipboard_process_name_allowed(image_path: &str) -> bool {
-    let image_name = image_path.rsplit(['\\', '/']).next().unwrap_or_default();
+    let image_name = process_image_name(image_path);
     CLIPBOARD_SOURCE_PROCESS_WHITELIST
         .iter()
         .any(|allowed| image_name.eq_ignore_ascii_case(allowed))
@@ -2003,6 +2007,12 @@ fn resolve_active_selection(
         .as_ref()
         .map(|text| (!text.trim().is_empty()).then_some(text.as_str()))
         .map_err(|_| ());
+    if let Err(error) = &clipboard_result {
+        diagnostics::info(format!(
+            "selection.clipboard.capture.failed code={}",
+            error.code
+        ));
+    }
     let reconciliation = reconcile_source_texts(uia_text.as_deref(), clipboard_text);
     diagnostics::info(format!(
         "selection.source.reconciled comparison={:?} choice={:?}",
@@ -2175,10 +2185,111 @@ fn process_id_from_root(root_window: isize) -> Option<u32> {
 
 #[cfg(windows)]
 fn clipboard_source_allowed(context: &SelectionSourceContext) -> bool {
-    process_image_path(context.process_id)
+    let image_path = process_image_path(context.process_id)
+        .or_else(|| process_image_path_from_window(context.root_window))
+        .or_else(|| process_image_name_from_snapshot(context.process_id));
+    let image_name = image_path
         .as_deref()
-        .map(is_clipboard_process_name_allowed)
-        .unwrap_or(false)
+        .map(process_image_name)
+        .unwrap_or("<unknown>");
+    let direct_allowed = is_clipboard_process_name_allowed(image_name);
+    let inherited_allowed =
+        !direct_allowed && process_tree_contains_allowed_process(context.process_id);
+    let allowed = direct_allowed || inherited_allowed;
+    diagnostics::info(format!(
+        "selection.clipboard.policy pid={} executable={} inherited={} allowed={allowed}",
+        context.process_id, image_name, inherited_allowed
+    ));
+    allowed
+}
+
+#[cfg(windows)]
+fn process_image_path_from_window(root_window: isize) -> Option<String> {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::GetWindowModuleFileNameW};
+
+    let window = HWND(root_window as *mut core::ffi::c_void);
+    if window.0.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe { GetWindowModuleFileNameW(window, &mut buffer) };
+    let length = usize::try_from(length).ok()?;
+    String::from_utf16(buffer.get(..length)?).ok()
+}
+
+#[cfg(windows)]
+fn process_image_name_from_snapshot(process_id: u32) -> Option<String> {
+    process_snapshot_entries()?
+        .into_iter()
+        .find(|entry| entry.process_id == process_id)
+        .map(|entry| entry.image_name)
+}
+
+#[cfg(windows)]
+fn process_tree_contains_allowed_process(process_id: u32) -> bool {
+    let Some(entries) = process_snapshot_entries() else {
+        return false;
+    };
+    let mut current_id = process_id;
+    for _ in 0..64 {
+        let Some(entry) = entries.iter().find(|entry| entry.process_id == current_id) else {
+            return false;
+        };
+        if is_clipboard_process_name_allowed(&entry.image_name) {
+            return true;
+        }
+        if entry.parent_process_id == 0 || entry.parent_process_id == current_id {
+            return false;
+        }
+        current_id = entry.parent_process_id;
+    }
+    false
+}
+
+#[cfg(windows)]
+fn process_snapshot_entries() -> Option<Vec<ProcessSnapshotEntry>> {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut entries = Vec::new();
+    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+        loop {
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|character| *character == 0)
+                .unwrap_or(entry.szExeFile.len());
+            if let Ok(image_name) = String::from_utf16(&entry.szExeFile[..end]) {
+                entries.push(ProcessSnapshotEntry {
+                    process_id: entry.th32ProcessID,
+                    parent_process_id: entry.th32ParentProcessID,
+                    image_name,
+                });
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+    let _ = unsafe { CloseHandle(snapshot) };
+    Some(entries)
+}
+
+#[cfg(windows)]
+struct ProcessSnapshotEntry {
+    process_id: u32,
+    parent_process_id: u32,
+    image_name: String,
 }
 
 #[cfg(windows)]
