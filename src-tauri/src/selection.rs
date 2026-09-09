@@ -101,9 +101,6 @@ struct SelectionCandidate {
     trigger: SelectionTrigger,
 }
 
-// Experimental UIA-only mode. Keep the whitelist and protected-copy path in
-// place so the experiment can be reverted without changing the routing again.
-const CLIPBOARD_SELECTION_ENABLED: bool = false;
 const CLIPBOARD_SOURCE_PROCESS_WHITELIST: &[&str] = &["zotero.exe"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2373,11 +2370,6 @@ fn process_id_from_root(root_window: isize) -> Option<u32> {
 
 #[cfg(windows)]
 fn clipboard_source_allowed(context: &SelectionSourceContext) -> bool {
-    if !CLIPBOARD_SELECTION_ENABLED {
-        diagnostics::info("selection.clipboard.policy disabled_for_experiment");
-        return false;
-    }
-
     let image_path = process_image_path(context.process_id)
         .or_else(|| process_image_path_from_window(context.root_window))
         .or_else(|| process_image_name_from_snapshot(context.process_id));
