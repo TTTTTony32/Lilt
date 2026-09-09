@@ -35,6 +35,7 @@ const MOUSE_RELEASE_DELAY: Duration = Duration::from_millis(140);
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_millis(900);
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SHORTCUT_RELEASE_TIMEOUT: Duration = Duration::from_millis(700);
+const UIA_SELECTION_REFRESH_DELAY: Duration = Duration::from_millis(30);
 const MAX_SELECTION_ANCESTORS: usize = 8;
 const MIN_AUTOMATIC_DRAG_DISTANCE: i32 = 4;
 const AUTOMATIC_TRIGGER_READING_WIDTH: f64 = 280.0;
@@ -131,6 +132,10 @@ type AgileTextRange =
     windows::core::AgileReference<windows::Win32::UI::Accessibility::IUIAutomationTextRange>;
 
 #[cfg(windows)]
+type AgileUiElement =
+    windows::core::AgileReference<windows::Win32::UI::Accessibility::IUIAutomationElement>;
+
+#[cfg(windows)]
 #[derive(Clone)]
 struct PreparedSelection {
     trigger_id: String,
@@ -139,6 +144,7 @@ struct PreparedSelection {
     anchor: Option<SelectionAnchor>,
     source_context: Option<SelectionSourceContext>,
     standard_edit_window: Option<isize>,
+    uia_element: Option<AgileUiElement>,
     source: PreparedSelectionSource,
 }
 
@@ -1261,8 +1267,11 @@ fn reconcile_source_texts(
             choice: SourceChoice::Clipboard,
         },
         (Some(_), None) => SourceReconciliation {
+            // A whitelisted provider's protected copy is the only trusted
+            // source when UIA may report an offset range. Do not publish the
+            // stale UIA text after the copy path fails.
             comparison: SourceComparison::ClipboardUnavailable,
-            choice: SourceChoice::UiAutomation,
+            choice: SourceChoice::Unavailable,
         },
         (None, Some(_)) => SourceReconciliation {
             comparison: SourceComparison::UiAutomationUnavailable,
@@ -1862,8 +1871,30 @@ fn prepare_standard_edit(
         anchor,
         source_context: Some(context),
         standard_edit_window: Some(window),
+        uia_element: None,
         source: PreparedSelectionSource::StandardEdit,
     })
+}
+
+#[cfg(windows)]
+fn selected_text_ranges(
+    ranges: Vec<uiautomation::patterns::UITextRange>,
+) -> Vec<uiautomation::patterns::UITextRange> {
+    use uiautomation::types::TextPatternRangeEndpoint;
+
+    ranges
+        .into_iter()
+        .filter(|range| {
+            range
+                .compare_endpoints(
+                    TextPatternRangeEndpoint::Start,
+                    range,
+                    TextPatternRangeEndpoint::End,
+                )
+                .map(|distance| distance < 0)
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -1874,7 +1905,6 @@ fn prepare_element(
     request: PrepareElementRequest,
 ) -> Option<PreparedSelection> {
     use uiautomation::patterns::{UITextEditPattern, UITextPattern};
-    use uiautomation::types::TextPatternRangeEndpoint;
 
     let PrepareElementRequest {
         trigger,
@@ -1925,19 +1955,7 @@ fn prepare_element(
         if let Ok(pattern) = current.get_pattern::<UITextPattern>() {
             text_capable = true;
             if let Ok(ranges) = pattern.get_selection() {
-                let ranges = ranges
-                    .into_iter()
-                    .filter(|range| {
-                        range
-                            .compare_endpoints(
-                                TextPatternRangeEndpoint::Start,
-                                range,
-                                TextPatternRangeEndpoint::End,
-                            )
-                            .map(|distance| distance < 0)
-                            .unwrap_or(false)
-                    })
-                    .collect::<Vec<_>>();
+                let ranges = selected_text_ranges(ranges);
                 if !ranges.is_empty() {
                     let anchor = fallback_anchor.clone().or_else(|| {
                         ranges.first().and_then(|range| {
@@ -1967,6 +1985,7 @@ fn prepare_element(
                         anchor,
                         source_context: context,
                         standard_edit_window,
+                        uia_element: windows::core::AgileReference::new(current.as_ref()).ok(),
                         source: PreparedSelectionSource::UiAutomation(agile_ranges),
                     });
                 }
@@ -1987,6 +2006,7 @@ fn prepare_element(
             anchor: fallback_anchor,
             source_context,
             standard_edit_window: Some(standard_edit_window),
+            uia_element: None,
             source: PreparedSelectionSource::StandardEdit,
         });
     }
@@ -2005,6 +2025,7 @@ fn prepare_element(
             anchor: fallback_anchor,
             source_context,
             standard_edit_window: None,
+            uia_element: None,
             source: PreparedSelectionSource::ClipboardOnActivate,
         });
     }
@@ -2059,18 +2080,12 @@ fn same_prepared_selection(left: &PreparedSelection, right: &PreparedSelection) 
 }
 
 #[cfg(windows)]
-fn read_prepared_uia(prepared: &PreparedSelection) -> provider::ReadOutcome {
-    use uiautomation::patterns::UITextRange;
-
-    let PreparedSelectionSource::UiAutomation(ranges) = &prepared.source else {
-        return provider::ReadOutcome::Unsupported;
-    };
+fn read_uia_ranges(
+    ranges: impl IntoIterator<Item = uiautomation::patterns::UITextRange>,
+) -> provider::ReadOutcome {
     let mut text = String::new();
     let max_length = (provider::MAX_TEXT_UNITS as i32).saturating_add(1);
-    for agile_range in ranges {
-        let Ok(range) = agile_range.resolve().map(UITextRange::from) else {
-            return provider::ReadOutcome::Stale;
-        };
+    for range in ranges {
         let Ok(value) = range.get_text(max_length) else {
             return provider::ReadOutcome::Failed;
         };
@@ -2084,6 +2099,52 @@ fn read_prepared_uia(prepared: &PreparedSelection) -> provider::ReadOutcome {
     } else {
         provider::ReadOutcome::Selected(text)
     }
+}
+
+#[cfg(windows)]
+fn read_current_uia_selection(element: &AgileUiElement) -> Option<provider::ReadOutcome> {
+    use uiautomation::patterns::UITextPattern;
+
+    let element = element.resolve().map(uiautomation::UIElement::from).ok()?;
+    let pattern = element.get_pattern::<UITextPattern>().ok()?;
+    let ranges = pattern.get_selection().ok()?;
+    Some(read_uia_ranges(selected_text_ranges(ranges)))
+}
+
+#[cfg(windows)]
+fn read_prepared_uia(prepared: &PreparedSelection) -> provider::ReadOutcome {
+    use uiautomation::patterns::UITextRange;
+
+    let PreparedSelectionSource::UiAutomation(stored_ranges) = &prepared.source else {
+        return provider::ReadOutcome::Unsupported;
+    };
+
+    if let Some(element) = prepared.uia_element.as_ref() {
+        let first = read_current_uia_selection(element);
+        thread::sleep(UIA_SELECTION_REFRESH_DELAY);
+        let second = read_current_uia_selection(element);
+        if let Some(outcome) = second.or(first) {
+            diagnostics::info(format!(
+                "selection.uia.refresh outcome={}",
+                provider::outcome_code(&outcome)
+            ));
+            return outcome;
+        }
+        diagnostics::info("selection.uia.refresh.failed");
+        return provider::ReadOutcome::Stale;
+    }
+
+    let ranges = stored_ranges
+        .iter()
+        .map(|agile_range| agile_range.resolve().map(UITextRange::from));
+    let mut resolved_ranges = Vec::with_capacity(stored_ranges.len());
+    for range in ranges {
+        let Ok(range) = range else {
+            return provider::ReadOutcome::Stale;
+        };
+        resolved_ranges.push(range);
+    }
+    read_uia_ranges(resolved_ranges)
 }
 
 #[cfg(windows)]
@@ -2216,7 +2277,10 @@ fn read_prepared_selection(
         ) {
             Ok(candidate) => return Ok(candidate),
             Err(error) if error.code != "no_selection" => return Err(error),
-            Err(_) => {}
+            // The protected copy already waited for the source response. A
+            // second capture here only repeats the clipboard side effect and
+            // can keep the floating window in a retry loop.
+            Err(error) => return Err(error),
         }
     }
 
@@ -2865,14 +2929,18 @@ mod tests {
     }
 
     #[test]
-    fn source_reconciliation_distinguishes_unavailable_inputs() {
+    fn clipboard_failure_does_not_fallback_to_uia_text() {
         assert_eq!(
             reconcile_source_texts(Some("UIA"), Err(())),
             SourceReconciliation {
                 comparison: SourceComparison::ClipboardUnavailable,
-                choice: SourceChoice::UiAutomation,
+                choice: SourceChoice::Unavailable,
             }
         );
+    }
+
+    #[test]
+    fn source_reconciliation_distinguishes_unavailable_inputs() {
         assert_eq!(
             reconcile_source_texts(None, Ok(Some("clipboard"))),
             SourceReconciliation {
