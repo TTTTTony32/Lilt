@@ -1252,9 +1252,13 @@ fn reconcile_source_texts(
                 choice: SourceChoice::Clipboard,
             }
         }
+        // The caller reaches this function only after the source process has
+        // passed the Zotero clipboard whitelist and the user explicitly
+        // requested a read. A successful protected copy is therefore a
+        // stronger range signal than a UIA string known to suffer offsets.
         (Some(_), Some(_)) => SourceReconciliation {
             comparison: SourceComparison::NoOverlap,
-            choice: SourceChoice::UiAutomation,
+            choice: SourceChoice::Clipboard,
         },
         (Some(_), None) => SourceReconciliation {
             comparison: SourceComparison::ClipboardUnavailable,
@@ -2843,19 +2847,19 @@ mod tests {
     }
 
     #[test]
-    fn no_valid_overlap_keeps_uia_text() {
+    fn no_valid_overlap_prefers_whitelisted_clipboard_text() {
         assert_eq!(
             reconcile_source_texts(Some("中文文本"), Ok(Some("English words"))),
             SourceReconciliation {
                 comparison: SourceComparison::NoOverlap,
-                choice: SourceChoice::UiAutomation,
+                choice: SourceChoice::Clipboard,
             }
         );
         assert_eq!(
             reconcile_source_texts(Some("..."), Ok(Some("!?"))),
             SourceReconciliation {
                 comparison: SourceComparison::NoOverlap,
-                choice: SourceChoice::UiAutomation,
+                choice: SourceChoice::Clipboard,
             }
         );
     }
