@@ -18,6 +18,11 @@ use tauri::{AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindowB
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(windows)]
+mod edit;
+#[cfg(windows)]
+mod provider;
+
 const SELECTION_EVENT: &str = "selection_available";
 const SELECTION_TRIGGER_EVENT: &str = "selection_trigger_available";
 const SELECTION_UNAVAILABLE_EVENT: &str = "selection_unavailable";
@@ -133,6 +138,7 @@ struct PreparedSelection {
     trigger: SelectionTrigger,
     anchor: Option<SelectionAnchor>,
     source_context: Option<SelectionSourceContext>,
+    standard_edit_window: Option<isize>,
     source: PreparedSelectionSource,
 }
 
@@ -140,6 +146,7 @@ struct PreparedSelection {
 #[derive(Clone)]
 enum PreparedSelectionSource {
     UiAutomation(Vec<AgileTextRange>),
+    StandardEdit,
     ClipboardOnActivate,
 }
 
@@ -803,11 +810,6 @@ impl SelectionService {
     }
 
     #[cfg(windows)]
-    fn enqueue_prepared(&self, prepared: PreparedSelection) {
-        self.send_worker(WorkerCommand::Prepared(prepared));
-    }
-
-    #[cfg(windows)]
     fn current_generation(&self) -> u64 {
         self.inner
             .lock()
@@ -818,6 +820,11 @@ impl SelectionService {
     #[cfg(windows)]
     fn owns_generation(&self, generation: u64) -> bool {
         self.current_generation() == generation
+    }
+
+    #[cfg(windows)]
+    fn enqueue_prepared(&self, prepared: PreparedSelection) {
+        self.send_worker(WorkerCommand::Prepared(prepared));
     }
 
     #[cfg(windows)]
@@ -1330,7 +1337,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
         if root.is_some() && walker.is_some() {
             None
         } else {
-            Some("UI Automation 当前不可用，将使用剪贴板兜底".to_string())
+            Some("UI Automation 当前不可用，将仅尝试受支持的只读来源".to_string())
         },
     );
 
@@ -1434,30 +1441,38 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 if let Some(release) = pending_mouse_release.as_mut() {
                     release.release_probe_done = true;
                 }
-                let value =
-                    automation
-                        .as_ref()
-                        .zip(walker.as_ref())
-                        .and_then(|(automation, walker)| {
-                            let (x, y) = context.release_point?;
-                            automation
-                                .element_from_point(Point::new(x, y))
-                                .ok()
-                                .and_then(|element| {
-                                    prepare_element(
-                                        &service,
-                                        &element,
-                                        walker,
-                                        PrepareElementRequest {
-                                            trigger: SelectionTrigger::Automatic,
-                                            trigger_id: None,
-                                            fallback_anchor: Some(anchor.clone()),
-                                            source_context: Some(context),
-                                            allow_clipboard_fallback: true,
-                                        },
-                                    )
-                                })
-                        });
+                let value = automation
+                    .as_ref()
+                    .zip(walker.as_ref())
+                    .and_then(|(automation, walker)| {
+                        let (x, y) = context.release_point?;
+                        automation
+                            .element_from_point(Point::new(x, y))
+                            .ok()
+                            .and_then(|element| {
+                                prepare_element(
+                                    &service,
+                                    &element,
+                                    walker,
+                                    PrepareElementRequest {
+                                        trigger: SelectionTrigger::Automatic,
+                                        trigger_id: None,
+                                        fallback_anchor: Some(anchor.clone()),
+                                        source_context: Some(context),
+                                        allow_clipboard_fallback: true,
+                                    },
+                                )
+                            })
+                    })
+                    .or_else(|| {
+                        prepare_standard_edit(
+                            &service,
+                            context,
+                            SelectionTrigger::Automatic,
+                            None,
+                            Some(anchor.clone()),
+                        )
+                    });
                 if let Some(value) = value {
                     accept_automatic_prepared(
                         &service,
@@ -1490,26 +1505,34 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 .map(|release| (release.context, release.anchor.clone()));
             if let Some((context, anchor)) = focus_probe {
                 next_focus_poll = now + FOCUS_POLL_INTERVAL;
-                let value =
-                    automation
-                        .as_ref()
-                        .zip(walker.as_ref())
-                        .and_then(|(automation, walker)| {
-                            automation.get_focused_element().ok().and_then(|element| {
-                                prepare_element(
-                                    &service,
-                                    &element,
-                                    walker,
-                                    PrepareElementRequest {
-                                        trigger: SelectionTrigger::Automatic,
-                                        trigger_id: None,
-                                        fallback_anchor: Some(anchor.clone()),
-                                        source_context: Some(context),
-                                        allow_clipboard_fallback: false,
-                                    },
-                                )
-                            })
-                        });
+                let value = automation
+                    .as_ref()
+                    .zip(walker.as_ref())
+                    .and_then(|(automation, walker)| {
+                        automation.get_focused_element().ok().and_then(|element| {
+                            prepare_element(
+                                &service,
+                                &element,
+                                walker,
+                                PrepareElementRequest {
+                                    trigger: SelectionTrigger::Automatic,
+                                    trigger_id: None,
+                                    fallback_anchor: Some(anchor.clone()),
+                                    source_context: Some(context),
+                                    allow_clipboard_fallback: false,
+                                },
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        prepare_standard_edit(
+                            &service,
+                            context,
+                            SelectionTrigger::Automatic,
+                            None,
+                            Some(anchor.clone()),
+                        )
+                    });
                 if let Some(value) = value {
                     accept_automatic_prepared(
                         &service,
@@ -1659,7 +1682,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                         source_context_from_element(element, generation, anchor.as_ref())
                     })
                     .or_else(|| foreground_source_context(generation, anchor.as_ref()));
-                let prepared = focused_element.as_ref().and_then(|element| {
+                let mut prepared = focused_element.as_ref().and_then(|element| {
                     walker.as_ref().and_then(|walker| {
                         prepare_element(
                             &service,
@@ -1675,20 +1698,29 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                         )
                     })
                 });
-                let candidate_result = resolve_active_selection(
-                    trigger_id.clone(),
-                    SelectionTrigger::Shortcut,
-                    prepared
-                        .as_ref()
-                        .and_then(|value| value.anchor.clone())
-                        .or_else(|| anchor.clone()),
-                    prepared.as_ref().and_then(read_prepared_uia_text),
-                    prepared
-                        .as_ref()
-                        .and_then(|value| value.source_context)
-                        .or(source_context),
-                    true,
-                );
+                if prepared.is_none() {
+                    prepared = source_context.and_then(|context| {
+                        prepare_standard_edit(
+                            &service,
+                            context,
+                            SelectionTrigger::Shortcut,
+                            Some(trigger_id.clone()),
+                            anchor.clone(),
+                        )
+                    });
+                }
+                let candidate_result = if let Some(prepared) = prepared.as_ref() {
+                    read_prepared_selection(prepared, true)
+                } else {
+                    resolve_active_selection(
+                        trigger_id.clone(),
+                        SelectionTrigger::Shortcut,
+                        anchor.clone(),
+                        None,
+                        source_context,
+                        true,
+                    )
+                };
                 match candidate_result {
                     Ok(candidate)
                         if service.owns_generation(generation)
@@ -1811,6 +1843,26 @@ fn accept_automatic_prepared(
 }
 
 #[cfg(windows)]
+fn prepare_standard_edit(
+    service: &SelectionService,
+    context: SelectionSourceContext,
+    trigger: SelectionTrigger,
+    trigger_id: Option<String>,
+    anchor: Option<SelectionAnchor>,
+) -> Option<PreparedSelection> {
+    let window = edit::find_selected_control(&context, None)?;
+    Some(PreparedSelection {
+        trigger_id: trigger_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        generation: service.current_generation(),
+        trigger,
+        anchor,
+        source_context: Some(context),
+        standard_edit_window: Some(window),
+        source: PreparedSelectionSource::StandardEdit,
+    })
+}
+
+#[cfg(windows)]
 fn prepare_element(
     service: &SelectionService,
     element: &uiautomation::UIElement,
@@ -1830,6 +1882,8 @@ fn prepare_element(
     let trigger_id = trigger_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let mut current = element.clone();
     let mut text_capable = false;
+    let mut standard_edit_window = None;
+    let mut source_context = source_context;
     for _ in 0..=MAX_SELECTION_ANCESTORS {
         if current.get_process_id().ok() == Some(std::process::id()) {
             break;
@@ -1842,6 +1896,27 @@ fn prepare_element(
             };
             current = parent;
             continue;
+        }
+        let current_context = source_context.or_else(|| {
+            source_context_from_element(
+                &current,
+                service.current_generation(),
+                fallback_anchor.as_ref(),
+            )
+        });
+        if standard_edit_window.is_none() {
+            if let (Some(context), Ok(native)) =
+                (current_context.as_ref(), current.get_native_window_handle())
+            {
+                let native: isize = native.into();
+                if native != 0
+                    && edit::is_standard_edit_window(native)
+                    && edit::find_selected_control(context, Some(native)) == Some(native)
+                {
+                    standard_edit_window = Some(native);
+                    source_context = Some(*context);
+                }
+            }
         }
         if let Ok(pattern) = current.get_pattern::<UITextPattern>() {
             text_capable = true;
@@ -1869,7 +1944,7 @@ fn prepare_element(
                                 .and_then(anchor_from_rectangle)
                         })
                     });
-                    let context = source_context.or_else(|| {
+                    let context = source_context.or(current_context).or_else(|| {
                         source_context_from_element(
                             &current,
                             service.current_generation(),
@@ -1887,6 +1962,7 @@ fn prepare_element(
                         trigger,
                         anchor,
                         source_context: context,
+                        standard_edit_window,
                         source: PreparedSelectionSource::UiAutomation(agile_ranges),
                     });
                 }
@@ -1898,6 +1974,17 @@ fn prepare_element(
             break;
         };
         current = parent;
+    }
+    if let Some(standard_edit_window) = standard_edit_window {
+        return Some(PreparedSelection {
+            trigger_id,
+            generation: service.current_generation(),
+            trigger,
+            anchor: fallback_anchor,
+            source_context,
+            standard_edit_window: Some(standard_edit_window),
+            source: PreparedSelectionSource::StandardEdit,
+        });
     }
     if trigger == SelectionTrigger::Automatic
         && allow_clipboard_fallback
@@ -1913,6 +2000,7 @@ fn prepare_element(
             trigger,
             anchor: fallback_anchor,
             source_context,
+            standard_edit_window: None,
             source: PreparedSelectionSource::ClipboardOnActivate,
         });
     }
@@ -1923,28 +2011,25 @@ fn prepare_element(
 fn same_prepared_selection(left: &PreparedSelection, right: &PreparedSelection) -> bool {
     use uiautomation::patterns::UITextRange;
 
+    let same_context = left
+        .source_context
+        .zip(right.source_context)
+        .map(|(left, right)| same_source_window(&left, &right))
+        .unwrap_or(false);
+    let same_edit = left.standard_edit_window == right.standard_edit_window;
     match (&left.source, &right.source) {
         (
             PreparedSelectionSource::ClipboardOnActivate,
             PreparedSelectionSource::ClipboardOnActivate,
-        ) => {
-            left.anchor == right.anchor
-                && left
-                    .source_context
-                    .zip(right.source_context)
-                    .map(|(left, right)| same_source_window(&left, &right))
-                    .unwrap_or(false)
+        ) => left.anchor == right.anchor && same_context && same_edit,
+        (PreparedSelectionSource::StandardEdit, PreparedSelectionSource::StandardEdit) => {
+            left.anchor == right.anchor && same_context && same_edit
         }
         (
             PreparedSelectionSource::UiAutomation(left_ranges),
             PreparedSelectionSource::UiAutomation(right_ranges),
         ) => {
-            let same_context = left
-                .source_context
-                .zip(right.source_context)
-                .map(|(left, right)| same_source_window(&left, &right))
-                .unwrap_or(false);
-            if !same_context {
+            if !same_context || !same_edit {
                 return false;
             }
             if left_ranges.len() != right_ranges.len() {
@@ -1970,25 +2055,51 @@ fn same_prepared_selection(left: &PreparedSelection, right: &PreparedSelection) 
 }
 
 #[cfg(windows)]
-fn read_prepared_uia_text(prepared: &PreparedSelection) -> Option<String> {
-    let source_text = match &prepared.source {
-        PreparedSelectionSource::ClipboardOnActivate => return None,
-        PreparedSelectionSource::UiAutomation(ranges) => {
-            use uiautomation::patterns::UITextRange;
-            let mut text = String::new();
-            for agile_range in ranges {
-                let range = UITextRange::from(agile_range.resolve().ok()?);
-                text.push_str(&range.get_text(-1).ok()?);
-            }
-            text
-        }
+fn read_prepared_uia(prepared: &PreparedSelection) -> provider::ReadOutcome {
+    use uiautomation::patterns::UITextRange;
+
+    let PreparedSelectionSource::UiAutomation(ranges) = &prepared.source else {
+        return provider::ReadOutcome::Unsupported;
     };
-    (!source_text.trim().is_empty()).then_some(source_text)
+    let mut text = String::new();
+    let max_length = (provider::MAX_TEXT_UNITS as i32).saturating_add(1);
+    for agile_range in ranges {
+        let Ok(range) = agile_range.resolve().map(UITextRange::from) else {
+            return provider::ReadOutcome::Stale;
+        };
+        let Ok(value) = range.get_text(max_length) else {
+            return provider::ReadOutcome::Failed;
+        };
+        text.push_str(&value);
+        if text.encode_utf16().count() > provider::MAX_TEXT_UNITS {
+            return provider::ReadOutcome::Unsupported;
+        }
+    }
+    if text.trim().is_empty() {
+        provider::ReadOutcome::NoSelection
+    } else {
+        provider::ReadOutcome::Selected(text)
+    }
 }
 
 #[cfg(windows)]
 fn no_selection_failure() -> SelectionCaptureFailure {
     SelectionCaptureFailure::new("no_selection", "当前没有可读取的文本选区")
+}
+
+#[cfg(windows)]
+fn failure_from_source_outcome(outcome: &provider::ReadOutcome) -> SelectionCaptureFailure {
+    SelectionCaptureFailure::new(
+        provider::outcome_code(outcome),
+        provider::outcome_message(outcome),
+    )
+}
+
+#[cfg(windows)]
+fn failure_from_source_outcomes(outcomes: &[provider::ReadOutcome]) -> SelectionCaptureFailure {
+    provider::preferred_failure(outcomes.iter())
+        .map(failure_from_source_outcome)
+        .unwrap_or_else(no_selection_failure)
 }
 
 #[cfg(windows)]
@@ -2059,14 +2170,64 @@ fn read_prepared_selection(
     prepared: &PreparedSelection,
     wait_for_shortcut_release_before_clipboard: bool,
 ) -> Result<SelectionCandidate, SelectionCaptureFailure> {
-    resolve_active_selection(
+    let make_candidate = |source_text| SelectionCandidate {
+        trigger_id: prepared.trigger_id.clone(),
+        source_text,
+        anchor: prepared.anchor.clone(),
+        trigger: prepared.trigger,
+    };
+    let mut outcomes = Vec::new();
+
+    if let (Some(context), Some(window)) = (
+        prepared.source_context.as_ref(),
+        prepared.standard_edit_window,
+    ) {
+        match edit::read_selection(context, Some(window)) {
+            provider::ReadOutcome::Selected(text) => return Ok(make_candidate(text)),
+            outcome => outcomes.push(outcome),
+        }
+    }
+
+    let uia_text = match &prepared.source {
+        PreparedSelectionSource::UiAutomation(_) => match read_prepared_uia(prepared) {
+            provider::ReadOutcome::Selected(text) => Some(text),
+            outcome => {
+                outcomes.push(outcome);
+                None
+            }
+        },
+        PreparedSelectionSource::StandardEdit | PreparedSelectionSource::ClipboardOnActivate => {
+            None
+        }
+    };
+
+    if let Some(uia_text) = uia_text {
+        match resolve_active_selection(
+            prepared.trigger_id.clone(),
+            prepared.trigger,
+            prepared.anchor.clone(),
+            Some(uia_text),
+            prepared.source_context,
+            wait_for_shortcut_release_before_clipboard,
+        ) {
+            Ok(candidate) => return Ok(candidate),
+            Err(error) if error.code != "no_selection" => return Err(error),
+            Err(_) => {}
+        }
+    }
+
+    match resolve_active_selection(
         prepared.trigger_id.clone(),
         prepared.trigger,
         prepared.anchor.clone(),
-        read_prepared_uia_text(prepared),
+        None,
         prepared.source_context,
         wait_for_shortcut_release_before_clipboard,
-    )
+    ) {
+        Ok(candidate) => Ok(candidate),
+        Err(error) if error.code != "no_selection" => Err(error),
+        Err(_) => Err(failure_from_source_outcomes(&outcomes)),
+    }
 }
 
 #[cfg(windows)]
