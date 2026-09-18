@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronDown, Copy, FileText, FileType2, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Copy, FileText, FileType2, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -113,12 +113,12 @@ interface TranslationSummary {
 type TranslationRequestMode = "plain" | "learning";
 
 const SETTINGS_SECTIONS = [
-  { id: "provider", label: "Provider", description: "模型连接", icon: Settings },
-  { id: "prompt", label: "Prompt", description: "翻译指令", icon: FileText },
-  { id: "dictionary", label: "本地词典", description: "离线词典资源", icon: BookOpen },
-  { id: "selection", label: "划词翻译", description: "选区触发方式", icon: Languages },
-  { id: "local", label: "本地数据", description: "历史与缓存", icon: FileType2 },
-  { id: "behavior", label: "关闭行为", description: "窗口关闭方式", icon: X },
+  { id: "provider", label: "Provider", icon: Settings },
+  { id: "prompt", label: "Prompt", icon: FileText },
+  { id: "dictionary", label: "本地词典", icon: BookOpen },
+  { id: "selection", label: "划词翻译", icon: Languages },
+  { id: "local", label: "本地数据", icon: FileType2 },
+  { id: "behavior", label: "关闭行为", icon: X },
 ] as const;
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
@@ -1400,13 +1400,13 @@ function App() {
     <div className="app-shell">
       <div className="main-surface">
       <header className={`app-chrome ${settingsOpen ? "is-settings-open" : ""}`} onMouseDown={handleTitlebarMouseDown}>
-        <div className="brand-lockup">
+        {!settingsOpen && <div className="brand-lockup">
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
-        </div>
-        {settingsOpen ? <span className="chrome-context-label">设置</span> : <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />}
+        </div>}
+        {!settingsOpen && <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />}
         <div className="chrome-actions" data-no-drag>
-          <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={openSettings} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
+          <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={settingsOpen ? requestSettingsClose : openSettings} aria-label={settingsOpen ? "返回 Lilt" : "打开设置"} aria-expanded={settingsOpen} title={settingsOpen ? "返回 Lilt" : "设置"}>{settingsOpen ? <ArrowLeft size={16} /> : <Settings size={16} />}</button>
           <div className="window-controls" data-no-drag>
             <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={14} /></button>
             <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
@@ -1424,7 +1424,6 @@ function App() {
               dictionaryEventsError={dictionaryEventsError}
               onDictionaryUpdate={handleDictionaryUpdate}
               onSaved={handleSettingsSaved}
-              onRequestClose={requestSettingsClose}
             />
           </div>
         ) : (
@@ -2574,16 +2573,16 @@ function SettingsView({
   dictionaryEventsError,
   onDictionaryUpdate,
   onSaved,
-  onRequestClose,
 }: {
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
   dictionaryEventsError: string | null;
   onDictionaryUpdate: () => Promise<void>;
   onSaved: (snapshot: AppSnapshot) => void;
-  onRequestClose: () => void;
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
+  const settingsScrollRef = useRef<HTMLDivElement | null>(null);
+  const settingsSectionRefs = useRef<Partial<Record<SettingsSectionId, HTMLDivElement | null>>>({});
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
@@ -2699,6 +2698,63 @@ function SettingsView({
     updateDraft((current) => ({ ...current, ...patch }));
   }, [updateDraft]);
 
+  const scrollToSection = useCallback((sectionId: SettingsSectionId) => {
+    const scrollElement = settingsScrollRef.current;
+    const sectionElement = settingsSectionRefs.current[sectionId];
+    if (!scrollElement || !sectionElement) return;
+    const scrollRect = scrollElement.getBoundingClientRect();
+    const sectionRect = sectionElement.getBoundingClientRect();
+    const top = scrollElement.scrollTop + sectionRect.top - scrollRect.top - 12;
+    setActiveSection(sectionId);
+    scrollElement.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    const scrollElement = settingsScrollRef.current;
+    if (!scrollElement) return;
+    let frame: number | null = null;
+
+    const syncActiveSection = () => {
+      frame = null;
+      const scrollRect = scrollElement.getBoundingClientRect();
+      const anchorTop = scrollRect.top + 80;
+      let nextSection: SettingsSectionId = "provider";
+      let hasPassedSection = false;
+
+      for (const section of SETTINGS_SECTIONS) {
+        const element = settingsSectionRefs.current[section.id];
+        if (!element) continue;
+        if (element.getBoundingClientRect().top <= anchorTop) {
+          nextSection = section.id;
+          hasPassedSection = true;
+        } else if (!hasPassedSection) {
+          break;
+        }
+      }
+
+      if (scrollElement.scrollTop + scrollElement.clientHeight >= scrollElement.scrollHeight - 2) {
+        const lastSection = SETTINGS_SECTIONS[SETTINGS_SECTIONS.length - 1];
+        if (lastSection) nextSection = lastSection.id;
+      }
+
+      setActiveSection((current) => current === nextSection ? current : nextSection);
+    };
+
+    const requestSync = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(syncActiveSection);
+    };
+
+    scrollElement.addEventListener("scroll", requestSync, { passive: true });
+    window.addEventListener("resize", requestSync);
+    requestSync();
+    return () => {
+      scrollElement.removeEventListener("scroll", requestSync);
+      window.removeEventListener("resize", requestSync);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
       disposedRef.current = true;
@@ -2795,8 +2851,6 @@ function SettingsView({
       ...availableModels.map((model) => ({ value: model.id, label: model.label })),
     ]
     : [];
-  const activeSectionDefinition = SETTINGS_SECTIONS.find((section) => section.id === activeSection) ?? SETTINGS_SECTIONS[0];
-  const ActiveSectionIcon = activeSectionDefinition.icon;
   const saveStatusLabel = saveStatus === "saving"
     ? "正在保存"
     : saveStatus === "saved"
@@ -2810,8 +2864,11 @@ function SettingsView({
       <aside className="settings-sidebar">
         <div className="settings-sidebar-heading">
           <span className="settings-eyebrow">SETTINGS</span>
-          <h1>设置</h1>
-          <p>管理模型连接、词典资源与本地数据。</p>
+          <h1 id="settings-workspace-title">设置</h1>
+          <span className={`settings-save-status settings-sidebar-save-status is-${saveStatus}`} role="status" aria-live="polite">
+            <span className="settings-save-status-dot" aria-hidden="true" />
+            {saveStatusLabel}
+          </span>
         </div>
         <nav className="settings-navigation" aria-label="设置分类">
           {SETTINGS_SECTIONS.map((section) => {
@@ -2823,40 +2880,19 @@ function SettingsView({
                 type="button"
                 key={section.id}
                 aria-current={selected ? "page" : undefined}
-                onClick={() => setActiveSection(section.id)}
+                onClick={() => scrollToSection(section.id)}
               >
                 <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
-                <span><strong>{section.label}</strong><small>{section.description}</small></span>
+                <span><strong>{section.label}</strong></span>
               </button>
             );
           })}
         </nav>
-        <button className="settings-back-button" type="button" onClick={onRequestClose}>
-          <X size={15} aria-hidden="true" />
-          返回 Lilt
-        </button>
       </aside>
 
       <div className="settings-content">
-        <header className="settings-content-heading">
-          <div className="settings-content-title">
-            <div className="settings-content-title-line">
-              <ActiveSectionIcon size={17} strokeWidth={1.8} aria-hidden="true" />
-              <h2 id="settings-workspace-title">{activeSectionDefinition.label}</h2>
-            </div>
-            <p>{activeSectionDefinition.description}</p>
-          </div>
-          <div className="settings-content-actions">
-            <span className={`settings-save-status is-${saveStatus}`} role="status" aria-live="polite">
-              <span className="settings-save-status-dot" aria-hidden="true" />
-              {saveStatusLabel}
-            </span>
-            <button className="icon-button" type="button" onClick={onRequestClose} aria-label="返回 Lilt" title="返回 Lilt"><X size={17} /></button>
-          </div>
-        </header>
-
-        <div className="settings-content-scroll">
-          <div className="settings-section" hidden={activeSection !== "provider"}>
+        <div className="settings-content-scroll" ref={settingsScrollRef}>
+          <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
           <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>即将支持其他协议。</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" /></label>
@@ -2869,11 +2905,11 @@ function SettingsView({
           <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。修改后自动保存。</span><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button></div>
           </div>
 
-          <div className="settings-section" hidden={activeSection !== "prompt"}>
+          <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>
             <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} />
           </div>
 
-        <div className="settings-section" hidden={activeSection !== "dictionary"}>
+        <div className="settings-section" id="settings-section-dictionary" data-settings-section="dictionary" ref={(element) => { settingsSectionRefs.current.dictionary = element; }}>
           <div className="card-heading"><div><strong>本地词典</strong><span>open-dictionary，离线查询，不依赖 Provider</span></div><span className={`connection-status ${snapshot.dictionary.status === "ready" ? "connected" : ""}`}>{dictionaryStatusLabel}</span></div>
           <div className="dictionary-settings-grid">
             <div><span className="fact-label">Release</span><strong>{snapshot.dictionary.installedRelease ?? "尚未安装"}</strong></div>
@@ -2891,7 +2927,7 @@ function SettingsView({
           <div className="form-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
         </div>
 
-        <div className="settings-section" hidden={activeSection !== "selection"}>
+        <div className="settings-section" id="settings-section-selection" data-settings-section="selection" ref={(element) => { settingsSectionRefs.current.selection = element; }}>
           <div className="card-heading"><div><strong>划词翻译</strong><span>从其他 Windows 应用读取选中文本，浮窗复用当前翻译方向。</span></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
           <div className="form-grid selection-settings-grid">
             <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => updateSelectionDraft({ selectionMode: value as AppSettings["selectionMode"] })} />
@@ -2902,7 +2938,7 @@ function SettingsView({
           <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}。修改后自动保存。</span></div>
         </div>
 
-        <div className="settings-section" hidden={activeSection !== "local"}>
+        <div className="settings-section" id="settings-section-local" data-settings-section="local" ref={(element) => { settingsSectionRefs.current.local = element; }}>
           <div className="card-heading"><div><strong>本地数据</strong><span>数据只保存在当前设备</span></div></div>
           <label className="setting-line"><span><strong>翻译历史保留条数</strong><small>历史功能不可关闭，只控制保留数量。</small></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => updateAppSettingsDraft({ historyRetention: Number(event.target.value) })} /></label>
           <label className="setting-line"><span><strong>启用段落翻译缓存</strong><small>缓存命中后仍会写入一条历史记录。</small></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => updateAppSettingsDraft({ cacheEnabled: event.target.checked })} /></label>
@@ -2912,7 +2948,7 @@ function SettingsView({
           <div className="form-actions"><span className="muted-text">缓存不包含 API Key。修改后自动保存。</span></div>
         </div>
 
-        <div className="settings-section" hidden={activeSection !== "behavior"}>
+        <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>
           <div className="card-heading"><div><strong>关闭行为</strong><span>点击主窗口关闭按钮时的处理方式。</span></div></div>
           <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong><small>{settings.closeBehavior === "ask" ? "关闭窗口时显示选择对话框。" : "已经记住选择，可在这里恢复询问。"}</small></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
         </div>

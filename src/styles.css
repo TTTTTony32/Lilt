@@ -38,7 +38,11 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .app-shell { width: 100%; height: 100vh; min-height: 100vh; overflow: hidden; }
 .main-surface { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: #f5f3ed; }
 .app-chrome { position: relative; z-index: 2; min-height: 76px; margin-bottom: -32px; padding: 0 18px 0 22px; display: grid; grid-template-columns: minmax(140px, 1fr) auto minmax(140px, 1fr); align-items: center; gap: 18px; background: transparent; user-select: none; }
-.app-chrome.is-settings-open { margin-bottom: 0; background: #f7f6f1; }
+.app-chrome.is-settings-open { position: absolute; z-index: 4; top: 0; right: 0; left: 0; height: 52px; min-height: 52px; margin: 0; padding: 0 18px; background: transparent; }
+.app-chrome.is-settings-open .brand-lockup,
+.app-chrome.is-settings-open .chrome-context-label,
+.app-chrome.is-settings-open .mode-switcher { display: none; }
+.app-chrome.is-settings-open .chrome-actions { position: absolute; top: 10px; right: 18px; }
 .app-chrome > * { position: relative; z-index: 1; }
 .brand-lockup { width: max-content; display: flex; align-items: center; gap: 8px; color: #303f35; }
 .brand-logo { width: 32px; height: 32px; display: block; border-radius: 9px; }
@@ -65,7 +69,6 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-sidebar { min-height: 0; padding: 32px 17px 20px; display: flex; flex-direction: column; border-right: 1px solid #e1e2d9; background: #f1f2eb; }
 .settings-sidebar-heading { padding: 0 12px 25px; }
 .settings-sidebar-heading h1 { color: #3f5144; font-size: 26px; }
-.settings-sidebar-heading p { margin: 10px 0 0; color: #92988e; font-size: 11px; line-height: 1.65; }
 .settings-navigation { display: grid; gap: 3px; }
 .settings-navigation-item { width: 100%; min-height: 52px; padding: 7px 11px; display: flex; align-items: center; gap: 10px; border: 0; border-radius: 7px; color: #899188; background: transparent; text-align: left; transition: color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease); }
 .settings-navigation-item:hover { color: #4e6554; background: #e7ebe2; }
@@ -73,18 +76,8 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-navigation-item > svg { flex: 0 0 auto; color: #819382; }
 .settings-navigation-item span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .settings-navigation-item strong { color: inherit; font-size: 12px; font-weight: 600; }
-.settings-navigation-item small { color: #a0a79d; font-size: 10px; }
-.settings-navigation-item.is-active small { color: #79907d; }
-.settings-back-button { min-height: 33px; margin: auto 5px 0; padding: 0 8px; display: inline-flex; align-items: center; justify-content: flex-start; gap: 7px; border: 0; color: #899188; background: transparent; font-size: 11px; text-align: left; }
-.settings-back-button:hover { color: #3f5947; }
+.settings-sidebar-save-status { margin-top: 11px; padding: 0; justify-content: flex-start; }
 .settings-content { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.settings-content-heading { flex: 0 0 auto; min-height: 84px; padding: 0 clamp(24px, 5vw, 72px); display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e1e2d9; background: #fbfaf7; }
-.settings-content-title { min-width: 0; }
-.settings-content-title-line { display: flex; align-items: center; gap: 9px; }
-.settings-content-title-line svg { color: #78917d; }
-.settings-content-title h2 { margin: 0; color: #3f5144; font-family: Georgia, "Songti SC", serif; font-size: 22px; font-weight: 500; }
-.settings-content-title p { margin: 6px 0 0 26px; color: #9a9f96; font-size: 11px; }
-.settings-content-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
 .settings-save-status { min-height: 26px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; color: #969e94; font-size: 10px; white-space: nowrap; }
 .settings-save-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #a6aea4; }
 .settings-save-status.is-saving .settings-save-status-dot { background: #c49a67; animation: settings-save-pulse 1.1s ease-in-out infinite; }
@@ -93,10 +86,10 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-save-status.is-error { color: #a25e53; }
 .settings-save-status.is-error .settings-save-status-dot { background: #b8665a; }
 @keyframes settings-save-pulse { 50% { opacity: .35; } }
-.settings-content-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; }
+.settings-content-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; scroll-padding-top: 12px; scrollbar-width: none; }
 .settings-content-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
-.settings-section { max-width: 900px; margin: 0 auto; padding: 34px clamp(24px, 5vw, 72px) 46px; }
-.settings-section[hidden] { display: none; }
+.settings-section { max-width: 960px; margin: 0 auto; padding: 42px clamp(24px, 5vw, 72px) 48px; border-bottom: 1px solid #e1e2d9; }
+.settings-section:last-child { border-bottom: 0; }
 .settings-section > .card-heading, .settings-section > .list-card-heading { margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid #e3e4dc; }
 .settings-section > .card-heading strong, .settings-section > .list-card-heading strong { color: #4e5e51; font-size: 14px; }
 .settings-section > .card-heading span, .settings-section > .list-card-heading span { color: #969d94; }
@@ -639,10 +632,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .settings-view { grid-template-columns: 182px minmax(0, 1fr); }
   .settings-sidebar { padding-right: 10px; padding-left: 10px; }
   .settings-sidebar-heading { padding-right: 7px; padding-left: 7px; }
-  .settings-sidebar-heading p, .settings-navigation-item small { display: none; }
   .settings-navigation-item { justify-content: center; padding-right: 5px; padding-left: 5px; }
   .settings-navigation-item span { flex: 0 0 auto; }
-  .settings-content-heading { padding-right: 18px; padding-left: 18px; }
   .settings-section { padding-right: 18px; padding-left: 18px; }
   .settings-feedback { padding-right: 18px; padding-left: 18px; }
   .pdf-task-panel { grid-template-columns: 1fr; }
