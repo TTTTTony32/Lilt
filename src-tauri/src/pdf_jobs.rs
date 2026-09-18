@@ -1,4 +1,7 @@
-use crate::contracts::TranslationRequest;
+use crate::contracts::{
+    DEFAULT_PDF_PREFLIGHT_ENABLED, DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT, MAX_PDF_PREFLIGHT_PAGE_LIMIT,
+    MIN_PDF_PREFLIGHT_PAGE_LIMIT, TranslationRequest,
+};
 use crate::diagnostics;
 use crate::pdf_protocol::{
     DocumentPreflightAcceptedMessage, DocumentPreflightActivityMessage,
@@ -858,6 +861,7 @@ where
         .and_then(Value::as_str)
         .expect("PDF preflight fixture should receive a sample");
     assert_eq!(sample_text, "A representative paragraph");
+    assert_eq!(user_payload["samples"][0]["page_number"], 1);
 
     let content = serde_json::to_string(&json!({
         "schema_version": 1,
@@ -1065,9 +1069,17 @@ fn preflight_source_text(request: &DocumentPreflightRequestMessage) -> String {
             continue;
         }
         used_chars += text.chars().count();
-        samples.push(
-            json!({"id": sample.segment_id, "text": text, "placeholders": sample.placeholders}),
-        );
+        samples.push({
+            let mut value = json!({
+                "id": sample.segment_id,
+                "text": text,
+                "placeholders": sample.placeholders,
+            });
+            if let Some(page_number) = sample.page_number {
+                value["page_number"] = json!(page_number);
+            }
+            value
+        });
     }
     serde_json::to_string(&json!({
         "metadata": request.metadata,
@@ -1619,6 +1631,23 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
     object
         .entry("target_language".to_string())
         .or_insert_with(|| Value::String("zh-CN".to_string()));
+    let preflight_enabled = object
+        .get("preflight_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(DEFAULT_PDF_PREFLIGHT_ENABLED);
+    object.insert(
+        "preflight_enabled".to_string(),
+        Value::Bool(preflight_enabled),
+    );
+    let preflight_page_limit = object
+        .get("preflight_page_limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT)
+        .clamp(MIN_PDF_PREFLIGHT_PAGE_LIMIT, MAX_PDF_PREFLIGHT_PAGE_LIMIT);
+    object.insert(
+        "preflight_page_limit".to_string(),
+        Value::Number(preflight_page_limit.into()),
+    );
     Ok(Value::Object(object))
 }
 
@@ -1635,9 +1664,9 @@ mod tests {
     use crate::StartupRuntime;
     use crate::contracts::{GlossaryTerm, ThinkingEffort};
     use crate::pdf_protocol::{
-        DocumentPreflightRequestMessage, DocumentPreflightResponseMessage, FinishedMessage,
-        RustToWorkerMessage, StartJobMessage, TranslateRequestMessage, TranslationResponseOutcome,
-        TranslationSegment, WorkerToRustMessage,
+        DocumentPreflightRequestMessage, DocumentPreflightResponseMessage, DocumentPreflightSample,
+        FinishedMessage, RustToWorkerMessage, StartJobMessage, TranslateRequestMessage,
+        TranslationResponseOutcome, TranslationSegment, WorkerToRustMessage,
     };
     use crate::pdf_worker::{WorkerSession, WorkerSessionEvent};
     use rusqlite::Connection;
@@ -1818,6 +1847,20 @@ mod tests {
             .expect("options should be an object");
         assert_eq!(options["source_language"], "en");
         assert_eq!(options["target_language"], "ja");
+        assert_eq!(options["preflight_enabled"], true);
+        assert_eq!(options["preflight_page_limit"], 10);
+
+        let options = normalize_pdf_options(json!({
+            "preflight_enabled": false,
+            "preflight_page_limit": 999,
+        }))
+        .expect("options should be an object");
+        assert_eq!(options["preflight_enabled"], false);
+        assert_eq!(options["preflight_page_limit"], 100);
+
+        let options = normalize_pdf_options(json!({"preflight_page_limit": 0}))
+            .expect("options should be an object");
+        assert_eq!(options["preflight_page_limit"], 1);
     }
 
     #[test]
@@ -1981,10 +2024,11 @@ mod tests {
                 source_language: "en".to_string(),
                 target_language: "zh-CN".to_string(),
                 metadata: json!({"file_name": "fixture.pdf"}),
-                samples: vec![TranslationSegment {
+                samples: vec![DocumentPreflightSample {
                     segment_id: "p1-s1".to_string(),
                     source_text: "A representative paragraph".to_string(),
                     placeholders: Vec::new(),
+                    page_number: Some(1),
                 }],
                 engine_constraints: json!({"response_format": "json"}),
             },

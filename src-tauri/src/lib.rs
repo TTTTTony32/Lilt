@@ -298,6 +298,7 @@ pub fn run() {
             save_provider_config,
             fetch_models,
             save_app_settings,
+            set_pdf_preflight_enabled,
             set_paragraph_learning_mode,
             configure_selection,
             get_selection_status,
@@ -643,6 +644,7 @@ fn save_app_settings(
     cache_max_bytes: i64,
     word_ai_cache_enabled: bool,
     paragraph_example_lookup_enabled: bool,
+    pdf_preflight_page_limit: i64,
 ) -> Result<(), String> {
     let connection = state
         .database
@@ -655,7 +657,17 @@ fn save_app_settings(
         cache_max_bytes,
         word_ai_cache_enabled,
         paragraph_example_lookup_enabled,
+        pdf_preflight_page_limit,
     )
+}
+
+#[tauri::command]
+fn set_pdf_preflight_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::save_pdf_preflight_enabled(&connection, enabled)
 }
 
 #[tauri::command]

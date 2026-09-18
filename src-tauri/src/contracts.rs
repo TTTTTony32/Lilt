@@ -16,6 +16,10 @@ pub const DEFAULT_SELECTION_SHORTCUT: &str = "Ctrl+Shift+L";
 pub const DEFAULT_SELECTION_MODE: SelectionMode = SelectionMode::Shortcut;
 pub const DEFAULT_SELECTION_WINDOW_WIDTH: i64 = 560;
 pub const DEFAULT_SELECTION_WINDOW_HEIGHT: i64 = 320;
+pub const DEFAULT_PDF_PREFLIGHT_ENABLED: bool = true;
+pub const DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT: i64 = 10;
+pub const MIN_PDF_PREFLIGHT_PAGE_LIMIT: i64 = 1;
+pub const MAX_PDF_PREFLIGHT_PAGE_LIMIT: i64 = 100;
 pub const MIN_SELECTION_WINDOW_WIDTH: i64 = 360;
 pub const MAX_SELECTION_WINDOW_WIDTH: i64 = 1200;
 pub const MIN_SELECTION_WINDOW_HEIGHT: i64 = 240;
@@ -40,6 +44,8 @@ pub struct AppSettings {
     pub selection_window_width: i64,
     pub selection_window_height: i64,
     pub close_behavior: CloseBehavior,
+    pub pdf_preflight_enabled: bool,
+    pub pdf_preflight_page_limit: i64,
 }
 
 pub fn parse_selection_window_dimension(

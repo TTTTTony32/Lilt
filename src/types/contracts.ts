@@ -12,6 +12,8 @@ export interface AppSettings {
   wordAiCacheEnabled: boolean;
   paragraphExampleLookupEnabled: boolean;
   paragraphLearningModeEnabled: boolean;
+  pdfPreflightEnabled: boolean;
+  pdfPreflightPageLimit: number;
   selectionMode: "shortcut" | "automatic";
   selectionShortcut: string;
   selectionWindowWidth: number;
@@ -433,6 +435,24 @@ export interface PdfQualityDiagnostic {
 
 export type QualityDiagnostic = PdfQualityDiagnostic;
 
+export type PdfJobLogKind =
+  | "system"
+  | "stage"
+  | "progress"
+  | "preflight"
+  | "warning"
+  | "quality"
+  | "result";
+
+export type PdfJobLogLevel = "info" | "warning" | "error";
+
+export interface PdfJobLogEntry {
+  seq: number;
+  kind: PdfJobLogKind;
+  level: PdfJobLogLevel;
+  message: string;
+}
+
 export interface PdfJobUiState {
   taskId: string | null;
   status: PdfJobStatus;
@@ -446,6 +466,7 @@ export interface PdfJobUiState {
   tokenUsage: PdfJobTokenUsage | null;
   code: string | null;
   message: string | null;
+  logs: PdfJobLogEntry[];
   preflight?: PdfPreflightState;
   documentContext?: DocumentContext | null;
   diagnostics?: PdfQualityDiagnostic[];
@@ -1024,6 +1045,7 @@ export function decodePdfPreflightState(value: unknown, fallbackStatus: PdfPrefl
   const warnings = decodeStringList(readField(payload, "warnings", "warning"), true);
   const message = optionalStringField(payload, "message", "error", "reason");
   const applied = optionalBooleanField(payload, "applied", "autoApplied", "auto_applied");
+  const appliedWasProvided = hasField(payload, "applied", "autoApplied", "auto_applied");
   const degraded = readField(payload, "degraded", "fallback");
   if (
     (schemaVersionRaw !== undefined && schemaVersion === null) ||
@@ -1048,7 +1070,7 @@ export function decodePdfPreflightState(value: unknown, fallbackStatus: PdfPrefl
     context: normalizedContext,
     contextHash: contextHash.value ?? normalizedContext?.contextHash ?? null,
     warnings,
-    applied: applied.value || status === "completed" && !isDegraded && normalizedContext !== null,
+    applied: applied.value || (!appliedWasProvided && status === "completed" && !isDegraded && normalizedContext !== null),
     message: message.value,
   };
 }
@@ -1555,6 +1577,8 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     wordAiCacheEnabled: true,
     paragraphExampleLookupEnabled: true,
     paragraphLearningModeEnabled: false,
+    pdfPreflightEnabled: true,
+    pdfPreflightPageLimit: 10,
     selectionMode: "shortcut",
     selectionShortcut: "Ctrl+Shift+L",
     selectionWindowWidth: 560,

@@ -1,14 +1,15 @@
 use crate::contracts::{
     AppSettings, CacheStats, CachedTranslation, CloseBehavior, DEFAULT_CACHE_MAX_BYTES,
     DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED,
-    DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
+    DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED, DEFAULT_PDF_PREFLIGHT_ENABLED,
+    DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
     DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT,
     DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED,
     DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
-    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_SELECTION_WINDOW_HEIGHT,
-    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo,
-    PersonalDictionaryEntry, Prompt, ProviderRecord, SelectionMode, ThinkingEffort,
-    parse_selection_window_dimension,
+    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_PDF_PREFLIGHT_PAGE_LIMIT,
+    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_PDF_PREFLIGHT_PAGE_LIMIT,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry,
+    Prompt, ProviderRecord, SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
 use crate::glossary::GlossaryImportTerm;
 use chrono::Utc;
@@ -402,6 +403,13 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         MIN_SELECTION_WINDOW_HEIGHT,
         MAX_SELECTION_WINDOW_HEIGHT,
     );
+    let pdf_preflight_enabled = get_setting(connection, "pdf_preflight_enabled")?
+        .map(|value| value != "0")
+        .unwrap_or(DEFAULT_PDF_PREFLIGHT_ENABLED);
+    let pdf_preflight_page_limit = get_setting(connection, "pdf_preflight_page_limit")?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT)
+        .clamp(MIN_PDF_PREFLIGHT_PAGE_LIMIT, MAX_PDF_PREFLIGHT_PAGE_LIMIT);
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
         history_retention,
@@ -416,6 +424,8 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         selection_window_width,
         selection_window_height,
         close_behavior,
+        pdf_preflight_enabled,
+        pdf_preflight_page_limit,
     })
 }
 
@@ -437,6 +447,7 @@ pub fn save_settings(
     cache_max_bytes: i64,
     word_ai_cache_enabled: bool,
     paragraph_example_lookup_enabled: bool,
+    pdf_preflight_page_limit: i64,
 ) -> Result<(), String> {
     set_setting(
         connection,
@@ -469,10 +480,25 @@ pub fn save_settings(
             "0"
         },
     )?;
+    set_setting(
+        connection,
+        "pdf_preflight_page_limit",
+        &pdf_preflight_page_limit
+            .clamp(MIN_PDF_PREFLIGHT_PAGE_LIMIT, MAX_PDF_PREFLIGHT_PAGE_LIMIT)
+            .to_string(),
+    )?;
     prune_history(connection, history_retention.clamp(1, 1000))?;
     prune_cache(
         connection,
         cache_max_bytes.clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+    )
+}
+
+pub fn save_pdf_preflight_enabled(connection: &Connection, enabled: bool) -> Result<(), String> {
+    set_setting(
+        connection,
+        "pdf_preflight_enabled",
+        if enabled { "1" } else { "0" },
     )
 }
 
@@ -1966,7 +1992,7 @@ mod tests {
     #[test]
     fn settings_round_trip_includes_word_example_switches_and_learning_mode() {
         let connection = test_connection();
-        save_settings(&connection, 12, true, 32 * 1024 * 1024, false, false)
+        save_settings(&connection, 12, true, 32 * 1024 * 1024, false, false, 24)
             .expect("settings write should succeed");
         let settings = get_settings(&connection).expect("settings read should succeed");
         assert_eq!(settings.history_retention, 12);
@@ -1983,6 +2009,8 @@ mod tests {
             settings.selection_window_height,
             DEFAULT_SELECTION_WINDOW_HEIGHT
         );
+        assert!(settings.pdf_preflight_enabled);
+        assert_eq!(settings.pdf_preflight_page_limit, 24);
 
         save_selection_settings(&connection, SelectionMode::Automatic, "Alt+L")
             .expect("selection settings write should succeed");
@@ -2008,12 +2036,40 @@ mod tests {
                 .paragraph_learning_mode_enabled
         );
 
-        save_settings(&connection, 20, false, 64 * 1024 * 1024, true, true)
+        save_settings(&connection, 20, false, 64 * 1024 * 1024, true, true, 10)
             .expect("general settings should save");
         assert!(
             get_settings(&connection)
                 .expect("general settings should preserve learning mode")
                 .paragraph_learning_mode_enabled
+        );
+    }
+
+    #[test]
+    fn pdf_preflight_settings_default_clamp_and_toggle_independently() {
+        let connection = test_connection();
+        let defaults = get_settings(&connection).expect("default settings should be readable");
+        assert!(defaults.pdf_preflight_enabled);
+        assert_eq!(
+            defaults.pdf_preflight_page_limit,
+            DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT
+        );
+
+        save_settings(&connection, 20, true, 64 * 1024 * 1024, true, true, 999)
+            .expect("PDF page limit should save");
+        assert_eq!(
+            get_settings(&connection)
+                .expect("clamped settings should be readable")
+                .pdf_preflight_page_limit,
+            MAX_PDF_PREFLIGHT_PAGE_LIMIT
+        );
+
+        save_pdf_preflight_enabled(&connection, false).expect("PDF switch should save");
+        let disabled = get_settings(&connection).expect("disabled settings should be readable");
+        assert!(!disabled.pdf_preflight_enabled);
+        assert_eq!(
+            disabled.pdf_preflight_page_limit,
+            MAX_PDF_PREFLIGHT_PAGE_LIMIT
         );
     }
 

@@ -26,8 +26,8 @@ from typing import Any, BinaryIO, Callable
 PROTOCOL_VERSION = 2
 MAX_LINE_BYTES = 8 * 1024 * 1024
 ENGINE_VERSION = "babeldoc-0.6.4"
-PREFLIGHT_MAX_SAMPLES = 8
-PREFLIGHT_MAX_SAMPLE_CHARS = 12_000
+PREFLIGHT_MAX_SAMPLES = 12
+PREFLIGHT_MAX_SAMPLE_CHARS = 24_000
 PREFLIGHT_MAX_CONTEXT_SEGMENTS = 3
 PREFLIGHT_MAX_CONTEXT_CHARS = 4_000
 PREFLIGHT_MAX_CONSTRAINT_ITEMS = 64
@@ -871,18 +871,20 @@ class BabelDocWorker:
                 options = {}
             lang_in = str(options.get("source_language") or "en")
             lang_out = str(options.get("target_language") or "zh-CN")
-            preflight = DocumentPreflightCoordinator(
-                task_id=task_id,
-                source_language=lang_in,
-                target_language=lang_out,
-                emit=self.emit,
-                cancel_event=self.cancel_event,
-                metadata=_preflight_metadata(options),
-                engine_constraints=_preflight_engine_constraints(options),
-                configured_samples=_preflight_configured_samples(options),
-                timeout_seconds=_preflight_timeout(options),
-                on_state=self._save_document_context,
-            )
+            preflight = None
+            if options.get("preflight_enabled", True) is not False:
+                preflight = DocumentPreflightCoordinator(
+                    task_id=task_id,
+                    source_language=lang_in,
+                    target_language=lang_out,
+                    emit=self.emit,
+                    cancel_event=self.cancel_event,
+                    metadata=_preflight_metadata(options),
+                    engine_constraints=_preflight_engine_constraints(options),
+                    configured_samples=_preflight_configured_samples(options),
+                    timeout_seconds=_preflight_timeout(options),
+                    on_state=self._save_document_context,
+                )
             self._document_preflight = preflight
             with redirect_stdout(sys.stderr):
                 result = _run_babeldoc(

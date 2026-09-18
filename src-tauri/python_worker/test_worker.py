@@ -15,6 +15,8 @@ from worker import (
     DocumentPreflightCoordinator,
     MAX_LINE_BYTES,
     LiltTranslator,
+    PREFLIGHT_MAX_SAMPLE_CHARS,
+    PREFLIGHT_MAX_SAMPLES,
     PREFLIGHT_TIMEOUT_SECONDS,
     ResponseRouter,
     WorkerCancelled,
@@ -550,6 +552,18 @@ class DocumentPreflightTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertIsInstance(result["error"], WorkerCancelled)
 
+    def test_preflight_sample_limits_are_applied_to_configured_samples(self):
+        from worker import _limited_preflight_samples
+
+        samples = _limited_preflight_samples(
+            [{"segment_id": str(index), "source_text": "x" * 3000} for index in range(20)]
+        )
+        self.assertLessEqual(len(samples), PREFLIGHT_MAX_SAMPLES)
+        self.assertLessEqual(
+            sum(len(sample["source_text"]) for sample in samples),
+            PREFLIGHT_MAX_SAMPLE_CHARS,
+        )
+
     @staticmethod
     def _capture_exception(result, operation):
         try:
@@ -558,7 +572,11 @@ class DocumentPreflightTests(unittest.TestCase):
             result["error"] = exc
 
 
-def _start_job_message(input_pdf: pathlib.Path, output_dir: pathlib.Path) -> dict:
+def _start_job_message(
+    input_pdf: pathlib.Path,
+    output_dir: pathlib.Path,
+    pdf_options: dict | None = None,
+) -> dict:
     return {
         "type": "START_JOB",
         "protocol_version": 2,
@@ -566,8 +584,40 @@ def _start_job_message(input_pdf: pathlib.Path, output_dir: pathlib.Path) -> dic
         "input_pdf": str(input_pdf),
         "output_dir": str(output_dir),
         "engine_version": "babeldoc-0.6.4",
-        "pdf_options": {"source_language": "en", "target_language": "zh-CN"},
+        "pdf_options": pdf_options or {"source_language": "en", "target_language": "zh-CN"},
     }
+
+
+class WorkerJobTests(unittest.TestCase):
+    def test_explicitly_disabled_preflight_does_not_emit_a_preflight_request(self):
+        events = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            input_pdf = root / "input.pdf"
+            input_pdf.write_bytes(b"%PDF-1.7\n")
+            output_dir = root / "output"
+            worker = BabelDocWorker(emit=events.append)
+            worker._task_id = "task-1"
+            observed = {}
+
+            def run_job(_message, _input_pdf, _output_dir, _router, _cancel, _emit, _api, *, preflight=None):
+                observed["preflight"] = preflight
+                return {"output_pdf": str(output_dir / "translated.pdf"), "warnings": []}
+
+            with mock.patch("worker._run_babeldoc", side_effect=run_job):
+                worker._run_job(
+                    _start_job_message(
+                        input_pdf,
+                        output_dir,
+                        {"source_language": "en", "target_language": "zh-CN", "preflight_enabled": False},
+                    ),
+                    input_pdf,
+                    output_dir,
+                    object(),
+                )
+
+        self.assertIsNone(observed["preflight"])
+        self.assertFalse(any(event.get("type") == "DOCUMENT_PREFLIGHT_REQUEST" for event in events))
 
 
 class WorkerStartupTests(unittest.TestCase):

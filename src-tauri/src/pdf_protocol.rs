@@ -219,9 +219,20 @@ pub struct DocumentPreflightRequestMessage {
     #[serde(default)]
     pub metadata: Value,
     #[serde(default)]
-    pub samples: Vec<TranslationSegment>,
+    pub samples: Vec<DocumentPreflightSample>,
     #[serde(default)]
     pub engine_constraints: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct DocumentPreflightSample {
+    pub segment_id: String,
+    pub source_text: String,
+    #[serde(default)]
+    pub placeholders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_number: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -394,10 +405,10 @@ mod tests {
     use super::{
         CancelJobMessage, DocumentPreflightAcceptedMessage, DocumentPreflightActivityMessage,
         DocumentPreflightActivityPhase, DocumentPreflightRequestMessage,
-        DocumentPreflightResponseMessage, DocumentPreflightTimeoutMessage, FinishedMessage,
-        JobStartedMessage, MAX_PROTOCOL_LINE_BYTES, PDF_WORKER_PROTOCOL_VERSION, ProtocolError,
-        ProtocolErrorPayload, RustToWorkerMessage, StartJobMessage, TokenUsage, TokenUsageMessage,
-        TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
+        DocumentPreflightResponseMessage, DocumentPreflightSample, DocumentPreflightTimeoutMessage,
+        FinishedMessage, JobStartedMessage, MAX_PROTOCOL_LINE_BYTES, PDF_WORKER_PROTOCOL_VERSION,
+        ProtocolError, ProtocolErrorPayload, RustToWorkerMessage, StartJobMessage, TokenUsage,
+        TokenUsageMessage, TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
         TranslationResponseOutcome, TranslationSegment, WarningMessage, WorkerToRustMessage,
         decode_rust_message, decode_worker_message, encode_rust_message, encode_worker_message,
     };
@@ -492,10 +503,11 @@ mod tests {
                 source_language: "en".to_string(),
                 target_language: "zh-CN".to_string(),
                 metadata: json!({"title": "A paper"}),
-                samples: vec![TranslationSegment {
+                samples: vec![DocumentPreflightSample {
                     segment_id: "p1-s1".to_string(),
                     source_text: "A sample".to_string(),
                     placeholders: Vec::new(),
+                    page_number: Some(1),
                 }],
                 engine_constraints: json!({"preserve_placeholders": true}),
             });

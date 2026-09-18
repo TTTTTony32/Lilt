@@ -437,6 +437,16 @@ describe("PDF document context and quality contracts", () => {
     });
     expect(degraded?.preflight.status).toBe("degraded");
     expect(degraded?.preflight.applied).toBe(false);
+
+    const notApplied = decodePdfPreflightEvent("pdf_translation_preflight_completed", {
+      taskId: "task-1",
+      preflightRequestId: "preflight-1",
+      documentContext: { title: "标题", key_terms: [], abbreviations: [] },
+      context_hash: "ctx-4",
+      applied: false,
+    });
+    expect(notApplied?.type).toBe("preflightCompleted");
+    expect(notApplied?.preflight.applied).toBe(false);
   });
 
   it("decodes preflight activity phases and protects terminal state from late events", () => {
@@ -484,6 +494,7 @@ describe("PDF document context and quality contracts", () => {
       tokenUsage: null,
       code: null,
       message: null,
+      logs: [],
       preflight: createEmptyPdfPreflightState(),
       documentContext: null,
       diagnostics: [],

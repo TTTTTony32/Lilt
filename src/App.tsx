@@ -123,6 +123,7 @@ const SETTINGS_SECTIONS = [
   { id: "provider", label: "Provider", icon: Settings },
   { id: "prompt", label: "Prompt", icon: FileText },
   { id: "selection", label: "划词翻译", icon: Languages },
+  { id: "pdf", label: "PDF 全文翻译", icon: FileType2 },
   { id: "local", label: "本地数据", icon: FileType2 },
   { id: "behavior", label: "关闭行为", icon: X },
   { id: "about", label: "关于", icon: Info },
@@ -334,6 +335,7 @@ function App() {
   const [activeRequestMode, setActiveRequestMode] = useState<TranslationRequestMode | null>(null);
   const [learningResult, setLearningResult] = useState<ParagraphLearningResult | null>(null);
   const [learningModeSaving, setLearningModeSaving] = useState(false);
+  const [pdfPreflightSaving, setPdfPreflightSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [translationSummary, setTranslationSummary] = useState<TranslationSummary | null>(null);
@@ -653,6 +655,31 @@ function App() {
       setLearningModeSaving(false);
     }
   }, [learningModeSaving, snapshot.settings.paragraphLearningModeEnabled]);
+
+  const handlePdfPreflightEnabledChange = useCallback(async (enabled: boolean) => {
+    if (pdfPreflightSaving) return;
+    const previous = snapshot.settings.pdfPreflightEnabled;
+    if (previous === enabled) return;
+    setPdfPreflightSaving(true);
+    setSnapshot((current) => ({
+      ...current,
+      settings: { ...current.settings, pdfPreflightEnabled: enabled },
+    }));
+    setError(null);
+    setNotice(null);
+    try {
+      await invokeCommand("set_pdf_preflight_enabled", { enabled });
+      setNotice(enabled ? "PDF 文档预检已开启" : "PDF 文档预检已关闭");
+    } catch (reason) {
+      setSnapshot((current) => ({
+        ...current,
+        settings: { ...current.settings, pdfPreflightEnabled: previous },
+      }));
+      setError(describeError(reason, "PDF 文档预检设置保存失败"));
+    } finally {
+      setPdfPreflightSaving(false);
+    }
+  }, [pdfPreflightSaving, snapshot.settings.pdfPreflightEnabled]);
 
   const handleDictionaryHistoryChanged = useCallback((history: DictionaryHistoryEntry[]) => {
     setSnapshot((current) => ({ ...current, dictionaryHistory: history }));
@@ -1444,7 +1471,15 @@ function App() {
   };
 
   const handleSettingsSaved = useCallback((next: AppSnapshot) => {
-    setSnapshot(next);
+    setSnapshot((current) => ({
+      ...next,
+      settings: {
+        ...next.settings,
+        // The PDF switch has its own command and may still be optimistically
+        // saving while the settings workspace refreshes its snapshot.
+        pdfPreflightEnabled: current.settings.pdfPreflightEnabled,
+      },
+    }));
     setNotice("设置已保存");
     window.setTimeout(() => setNotice(null), 1800);
   }, []);
@@ -1550,7 +1585,16 @@ function App() {
                   onOpenDictionaryAbout={openDictionaryAbout}
                 />
               )}
-              {tab === "pdf" && <PdfView pdfEngine={pdfEngine} onResourceDownloadPrompt={openResourceDownloadPrompt} onOpenPdfEngineSettings={openPdfEngineSettings} />}
+              {tab === "pdf" && (
+                <PdfView
+                  pdfEngine={pdfEngine}
+                  pdfPreflightEnabled={snapshot.settings.pdfPreflightEnabled}
+                  pdfPreflightPageLimit={snapshot.settings.pdfPreflightPageLimit}
+                  onPdfPreflightEnabledChange={(enabled) => { void handlePdfPreflightEnabledChange(enabled); }}
+                  onResourceDownloadPrompt={openResourceDownloadPrompt}
+                  onOpenPdfEngineSettings={openPdfEngineSettings}
+                />
+              )}
               {tab === "personal" && (
                 <PersonalDictionaryView
                   entries={snapshot.personalDictionary}
@@ -2805,6 +2849,7 @@ function SettingsView({
         cacheMaxBytes: draft.settings.cacheMaxBytes,
         wordAiCacheEnabled: draft.settings.wordAiCacheEnabled,
         paragraphExampleLookupEnabled: draft.settings.paragraphExampleLookupEnabled,
+        pdfPreflightPageLimit: draft.settings.pdfPreflightPageLimit,
       });
       await invokeCommand("configure_selection", {
         mode: draft.selectionMode,
@@ -3108,6 +3153,27 @@ function SettingsView({
           </div>
           {selectionStatus?.message && <p className="error-message settings-message">{selectionStatus.message}</p>}
           <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}</span></div>
+        </div>
+
+        <div className="settings-section" id="settings-section-pdf" data-settings-section="pdf" ref={(element) => { settingsSectionRefs.current.pdf = element; }}>
+          <div className="card-heading"><div><strong>PDF 全文翻译</strong></div></div>
+          <label className="setting-line">
+            <span><strong>预检读取页数</strong></span>
+            <input
+              className="number-input"
+              type="number"
+              min={1}
+              max={100}
+              value={settings.pdfPreflightPageLimit}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                updateAppSettingsDraft({
+                  pdfPreflightPageLimit: Number.isFinite(value) ? Math.min(100, Math.max(1, Math.round(value))) : 1,
+                });
+              }}
+              aria-label="PDF 预检读取页数"
+            />
+          </label>
         </div>
 
         <div className="settings-section" id="settings-section-local" data-settings-section="local" ref={(element) => { settingsSectionRefs.current.local = element; }}>

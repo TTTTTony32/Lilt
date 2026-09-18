@@ -14,6 +14,8 @@ import {
   reducePdfPreflightEvent,
   reducePdfPreflightWarning,
 } from "./lib/pdf-preflight";
+import { appendPdfJobLogMessage, reducePdfJobLog } from "./lib/pdf-job-log";
+import type { PdfPreflightSample } from "./lib/pdf-reader-utils";
 import {
   PDF_JOB_EVENT_NAMES,
   decodePdfJobEvent,
@@ -46,6 +48,7 @@ function emptyPdfJob(): PdfJobUiState {
     tokenUsage: null,
     code: null,
     message: null,
+    logs: [],
     preflight: createEmptyPdfPreflightState(),
     documentContext: null,
     diagnostics: [],
@@ -91,6 +94,11 @@ function mergePdfJobEventMetadata(current: PdfJobUiState, event: PdfJobEvent): P
   return next;
 }
 
+function appendPdfJobEventLog(current: PdfJobUiState, event: PdfJobEvent): PdfJobUiState {
+  const logs = reducePdfJobLog(current.logs, event);
+  return logs === current.logs ? current : { ...current, logs };
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: number | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -103,11 +111,21 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 interface PdfViewProps {
   pdfEngine: PdfEngineRuntime;
+  pdfPreflightEnabled: boolean;
+  pdfPreflightPageLimit: number;
+  onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
   onOpenPdfEngineSettings: () => void;
 }
 
-export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdfEngineSettings }: PdfViewProps) {
+export default function PdfView({
+  pdfEngine,
+  pdfPreflightEnabled,
+  pdfPreflightPageLimit,
+  onPdfPreflightEnabledChange,
+  onResourceDownloadPrompt,
+  onOpenPdfEngineSettings,
+}: PdfViewProps) {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -208,16 +226,19 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
       case "preflightCompleted":
       case "preflightDegraded":
       case "preflightFailed":
-        updatePdfJob((current) => reducePdfPreflightEvent(current, event));
+        updatePdfJob((current) => {
+          const next = reducePdfPreflightEvent(current, event);
+          return next === current ? current : appendPdfJobEventLog(next, event);
+        });
         break;
       case "diagnostic":
-        updatePdfJob((current) => mergePdfJobEventMetadata({
+        updatePdfJob((current) => appendPdfJobEventLog(mergePdfJobEventMetadata({
           ...current,
           diagnostics: appendUniqueDiagnostics(current.diagnostics ?? [], [event.diagnostic]),
-        }, event));
+        }, event), event));
         break;
       case "started":
-        updatePdfJob((current) => mergePdfJobEventMetadata({
+        updatePdfJob((current) => appendPdfJobEventLog(mergePdfJobEventMetadata({
           ...current,
           taskId: event.taskId,
           status: current.status === "cancelling" ? "cancelling" : "running",
@@ -225,7 +246,7 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
           workerVersion: event.workerVersion,
           message: null,
           code: null,
-        }, event));
+        }, event), event));
         break;
       case "stage":
         updatePdfJob((current) => {
@@ -236,7 +257,8 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
             stage: event.stage,
             message: null,
           }, event);
-          return /preflight/i.test(event.stage) ? markPdfPreflightRunning(next) : next;
+          const nextWithPreflight = /preflight/i.test(event.stage) ? markPdfPreflightRunning(next) : next;
+          return appendPdfJobEventLog(nextWithPreflight, event);
         });
         break;
       case "progress":
@@ -249,16 +271,20 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
             progress: event.progress,
             message: event.progress.message ?? current.message,
           }, event);
-          return /preflight/i.test(event.progress.stage) ? markPdfPreflightRunning(next) : next;
+          const nextWithPreflight = /preflight/i.test(event.progress.stage) ? markPdfPreflightRunning(next) : next;
+          return appendPdfJobEventLog(nextWithPreflight, event);
         });
         break;
       case "tokenUsage":
         updatePdfJob((current) => mergePdfJobEventMetadata({ ...current, tokenUsage: event.usage }, event));
         break;
       case "warning":
-        updatePdfJob((current) => event.code.toLowerCase().includes("preflight")
-          ? reducePdfPreflightWarning(current, event)
-          : (() => {
+        updatePdfJob((current) => {
+          if (event.code.toLowerCase().includes("preflight")) {
+            const next = reducePdfPreflightWarning(current, event);
+            return next === current ? current : appendPdfJobEventLog(next, event);
+          }
+          return appendPdfJobEventLog((() => {
             const next = mergePdfJobEventMetadata({
               ...current,
               warnings: appendUniqueStrings(current.warnings, [event.message]),
@@ -266,7 +292,8 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
             return event.diagnostic
               ? { ...next, diagnostics: appendUniqueDiagnostics(next.diagnostics ?? [], [event.diagnostic]) }
               : next;
-          })());
+          })(), event);
+        });
         break;
       case "finished": {
         clearPdfTaskRefs();
@@ -277,7 +304,7 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
         } else {
           setError("翻译已完成，但输出 PDF 路径无效。请从任务面板检查输出文件。");
         }
-        updatePdfJob((current) => mergePdfJobEventMetadata({
+        updatePdfJob((current) => appendPdfJobEventLog(mergePdfJobEventMetadata({
           ...current,
           taskId: event.taskId,
           status: "completed",
@@ -289,19 +316,19 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
           warnings: appendUniqueStrings(current.warnings, event.warnings),
           message: null,
           code: null,
-        }, event));
+        }, event), event));
         break;
       }
       case "cancelled":
         clearPdfTaskRefs();
-        updatePdfJob((current) => mergePdfJobEventMetadata({
+        updatePdfJob((current) => appendPdfJobEventLog(mergePdfJobEventMetadata({
           ...current,
           taskId: event.taskId,
           status: "cancelled",
           message: event.reason ?? "PDF 翻译已取消",
           code: null,
           outputPdf: null,
-        }, event));
+        }, event), event));
         break;
       case "failed":
         clearPdfTaskRefs();
@@ -322,20 +349,39 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
             message: event.message,
             outputPdf: null,
           }, event);
-          return next;
+          return appendPdfJobEventLog(next, event);
         });
         break;
     }
   }, [clearPdfTaskRefs, matchesPdfTask, updatePdfJob]);
 
-  const startPdfTranslation = useCallback(async () => {
+  const startPdfTranslation = useCallback(async (
+    samples: PdfPreflightSample[] = [],
+    preflightWarning: string | null = null,
+  ) => {
     if (!selectedFile) return;
     if (!jobEventsReady) {
-      updatePdfJob((current) => ({ ...current, status: "failed", message: jobEventsError ?? "PDF 任务事件监听尚未就绪，请稍后再试。" }));
+      updatePdfJob((current) => {
+        const message = jobEventsError ?? "PDF 任务事件监听尚未就绪，请稍后再试。";
+        return {
+          ...current,
+          status: "failed",
+          message,
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+        };
+      });
       return;
     }
     if (engineStatus?.status !== "ready") {
-      updatePdfJob((current) => ({ ...current, status: "failed", message: engineError ?? "PDF Engine 尚未就绪，请先准备运行环境。" }));
+      updatePdfJob((current) => {
+        const message = engineError ?? "PDF Engine 尚未就绪，请先准备运行环境。";
+        return {
+          ...current,
+          status: "failed",
+          message,
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+        };
+      });
       return;
     }
     if (activeTaskIdRef.current || startAttemptRef.current !== null || pdfJobRef.current.status === "starting") return;
@@ -343,7 +389,19 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
     const attempt = startAttemptSequenceRef.current + 1;
     startAttemptSequenceRef.current = attempt;
     startAttemptRef.current = attempt;
-    updatePdfJob(() => ({ ...emptyPdfJob(), status: "starting", message: null }));
+    let initialLogs = appendPdfJobLogMessage([], "system", "info", "正在准备 PDF 翻译任务");
+    initialLogs = appendPdfJobLogMessage(
+      initialLogs,
+      "preflight",
+      pdfPreflightEnabled ? "info" : "warning",
+      pdfPreflightEnabled
+        ? `文档预检已启用，将读取前 ${pdfPreflightPageLimit} 页`
+        : "文档预检已关闭，将跳过预检请求",
+    );
+    if (preflightWarning) {
+      initialLogs = appendPdfJobLogMessage(initialLogs, "warning", "warning", preflightWarning);
+    }
+    updatePdfJob(() => ({ ...emptyPdfJob(), status: "starting", message: null, logs: initialLogs }));
     try {
       const commandPromise = invokeCommand<unknown>("start_pdf_translation", {
         filePath: selectedFile.path,
@@ -352,6 +410,9 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
           target_language: "zh-CN",
           output_mode: "bilingual",
           metadata: { file_name: selectedFile.fileName },
+          preflight_enabled: pdfPreflightEnabled,
+          preflight_page_limit: pdfPreflightPageLimit,
+          samples: pdfPreflightEnabled ? samples : [],
         },
       });
       void commandPromise.then((lateRaw) => {
@@ -380,14 +441,18 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
     } catch (reason) {
       if (disposedRef.current || startAttemptRef.current !== attempt) return;
       clearPdfTaskRefs();
-      updatePdfJob((current) => ({
-        ...current,
-        status: "failed",
-        code: "start_failed",
-        message: describeError(reason, "启动 PDF 翻译失败"),
-      }));
+      updatePdfJob((current) => {
+        const message = describeError(reason, "启动 PDF 翻译失败");
+        return {
+          ...current,
+          status: "failed",
+          code: "start_failed",
+          message,
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+        };
+      });
     }
-  }, [clearPdfTaskRefs, engineError, engineStatus?.status, jobEventsError, jobEventsReady, selectedFile, updatePdfJob]);
+  }, [clearPdfTaskRefs, engineError, engineStatus?.status, jobEventsError, jobEventsReady, pdfPreflightEnabled, pdfPreflightPageLimit, selectedFile, updatePdfJob]);
 
   const cancelPdfTranslation = useCallback(async () => {
     const taskId = activeTaskIdRef.current;
@@ -403,6 +468,7 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
         status: "cancelled",
         message: "取消确认超时，Worker 已终止。",
         code: "cancel_timeout",
+        logs: appendPdfJobLogMessage(current.logs, "result", "warning", "取消确认超时，Worker 已终止。"),
       }));
     }, PDF_TRANSLATION_CANCEL_TIMEOUT_MS);
 
@@ -413,18 +479,29 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
       if (result === null) throw new Error("取消命令返回了无法识别的状态。");
       if (!result) {
         clearPdfTaskRefs();
-        updatePdfJob((current) => ({ ...current, taskId, status: "cancelled", message: "PDF 翻译任务已结束。", code: null }));
+        updatePdfJob((current) => ({
+          ...current,
+          taskId,
+          status: "cancelled",
+          message: "PDF 翻译任务已结束。",
+          code: null,
+          logs: appendPdfJobLogMessage(current.logs, "result", "warning", "PDF 翻译任务已结束。"),
+        }));
       }
     } catch (reason) {
       if (disposedRef.current || activeTaskIdRef.current !== taskId) return;
       clearPdfTaskRefs();
-      updatePdfJob((current) => ({
-        ...current,
-        taskId,
-        status: "failed",
-        code: "cancel_failed",
-        message: describeError(reason, "取消 PDF 翻译失败"),
-      }));
+      updatePdfJob((current) => {
+        const message = describeError(reason, "取消 PDF 翻译失败");
+        return {
+          ...current,
+          taskId,
+          status: "failed",
+          code: "cancel_failed",
+          message,
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+        };
+      });
     }
   }, [clearCancelTimeout, clearPdfTaskRefs, updatePdfJob]);
 
@@ -597,7 +674,10 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
               jobEventsReady={jobEventsReady}
               jobEventsError={jobEventsError}
               translationEnabled={engineStatus?.status === "ready" && jobEventsReady}
-              onStartTranslation={() => void startPdfTranslation()}
+              pdfPreflightEnabled={pdfPreflightEnabled}
+              pdfPreflightPageLimit={pdfPreflightPageLimit}
+              onPdfPreflightEnabledChange={onPdfPreflightEnabledChange}
+              onStartTranslation={(samples, warning) => void startPdfTranslation(samples, warning)}
               onCancelTranslation={() => void cancelPdfTranslation()}
               onOpenOutputDirectory={(path) => void openOutputDirectory(path)}
             />
