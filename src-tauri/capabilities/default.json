@@ -10,6 +10,7 @@
     "core:default",
     "dialog:allow-open",
     "dialog:allow-save",
+    "opener:allow-open-url",
     "core:event:allow-listen",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
