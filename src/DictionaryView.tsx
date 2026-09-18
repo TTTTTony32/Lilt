@@ -228,7 +228,7 @@ export default function DictionaryView({
           <p className="eyebrow">DICTIONARY</p>
           <div className="page-title-line">
             <h1>词典</h1>
-            <button className="page-title-meta page-title-meta-link" type="button" onClick={onOpenDictionaryAbout} aria-label="查看关于中的词典版本">
+            <button id="dictionary-version-entry" className="page-title-meta page-title-meta-link dictionary-version-meta" type="button" onClick={onOpenDictionaryAbout} aria-label="查看关于中的词典版本">
               <span>版本 {state.installedRelease ?? "未安装"}</span>
             </button>
           </div>

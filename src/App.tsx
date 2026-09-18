@@ -322,6 +322,7 @@ function FeedbackMessage({
 }
 
 function App() {
+  const reducedMotion = usePrefersReducedMotion();
   const [snapshot, setSnapshot] = useState<AppSnapshot>(DEFAULT_SNAPSHOT);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [tab, setTab] = useState<AppTab>("translate");
@@ -345,6 +346,7 @@ function App() {
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [closeDialogMounted, setCloseDialogMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsWorkspaceMounted, setSettingsWorkspaceMounted] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyOverlayMounted, setHistoryOverlayMounted] = useState(false);
   const [dataTransferOpen, setDataTransferOpen] = useState(false);
@@ -371,7 +373,10 @@ function App() {
   const activePdfEngineOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
   const settingsWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const settingsOpenRef = useRef(settingsOpen);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const settingsReturnFocusIdRef = useRef<string | null>(null);
+  const settingsToggleRef = useRef<HTMLButtonElement | null>(null);
   const historyDialogRef = useRef<HTMLDivElement | null>(null);
   const historyReturnFocusRef = useRef<HTMLElement | null>(null);
   const dataTransferReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -459,8 +464,11 @@ function App() {
 
   const openSettings = useCallback(() => {
     if (settingsOpen) return;
-    settingsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    settingsReturnFocusRef.current = activeElement;
+    settingsReturnFocusIdRef.current = activeElement?.id || null;
     setSettingsNavigationTarget(null);
+    setSettingsWorkspaceMounted(true);
     setSettingsOpen(true);
   }, [settingsOpen]);
 
@@ -471,7 +479,10 @@ function App() {
 
   const openSettingsAt = useCallback((target: SettingsNavigationTarget) => {
     if (!settingsOpen) {
-      settingsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      settingsReturnFocusRef.current = activeElement;
+      settingsReturnFocusIdRef.current = activeElement?.id || null;
+      setSettingsWorkspaceMounted(true);
       setSettingsOpen(true);
     }
     setSettingsNavigationTarget(target);
@@ -485,6 +496,20 @@ function App() {
   const openDictionaryAbout = useCallback(() => {
     openSettingsAt({ sectionId: "about", anchor: "dictionary-version", modal: "dictionary" });
   }, [openSettingsAt]);
+
+  settingsOpenRef.current = settingsOpen;
+
+  const finishSettingsClose = useCallback(() => {
+    if (settingsOpenRef.current) return;
+    setSettingsWorkspaceMounted(false);
+    const previouslyFocused = settingsReturnFocusRef.current;
+    settingsReturnFocusRef.current = null;
+    const fallbackFocus = settingsReturnFocusIdRef.current
+      ? document.getElementById(settingsReturnFocusIdRef.current)
+      : null;
+    settingsReturnFocusIdRef.current = null;
+    (previouslyFocused?.isConnected ? previouslyFocused : fallbackFocus ?? settingsToggleRef.current)?.focus();
+  }, []);
 
   const openHistory = useCallback(() => {
     historyReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -536,15 +561,13 @@ function App() {
         document.removeEventListener("keydown", handleKeyDown);
       };
     }
-
-    const previouslyFocused = settingsReturnFocusRef.current;
-    if (!previouslyFocused) return undefined;
-    const frame = window.requestAnimationFrame(() => {
-      previouslyFocused.focus();
-      settingsReturnFocusRef.current = null;
-    });
-    return () => window.cancelAnimationFrame(frame);
+    return undefined;
   }, [requestSettingsClose, settingsOpen]);
+
+  useEffect(() => {
+    if (settingsOpen || !settingsWorkspaceMounted || !reducedMotion) return;
+    finishSettingsClose();
+  }, [finishSettingsClose, reducedMotion, settingsOpen, settingsWorkspaceMounted]);
 
   useEffect(() => {
     if (!historyOpen) return;
@@ -1442,7 +1465,7 @@ function App() {
         </div>
         {!settingsOpen && <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />}
         <div className="chrome-actions" data-no-drag>
-          <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={settingsOpen ? requestSettingsClose : openSettings} aria-label={settingsOpen ? "返回 Lilt" : "打开设置"} aria-expanded={settingsOpen} title={settingsOpen ? "返回 Lilt" : "设置"}>{settingsOpen ? <ArrowLeft size={16} /> : <Settings size={16} />}</button>
+          <button ref={settingsToggleRef} className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={settingsOpen ? requestSettingsClose : openSettings} aria-label={settingsOpen ? "返回 Lilt" : "打开设置"} aria-expanded={settingsOpen} title={settingsOpen ? "返回 Lilt" : "设置"}>{settingsOpen ? <ArrowLeft size={16} /> : <Settings size={16} />}</button>
           <div className="window-controls" data-no-drag>
             <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={14} /></button>
             <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
@@ -1452,8 +1475,18 @@ function App() {
       </header>
 
       <main className={`main-content ${settingsOpen ? "settings-main-content" : ""} ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""} ${usesInternalScrollLayout ? "pdf-main-content" : ""}`}>
-        {settingsOpen ? (
-          <div className="settings-workspace" ref={settingsWorkspaceRef} role="region" aria-labelledby="settings-workspace-title" tabIndex={-1}>
+        {settingsWorkspaceMounted && (
+          <div
+            className={`settings-workspace ${settingsOpen ? "settings-workspace-entering" : "settings-workspace-exiting"}`}
+            ref={settingsWorkspaceRef}
+            role="region"
+            aria-labelledby="settings-workspace-title"
+            tabIndex={-1}
+            onAnimationEnd={(event) => {
+              if (event.target !== event.currentTarget) return;
+              finishSettingsClose();
+            }}
+          >
             <SettingsView
               snapshot={snapshot}
               dictionaryProgress={dictionaryProgress}
@@ -1464,7 +1497,8 @@ function App() {
               onSaved={handleSettingsSaved}
             />
           </div>
-        ) : (
+        )}
+        {!settingsOpen && (
           <PageTransition activeKey={tab}>
             <div className="page-view" key={tab}>
               {tab === "translate" && (
@@ -3094,9 +3128,11 @@ function SettingsView({
         <div className="settings-section settings-about-section" id="settings-section-about" data-settings-section="about" ref={(element) => { settingsSectionRefs.current.about = element; }}>
           <div className="card-heading"><div><strong>关于</strong></div></div>
           <div className="about-info-list">
-            <div className="about-info-row"><span>程序版本</span><strong>v{APP_VERSION}</strong></div>
-            <div className="about-info-row"><span>本地词典版本</span><button className="about-version-button" id="settings-about-dictionary-version" ref={aboutDictionaryRef} type="button" onClick={() => openResourceModal("dictionary")} aria-haspopup="dialog" aria-label="打开本地词典准备弹窗">{snapshot.dictionary.installedRelease ?? "未安装"}</button></div>
-            <div className="about-info-row"><span>PDF Engine 版本</span><button className="about-version-button" id="settings-about-pdf-engine" ref={aboutPdfEngineRef} type="button" onClick={() => openResourceModal("pdf-engine")} aria-haspopup="dialog" aria-label="打开 PDF Engine 准备弹窗">{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</button></div>
+            <div className="about-version-group">
+              <div className="about-info-row"><span>程序版本</span><strong>v{APP_VERSION}</strong></div>
+              <div className="about-info-row"><span>本地词典版本</span><button className="about-version-button" id="settings-about-dictionary-version" ref={aboutDictionaryRef} type="button" onClick={() => openResourceModal("dictionary")} aria-haspopup="dialog" aria-label="打开本地词典准备弹窗">{snapshot.dictionary.installedRelease ?? "未安装"}</button></div>
+              <div className="about-info-row"><span>PDF Engine 版本</span><button className="about-version-button" id="settings-about-pdf-engine" ref={aboutPdfEngineRef} type="button" onClick={() => openResourceModal("pdf-engine")} aria-haspopup="dialog" aria-label="打开 PDF Engine 准备弹窗">{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</button></div>
+            </div>
             <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer">TTTTTony32/Lilt</a></div>
             <div className="about-info-row"><span>开发者</span><span>Tony32 · <a href={`mailto:${DEVELOPER_EMAIL}`}>{DEVELOPER_EMAIL}</a></span></div>
           </div>

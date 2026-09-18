@@ -570,9 +570,16 @@ export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdf
             <p className="eyebrow">PDF TRANSLATION</p>
             <div className="page-title-line pdf-page-title-line">
               <h1>PDF 全文翻译</h1>
-              <span className={`pdf-engine-status-bubble ${engineStatus?.status === "ready" ? "is-ready" : "is-unavailable"}`} role="status" aria-live="polite">
+              <button
+                id="pdf-engine-status-entry"
+                className={`pdf-engine-status-bubble pdf-engine-status-bubble-button ${engineStatus?.status === "ready" ? "is-ready" : "is-unavailable"}`}
+                type="button"
+                onClick={onOpenPdfEngineSettings}
+                aria-label="打开 PDF Engine 设置"
+                aria-live="polite"
+              >
                 {engineStatus?.status === "ready" ? "PDF引擎可用" : "PDF引擎不可用"}
-              </span>
+              </button>
             </div>
           </div>
         </div>
