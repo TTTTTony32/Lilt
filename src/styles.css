@@ -139,7 +139,7 @@ h1 { margin: 0; color: #303a32; font-family: Georgia, "Songti SC", serif; font-s
 .dictionary-page-heading .page-title-meta-link { transform: translateY(1px); }
 .pdf-page-title-line { align-items: center; gap: 10px; }
 .pdf-engine-status-bubble { min-height: 24px; padding: 4px 9px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #e2b8b0; border-radius: 999px; color: #a25e53; background: #fbefec; font-size: 10px; line-height: 1; white-space: nowrap; }
-.pdf-engine-status-bubble-button { appearance: none; font: inherit; cursor: pointer; transition: color var(--motion-fast-duration) var(--motion-ease), border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
+.pdf-engine-status-bubble-button { appearance: none; cursor: pointer; transition: color var(--motion-fast-duration) var(--motion-ease), border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
 .pdf-engine-status-bubble-button:hover { box-shadow: 0 2px 7px rgba(72, 99, 76, .1); }
 .pdf-engine-status-bubble-button:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; }
 .pdf-page-title-line .pdf-engine-status-bubble { transform: translateY(1px); }
