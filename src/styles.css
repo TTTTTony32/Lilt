@@ -85,14 +85,13 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-content { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .settings-content-scroll { flex: 1 1 auto; min-height: 0; padding-top: var(--chrome-height); overflow-y: auto; scroll-padding-top: var(--chrome-height); scrollbar-width: none; }
 .settings-content-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
-.settings-section { width: 100%; max-width: 1120px; margin: 0 auto; padding: clamp(26px, 4vh, 38px) clamp(24px, 4vw, 72px) clamp(36px, 5vh, 56px); border-bottom: 1px solid #e1e2d9; }
-.settings-section:last-child { border-bottom: 0; }
-.settings-section > .card-heading, .settings-section > .list-card-heading { margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid #e3e4dc; }
-.settings-about-section { border-bottom: 0; }
-.settings-section > .card-heading strong, .settings-section > .list-card-heading strong { color: #4e5e51; font-size: 14px; }
-.settings-section > .card-heading span, .settings-section > .list-card-heading span { color: #969d94; }
-.settings-section .form-actions { border-top: 1px solid #e8e8e1; }
+.settings-section { width: 100%; max-width: 1120px; margin: 0 auto; padding: clamp(26px, 4vh, 38px) clamp(24px, 4vw, 72px) clamp(36px, 5vh, 56px); border-bottom: 0; }
+.settings-section > .card-heading, .settings-section > .list-card-heading, .settings-section .settings-section-heading { margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid #e3e4dc; }
+.settings-section > .card-heading strong, .settings-section > .list-card-heading strong, .settings-section .settings-section-heading strong { color: #4e5e51; font-size: 14px; }
+.settings-section > .card-heading span, .settings-section > .list-card-heading span, .settings-section .settings-section-heading span { color: #969d94; }
+.settings-section .form-actions { border-top: 0; }
 .settings-section .setting-line:last-of-type { border-bottom: 0; }
+#settings-section-local .setting-line { border-bottom: 0; }
 .about-info-list { border-top: 0; }
 .about-version-group { border-bottom: 0; }
 .about-version-group .about-info-row { border-bottom: 0; }
@@ -106,8 +105,6 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .about-info-row a { color: #66806a; text-decoration: none; }
 .about-info-row a:hover { color: #4f6c56; text-decoration: underline; }
 .about-info-row a:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; border-radius: 3px; }
-.settings-feedback { width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 clamp(24px, 4vw, 72px) 24px; }
-.settings-feedback .settings-message { margin: 0 0 5px; }
 .main-content.translate-main-content { overflow-y: hidden; overscroll-behavior: none; }
 .main-content.bounded-list-main-content { overflow-y: hidden; overscroll-behavior: none; }
 .main-content.pdf-main-content { overflow-y: hidden; overscroll-behavior: none; }
@@ -373,7 +370,6 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-task-progress-label span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pdf-task-progress-track { height: 5px; overflow: hidden; border-radius: 5px; background: #e1e5de; }
 .pdf-task-progress-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
-.pdf-task-error { margin: 8px 0 0; color: #a25e53; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .pdf-task-log { height: 220px; margin-top: 8px; padding: 8px 10px; overflow-x: hidden; overflow-y: auto; border: 1px solid #e0e5dc; border-radius: 6px; background: rgba(255, 255, 251, .68); scrollbar-width: none; -ms-overflow-style: none; }
 .pdf-task-log::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .pdf-task-log-list { margin: 0; padding: 0; }
@@ -490,23 +486,40 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-progress { margin: 0 0 12px; }
 .selection-settings-grid { margin-top: 2px; }
 .prompt-manager-grid { display: grid; grid-template-columns: 220px 1fr; gap: 18px; }
-.prompt-list { display: grid; align-content: start; gap: 5px; }
-.prompt-list-item { min-height: 52px; padding: 9px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid transparent; border-radius: 7px; color: #68766b; background: #f4f5ef; text-align: left; }
+.prompt-list { display: grid; align-content: start; gap: 8px; }
+.prompt-list-item { min-height: 58px; padding: 10px 11px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid #dde1d8; border-radius: 8px; color: #68766b; background: #f7f8f3; text-align: left; }
 .prompt-list-item:hover { border-color: #d0dbcf; background: #edf2ea; }
 .prompt-list-item.is-active { border-color: #b9cbb8; color: #4b6354; background: #e9f0e6; }
 .prompt-list-item strong, .prompt-list-item small { display: block; }
 .prompt-list-item strong { font-size: 12px; font-weight: 600; }
 .prompt-list-item small { margin-top: 4px; color: #9ba399; font-size: 10px; }
 .prompt-list-item em { color: #6e8a72; font-size: 10px; font-style: normal; white-space: nowrap; }
+.prompt-list-item:not(.prompt-list-create) { align-items: center; }
+.prompt-list-select { width: 100%; min-width: 0; flex: 1 1 auto; padding: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; color: inherit; background: transparent; text-align: left; }
+.prompt-list-select > span { min-width: 0; }
+.prompt-list-select:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; border-radius: 4px; }
+.prompt-list-actions { flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.prompt-icon-button { width: 28px; min-height: 28px; padding: 0; }
+.prompt-default-button { border-color: transparent; color: #5f7b64; background: transparent; }
+.prompt-default-button:hover:not(:disabled) { border-color: transparent; color: #3f5947; background: #e8efe6; }
+.prompt-default-button:disabled { border-color: transparent; color: #8ea092; background: transparent; }
+.prompt-default-button:focus-visible, .prompt-delete-button:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; }
+.prompt-delete-button:disabled { color: #a5aaa3; background: transparent; }
+.prompt-list-create { border-style: dashed; color: #718074; background: transparent; }
+.prompt-list-item.prompt-list-create { flex-direction: row; align-items: center; }
+.prompt-list-create em { color: #7a9a7e; font-size: 17px; line-height: 1; }
 .prompt-editor-panel { min-width: 0; display: grid; gap: 12px; }
 .prompt-editor-panel label { display: grid; gap: 7px; color: #7c8178; font-size: 11px; }
-.prompt-editor { min-height: 160px; padding: 11px; resize: vertical; border: 1px solid #deded5; border-radius: 6px; color: #4c554d; background: #fffefb; font-size: 12px; line-height: 1.7; }
+.prompt-editor { height: 190px; min-height: 190px; max-height: 190px; padding: 11px; resize: none; overflow-y: auto; scrollbar-width: none; border: 1px solid #deded5; border-radius: 6px; color: #4c554d; background: #fffefb; font-size: 12px; line-height: 1.7; }
+.prompt-editor::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .prompt-editor:focus { border: 1px solid #9fb1a0; box-shadow: 0 0 0 2px rgba(131, 169, 142, .12); }
-.settings-section .prompt-list { gap: 0; border-top: 1px solid #e5e6de; }
-.settings-section .prompt-list-item { min-height: 58px; padding-right: 7px; padding-left: 7px; border: 0; border-bottom: 1px solid #e5e6de; border-radius: 0; background: transparent; }
-.settings-section .prompt-list-item:hover { border-color: #e5e6de; background: #f0f3ec; }
-.settings-section .prompt-list-item.is-active { border-color: #d3ded1; color: #4b6354; background: #e7efe4; }
-.prompt-actions { margin-top: 0; }
+.settings-section .prompt-list { gap: 8px; border-top: 0; }
+.settings-section .prompt-list-item { min-height: 58px; padding-right: 11px; padding-left: 11px; border: 1px solid #dde1d8; border-radius: 8px; background: #f7f8f3; }
+.settings-section .prompt-list-item:hover { border-color: #d0dbcf; background: #edf2ea; }
+.settings-section .prompt-list-item.is-active { border-color: #b9cbb8; color: #4b6354; background: #e9f0e6; }
+.settings-section .prompt-list-item.is-default { border-color: #a9bda9; background: #f0f5ed; box-shadow: 0 0 0 1px rgba(112, 143, 116, .12); }
+.settings-section .prompt-list-item.is-default.is-active { border-color: #91ad94; background: #e7f0e5; box-shadow: 0 0 0 1px rgba(91, 123, 96, .16); }
+.settings-section .prompt-list-item.prompt-list-create { border-style: dashed; background: transparent; }
 .personal-dictionary-open { min-width: 0; padding: 0; display: flex; align-items: center; gap: 9px; border: 0; color: #667166; background: transparent; text-align: left; }
 .personal-dictionary-open:hover { color: #38513f; }
 .personal-dictionary-open > span { min-width: 0; }
@@ -677,7 +690,6 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .settings-navigation-item { justify-content: center; padding-right: 5px; padding-left: 5px; }
   .settings-navigation-item span { flex: 0 0 auto; }
   .settings-section { padding-right: 18px; padding-left: 18px; }
-  .settings-feedback { padding-right: 18px; padding-left: 18px; }
   .settings-resource-card .dictionary-settings-grid { grid-template-columns: 1fr; gap: 0; }
   .settings-resource-card .dictionary-settings-grid > div { padding: 10px 0; border-right: 0; border-bottom: 1px solid #e8e6df; }
   .settings-resource-card .dictionary-settings-grid > div:last-child { border-bottom: 0; }
@@ -788,8 +800,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-task-log { height: clamp(140px, 26vh, 280px); max-height: calc(100vh - 300px); }
 .pdf-document-pages { padding: clamp(18px, 3vw, 28px) clamp(16px, 2.5vw, 26px) clamp(28px, 4vh, 42px); gap: clamp(16px, 2.2vw, 24px); }
 
-.settings-section,
-.settings-feedback { width: 100%; max-width: min(1120px, 100%); }
+.settings-section { width: 100%; max-width: min(1120px, 100%); }
 .settings-section { min-width: 0; }
 .settings-section > .card-heading,
 .settings-section > .list-card-heading { min-width: 0; }

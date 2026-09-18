@@ -5,7 +5,6 @@ interface PdfEnginePanelProps {
   engineStatusLoading: boolean;
   enginePreparing: boolean;
   engineProgress: PdfEngineProgress | null;
-  engineError: string | null;
   onPrepareEngine: () => void;
 }
 
@@ -61,7 +60,6 @@ export function PdfEnginePanel({
   engineStatusLoading,
   enginePreparing,
   engineProgress,
-  engineError,
   onPrepareEngine,
 }: PdfEnginePanelProps) {
   const engineProgressValue = progressPercent(engineProgress);
@@ -102,7 +100,6 @@ export function PdfEnginePanel({
           </div>
         </div>
       )}
-      {engineError && <p className="pdf-task-error" role="alert">{engineError}</p>}
     </div>
   );
 }

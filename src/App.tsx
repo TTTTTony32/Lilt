@@ -254,6 +254,9 @@ function PageTransition({ activeKey, children }: { activeKey: string; children: 
 
 type DataTransferMode = "personalExport" | "glossaryExport" | "glossaryImport";
 type DataTransferStatus = "selecting" | "processing" | "success" | "empty" | "cancelled" | "error";
+type ToastKind = "error" | "notice";
+type AppToast = { message: string; kind: ToastKind };
+type ShowToast = (message: string, kind?: ToastKind) => void;
 
 function FeedbackMessage({
   message,
@@ -369,6 +372,7 @@ function App() {
   const [releaseNoticeMounted, setReleaseNoticeMounted] = useState(false);
   const [releaseCheckMessage, setReleaseCheckMessage] = useState<string | null>(null);
   const [releaseCheckPending, setReleaseCheckPending] = useState(false);
+  const [appToast, setAppToast] = useState<AppToast | null>(null);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const [downloadActivityState, dispatchDownloadActivity] = useReducer(
     downloadActivityReducer,
@@ -401,6 +405,7 @@ function App() {
   const downloadActivityTimersRef = useRef(new Map<string, number>());
   const releaseCheckControllerRef = useRef<AbortController | null>(null);
   const releaseCheckToastTimerRef = useRef<number | null>(null);
+  const appToastTimerRef = useRef<number | null>(null);
 
   const showReleaseCheckMessage = useCallback((message: string) => {
     if (releaseCheckToastTimerRef.current !== null) {
@@ -410,6 +415,17 @@ function App() {
     releaseCheckToastTimerRef.current = window.setTimeout(() => {
       releaseCheckToastTimerRef.current = null;
       setReleaseCheckMessage(null);
+    }, 2800);
+  }, []);
+
+  const showAppToast = useCallback<ShowToast>((message, kind = "notice") => {
+    if (appToastTimerRef.current !== null) {
+      window.clearTimeout(appToastTimerRef.current);
+    }
+    setAppToast({ message, kind });
+    appToastTimerRef.current = window.setTimeout(() => {
+      appToastTimerRef.current = null;
+      setAppToast(null);
     }, 2800);
   }, []);
 
@@ -531,6 +547,13 @@ function App() {
     if (releaseCheckToastTimerRef.current !== null) {
       window.clearTimeout(releaseCheckToastTimerRef.current);
       releaseCheckToastTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => {
+    if (appToastTimerRef.current !== null) {
+      window.clearTimeout(appToastTimerRef.current);
+      appToastTimerRef.current = null;
     }
   }, []);
 
@@ -1615,6 +1638,7 @@ function App() {
               navigationTarget={settingsNavigationTarget}
               onDictionaryUpdate={handleDictionaryUpdate}
               onSaved={handleSettingsSaved}
+              onToast={showAppToast}
               onCheckForUpdates={() => void checkForUpdates("manual")}
               releaseCheckPending={releaseCheckPending}
             />
@@ -1772,6 +1796,8 @@ function App() {
       )}
       <div className="error-toast-anchor">
         <FeedbackMessage message={error ?? translationEventsError} kind="error" as="div" className="error-toast toast-message" />
+        <FeedbackMessage message={appToast?.kind === "error" ? appToast.message : null} kind="error" as="div" className="error-toast toast-message" />
+        <FeedbackMessage message={appToast?.kind === "notice" ? appToast.message : null} kind="notice" as="div" className="notice-toast toast-message" />
         <FeedbackMessage message={releaseCheckMessage} kind="notice" as="div" className="notice-toast toast-message" />
       </div>
       <DownloadActivityStack activities={downloadActivities} />
@@ -2475,43 +2501,68 @@ function PromptManager({
   prompts,
   currentPromptId,
   onChanged,
+  onToast,
 }: {
   prompts: Prompt[];
   currentPromptId: string;
   onChanged: () => Promise<void>;
+  onToast: ShowToast;
 }) {
-  const [selectedId, setSelectedId] = useState<string | null>(currentPromptId || null);
-  const [name, setName] = useState("");
-  const [content, setContent] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const promptDraftRef = useRef({ selectedId: currentPromptId || null, name: "", content: "" });
+  type PromptDraft = { selectedId: string | null; name: string; content: string };
+  const initialPrompt = prompts.find((prompt) => prompt.id === currentPromptId) ?? prompts[0] ?? null;
+  const [selectedId, setSelectedId] = useState<string | null>(initialPrompt?.id ?? null);
+  const [name, setName] = useState(initialPrompt?.name ?? "");
+  const [content, setContent] = useState(initialPrompt?.content ?? "");
+  const [creating, setCreating] = useState(false);
+  const promptDraftRef = useRef<PromptDraft>({
+    selectedId: initialPrompt?.id ?? null,
+    name: initialPrompt?.name ?? "",
+    content: initialPrompt?.content ?? "",
+  });
   const promptSaveTimerRef = useRef<number | null>(null);
   const promptSaveVersionRef = useRef(0);
   const promptSavingRef = useRef(false);
   const promptDirtyRef = useRef(false);
   const promptDisposedRef = useRef(false);
-
-  const selectedPrompt = prompts.find((prompt) => prompt.id === selectedId) ?? null;
+  const pendingSelectionIdRef = useRef<string | null>(null);
+  const queuedPromptSaveRef = useRef<{ draft: PromptDraft; version: number } | null>(null);
 
   useEffect(() => {
-    if (selectedId === null) return;
-    const selected = prompts.find((prompt) => prompt.id === selectedId);
-    if (!selected) return;
+    if (promptDirtyRef.current) return;
+    const pendingSelectionId = pendingSelectionIdRef.current;
+    if (pendingSelectionId && !prompts.some((prompt) => prompt.id === pendingSelectionId)) return;
+    if (pendingSelectionId) pendingSelectionIdRef.current = null;
+    const selected = prompts.find((prompt) => prompt.id === selectedId)
+      ?? prompts.find((prompt) => prompt.id === currentPromptId)
+      ?? prompts[0]
+      ?? null;
+    if (!selected) {
+      setSelectedId(null);
+      setName("");
+      setContent("");
+      promptDraftRef.current = { selectedId: null, name: "", content: "" };
+      return;
+    }
+    if (selected.id !== selectedId) setSelectedId(selected.id);
     setName(selected.name);
     setContent(selected.content);
     promptDraftRef.current = { selectedId: selected.id, name: selected.name, content: selected.content };
   }, [currentPromptId, prompts, selectedId]);
 
-  const savePromptDraft = useCallback(async (version: number) => {
-    if (promptSavingRef.current) return;
-    const draft = promptDraftRef.current;
-    if (!draft.name.trim() || !draft.content.trim()) return;
+  const savePromptDraft = useCallback(async (draft: PromptDraft, version: number) => {
+    if (promptSavingRef.current) {
+      const queued = queuedPromptSaveRef.current;
+      if (!queued || version >= queued.version) queuedPromptSaveRef.current = { draft, version };
+      return;
+    }
+    if (!draft.selectedId || !draft.name.trim()) return;
     promptSavingRef.current = true;
     try {
-      const raw = draft.selectedId
-        ? await invokeCommand<unknown>("update_prompt", { id: draft.selectedId, name: draft.name, content: draft.content })
-        : await invokeCommand<unknown>("create_prompt", { name: draft.name, content: draft.content });
+      const raw = await invokeCommand<unknown>("update_prompt", {
+        id: draft.selectedId,
+        name: draft.name,
+        content: draft.content,
+      });
       const next = decodePrompt(raw);
       if (!next) throw new Error("Prompt 命令返回了无法识别的结果");
       if (version === promptSaveVersionRef.current) {
@@ -2521,28 +2572,33 @@ function PromptManager({
           setSelectedId(next.id);
           setName(next.name);
           setContent(next.content);
-          setError(null);
         }
       }
       await onChanged();
     } catch (reason) {
       if (version === promptSaveVersionRef.current && !promptDisposedRef.current) {
-        setError(describeError(reason, "Prompt 自动保存失败"));
-        setMessage(null);
+        onToast(describeError(reason, "Prompt 自动保存失败"), "error");
       }
     } finally {
       promptSavingRef.current = false;
-      if (version !== promptSaveVersionRef.current) void savePromptDraft(promptSaveVersionRef.current);
+      const queued = queuedPromptSaveRef.current;
+      queuedPromptSaveRef.current = null;
+      if (queued) {
+        void savePromptDraft(queued.draft, queued.version);
+      } else if (version !== promptSaveVersionRef.current && promptDirtyRef.current) {
+        void savePromptDraft(promptDraftRef.current, promptSaveVersionRef.current);
+      }
     }
-  }, [onChanged]);
+  }, [onChanged, onToast]);
 
   const schedulePromptSave = useCallback(() => {
     promptSaveVersionRef.current += 1;
     if (promptSaveTimerRef.current !== null) window.clearTimeout(promptSaveTimerRef.current);
     const version = promptSaveVersionRef.current;
+    const draft = promptDraftRef.current;
     promptSaveTimerRef.current = window.setTimeout(() => {
       promptSaveTimerRef.current = null;
-      void savePromptDraft(version);
+      void savePromptDraft(draft, version);
     }, 650);
   }, [savePromptDraft]);
 
@@ -2552,8 +2608,6 @@ function PromptManager({
     promptDirtyRef.current = true;
     setName(next.name);
     setContent(next.content);
-    setError(null);
-    setMessage(null);
     schedulePromptSave();
   };
 
@@ -2562,59 +2616,56 @@ function PromptManager({
     if (promptSaveTimerRef.current !== null) {
       window.clearTimeout(promptSaveTimerRef.current);
       promptSaveTimerRef.current = null;
-      if (promptDirtyRef.current) void savePromptDraft(promptSaveVersionRef.current);
+      if (promptDirtyRef.current) void savePromptDraft(promptDraftRef.current, promptSaveVersionRef.current);
     }
   }, [savePromptDraft]);
 
   const selectPrompt = (prompt: Prompt) => {
+    const pendingDraft = promptDraftRef.current;
+    const pendingVersion = promptSaveVersionRef.current;
     if (promptSaveTimerRef.current !== null) {
       window.clearTimeout(promptSaveTimerRef.current);
       promptSaveTimerRef.current = null;
     }
-    if (promptDirtyRef.current) void savePromptDraft(promptSaveVersionRef.current);
+    if (promptDirtyRef.current) void savePromptDraft(pendingDraft, pendingVersion);
     promptSaveVersionRef.current += 1;
     promptDirtyRef.current = false;
+    pendingSelectionIdRef.current = null;
     promptDraftRef.current = { selectedId: prompt.id, name: prompt.name, content: prompt.content };
     setSelectedId(prompt.id);
     setName(prompt.name);
     setContent(prompt.content);
-    setError(null);
-    setMessage(null);
   };
 
-  const startNew = () => {
+  const createPrompt = async () => {
+    if (creating) return;
+    const pendingDraft = promptDraftRef.current;
+    const pendingVersion = promptSaveVersionRef.current;
     if (promptSaveTimerRef.current !== null) {
       window.clearTimeout(promptSaveTimerRef.current);
       promptSaveTimerRef.current = null;
     }
-    if (promptDirtyRef.current) void savePromptDraft(promptSaveVersionRef.current);
+    if (promptDirtyRef.current) void savePromptDraft(pendingDraft, pendingVersion);
     promptSaveVersionRef.current += 1;
     promptDirtyRef.current = false;
-    promptDraftRef.current = { selectedId: null, name: "我的 Prompt", content: "" };
-    setSelectedId(null);
-    setName("我的 Prompt");
-    setContent("");
-    setError(null);
-    setMessage(null);
-  };
-
-  const duplicate = async (prompt: Prompt) => {
-    setError(null);
-    setMessage(null);
+    setCreating(true);
     try {
-      const raw = await invokeCommand<unknown>("duplicate_prompt", { id: prompt.id });
+      const raw = await invokeCommand<unknown>("create_prompt");
       const next = decodePrompt(raw);
       if (!next) throw new Error("Prompt 命令返回了无法识别的结果。");
       promptSaveVersionRef.current += 1;
       promptDirtyRef.current = false;
+      pendingSelectionIdRef.current = next.id;
       promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content };
       setSelectedId(next.id);
       setName(next.name);
       setContent(next.content);
       await onChanged();
-      setMessage("已复制 Prompt，可以继续编辑");
+      onToast(`已创建${next.name}`);
     } catch (reason) {
-      setError(describeError(reason, "复制 Prompt 失败"));
+      onToast(describeError(reason, "创建 Prompt 失败"), "error");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -2622,54 +2673,69 @@ function PromptManager({
     try {
       await invokeCommand("set_default_prompt", { id: prompt.id });
       await onChanged();
-      setMessage(`已将「${prompt.name}」设为默认 Prompt`);
-      setError(null);
+      onToast(`已将${prompt.name}设为默认 Prompt`);
     } catch (reason) {
-      setError(describeError(reason, "设置默认 Prompt 失败"));
-      setMessage(null);
+      onToast(describeError(reason, "设置默认 Prompt 失败"), "error");
     }
   };
 
   const remove = async (prompt: Prompt) => {
+    if (prompt.isBuiltin || prompt.id === currentPromptId) return;
     if (!window.confirm(`确定删除 Prompt「${prompt.name}」吗？`)) return;
     try {
       await invokeCommand("delete_prompt", { id: prompt.id });
       await onChanged();
       setSelectedId(currentPromptId);
-      setMessage("Prompt 已删除");
-      setError(null);
+      onToast("Prompt 已删除");
     } catch (reason) {
-      setError(describeError(reason, "删除 Prompt 失败"));
-      setMessage(null);
+      onToast(describeError(reason, "删除 Prompt 失败"), "error");
     }
   };
 
   return (
     <div className="prompt-manager-card">
-      <div className="card-heading"><div><strong>Prompt</strong></div><button className="secondary-button small-button" type="button" onClick={startNew}>新建</button></div>
+      <div className="card-heading settings-section-heading"><div><strong>Prompt</strong></div></div>
       <div className="prompt-manager-grid">
         <div className="prompt-list">
           {prompts.map((prompt) => (
-            <button className={`prompt-list-item ${prompt.id === selectedId ? "is-active" : ""}`} type="button" key={prompt.id} onClick={() => selectPrompt(prompt)}>
-              <span><strong>{prompt.name}</strong><small>{prompt.isBuiltin ? "内置" : "自定义"} · v{prompt.version}</small></span>
-              {prompt.id === currentPromptId && <em>默认</em>}
-            </button>
+            <div className={`prompt-list-item ${prompt.id === selectedId ? "is-active" : ""} ${prompt.id === currentPromptId ? "is-default" : ""}`} key={prompt.id}>
+              <button className="prompt-list-select" type="button" onClick={() => selectPrompt(prompt)} aria-pressed={prompt.id === selectedId}>
+                <span><strong>{prompt.name}</strong></span>
+              </button>
+              <div className="prompt-list-actions">
+                <button
+                  className="icon-button prompt-icon-button prompt-default-button"
+                  type="button"
+                  onClick={() => void setDefault(prompt)}
+                  disabled={prompt.id === currentPromptId}
+                  title={prompt.id === currentPromptId ? "当前已是默认 Prompt" : `将${prompt.name}设为默认 Prompt`}
+                  aria-label={prompt.id === currentPromptId ? "当前已是默认 Prompt" : `将${prompt.name}设为默认 Prompt`}
+                >
+                  <Check size={14} strokeWidth={2.2} aria-hidden="true" />
+                </button>
+                <button
+                  className="icon-button danger-icon-button prompt-delete-button"
+                  type="button"
+                  onClick={() => void remove(prompt)}
+                  disabled={prompt.isBuiltin || prompt.id === currentPromptId}
+                  title={prompt.id === currentPromptId ? "当前默认 Prompt 不可删除" : prompt.isBuiltin ? "内置 Prompt 不可删除" : `删除${prompt.name}`}
+                  aria-label={prompt.id === currentPromptId ? "当前默认 Prompt 不可删除" : prompt.isBuiltin ? "内置 Prompt 不可删除" : `删除${prompt.name}`}
+                >
+                  <Trash2 size={14} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
           ))}
+          <button className="prompt-list-item prompt-list-create" type="button" onClick={() => void createPrompt()} disabled={creating}>
+            <span><strong>新增自定义 Prompt</strong><small>创建空白提示词</small></span>
+            <em aria-hidden="true">＋</em>
+          </button>
         </div>
         <div className="prompt-editor-panel">
-          <label>名称<input value={name} onChange={(event) => updatePromptDraft({ name: event.target.value })} disabled={selectedPrompt?.isBuiltin ?? false} /></label>
-          <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => updatePromptDraft({ content: event.target.value })} readOnly={selectedPrompt?.isBuiltin ?? false} /></label>
-          <div className="form-actions prompt-actions">
-            <div className="button-group">
-              {selectedPrompt?.isBuiltin && <button className="secondary-button" type="button" onClick={() => void duplicate(selectedPrompt)}>复制并编辑</button>}
-              {selectedPrompt && selectedPrompt.id !== currentPromptId && <button className="secondary-button" type="button" onClick={() => void setDefault(selectedPrompt)}>设为默认</button>}
-              {selectedPrompt && !selectedPrompt.isBuiltin && selectedPrompt.id !== currentPromptId && <button className="text-button danger-text" type="button" onClick={() => void remove(selectedPrompt)}>删除</button>}
-            </div>
-          </div>
+          <label>名称<input value={name} onChange={(event) => updatePromptDraft({ name: event.target.value })} disabled={!selectedId || creating} /></label>
+          <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => updatePromptDraft({ content: event.target.value })} disabled={!selectedId || creating} /></label>
         </div>
       </div>
-      {message && <p className="notice-message settings-message">{message}</p>}
-      {error && <p className="error-message settings-message">{error}</p>}
     </div>
   );
 }
@@ -2837,12 +2903,10 @@ function SettingsSelectField({ label, ...props }: SettingsSelectProps & { label:
 function DictionarySettingsPanel({
   snapshot,
   dictionaryProgress,
-  dictionaryEventsError,
   onDictionaryUpdate,
 }: {
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
-  dictionaryEventsError: string | null;
   onDictionaryUpdate: () => Promise<void>;
 }) {
   const dictionaryUpdating = snapshot.dictionary.status === "updating" || dictionaryProgress !== null;
@@ -2873,8 +2937,6 @@ function DictionarySettingsPanel({
           <div className="dictionary-progress-track"><span style={{ width: `${dictionaryProgressPercent}%` }} /></div>
         </div>
       )}
-      {dictionaryEventsError && <p className="error-message settings-message">{dictionaryEventsError}</p>}
-      {snapshot.dictionary.error && !dictionaryUpdating && <p className="error-message settings-message">{snapshot.dictionary.error}</p>}
       <div className="form-actions settings-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
     </div>
   );
@@ -2940,6 +3002,7 @@ function SettingsView({
   navigationTarget,
   onDictionaryUpdate,
   onSaved,
+  onToast,
   onCheckForUpdates,
   releaseCheckPending,
 }: {
@@ -2950,6 +3013,7 @@ function SettingsView({
   navigationTarget: SettingsNavigationTarget | null;
   onDictionaryUpdate: () => Promise<void>;
   onSaved: (snapshot: AppSnapshot) => void;
+  onToast: ShowToast;
   onCheckForUpdates: () => void;
   releaseCheckPending: boolean;
 }) {
@@ -2971,11 +3035,6 @@ function SettingsView({
   const [selectionMode, setSelectionMode] = useState(snapshot.settings.selectionMode);
   const [selectionShortcut, setSelectionShortcut] = useState(snapshot.settings.selectionShortcut);
   const [selectionStatus, setSelectionStatus] = useState<SelectionRuntimeStatus | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [providerMessage, setProviderMessage] = useState<string | null>(null);
-  const [providerError, setProviderError] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
   const settingsDraftRef = useRef<SettingsDraft>(createSettingsDraft(snapshot));
   const saveTimerRef = useRef<number | null>(null);
   const saveVersionRef = useRef(0);
@@ -2984,9 +3043,6 @@ function SettingsView({
   const saveDraft = useCallback(async (draft: SettingsDraft, version: number) => {
     if (savingRef.current) return;
     savingRef.current = true;
-    if (!disposedRef.current) {
-      setSaveError(null);
-    }
     try {
       const shortcut = draft.selectionShortcut.trim();
       if (!draft.modelId.trim()) throw new Error("Model ID 不能为空");
@@ -3023,7 +3079,7 @@ function SettingsView({
       }
     } catch (reason) {
       if (version === saveVersionRef.current && !disposedRef.current) {
-        setSaveError(describeError(reason, "设置自动保存失败"));
+        onToast(describeError(reason, "设置自动保存失败"), "error");
       }
     } finally {
       savingRef.current = false;
@@ -3031,15 +3087,12 @@ function SettingsView({
         void saveDraft(settingsDraftRef.current, saveVersionRef.current);
       }
     }
-  }, [onSaved]);
+  }, [onSaved, onToast]);
 
   const scheduleSave = useCallback((nextDraft: SettingsDraft) => {
     settingsDraftRef.current = nextDraft;
     saveVersionRef.current += 1;
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    if (!disposedRef.current) {
-      setSaveError(null);
-    }
     const version = saveVersionRef.current;
     saveTimerRef.current = window.setTimeout(() => {
       saveTimerRef.current = null;
@@ -3206,9 +3259,27 @@ function SettingsView({
     };
   }, [selectionMode, selectionShortcut]);
 
+  useEffect(() => {
+    if (selectionStatus?.message) onToast(selectionStatus.message, "error");
+  }, [onToast, selectionStatus?.message]);
+
+  useEffect(() => {
+    if (dictionaryEventsError) onToast(dictionaryEventsError, "error");
+  }, [dictionaryEventsError, onToast]);
+
+  useEffect(() => {
+    if (snapshot.dictionary.error && snapshot.dictionary.status === "failed") {
+      onToast(snapshot.dictionary.error, "error");
+    }
+  }, [onToast, snapshot.dictionary.error, snapshot.dictionary.status]);
+
+  useEffect(() => {
+    if (resourceModal !== "pdf-engine") return;
+    const engineError = pdfEngine.error ?? pdfEngine.eventsError;
+    if (engineError) onToast(engineError, "error");
+  }, [onToast, pdfEngine.error, pdfEngine.eventsError, resourceModal]);
+
   const fetchModels = async () => {
-    setProviderError(null);
-    setProviderMessage(null);
     try {
       const models = await invokeCommand<ModelInfo[]>("fetch_models", {
         baseUrl: baseUrl.trim() || null,
@@ -3218,11 +3289,10 @@ function SettingsView({
       if (models.length > 0 && !models.some((model) => model.id === modelId)) {
         updateProviderDraft({ modelId: models[0]?.id ?? modelId });
       }
-      setProviderMessage(`模型列表已更新，共 ${models.length} 个模型`);
+      onToast(`模型列表已更新，共 ${models.length} 个模型`);
     } catch (reason) {
       setAvailableModels(null);
-      setProviderError(describeError(reason, "模型列表读取失败，可手动填写 Model ID"));
-      setProviderMessage(null);
+      onToast(describeError(reason, "模型列表读取失败，可手动填写 Model ID"), "error");
     }
   };
 
@@ -3239,15 +3309,12 @@ function SettingsView({
       settingsDraftRef.current = nextDraft;
       setSettings(nextDraft.settings);
       onSaved(next);
-      setMessage("关闭行为已恢复为每次询问");
-      setError(null);
+      onToast("关闭行为已恢复为每次询问");
     } catch (reason) {
-      setError(describeError(reason, "恢复关闭行为失败"));
-      setMessage(null);
+      onToast(describeError(reason, "恢复关闭行为失败"), "error");
     }
   };
 
-  const activeSelectionMode = selectionStatus?.mode ?? selectionMode;
   const modelOptions = availableModels
     ? [
       ...(!availableModels.some((model) => model.id === modelId) ? [{ value: modelId, label: `当前：${modelId}` }] : []),
@@ -3283,30 +3350,26 @@ function SettingsView({
       <div className="settings-content">
         <div className="settings-content-scroll" ref={settingsScrollRef}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
-          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
+          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong></div></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" /></label>
             {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" /></label>}
             <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => updateProviderDraft({ thinkingEffort: value as ThinkingEffort })} />
             <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => updateProviderDraft({ apiKey: event.target.value })} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
           </div>
-          {providerMessage && <p className="notice-message settings-message">{providerMessage}</p>}
-          {providerError && <p className="error-message settings-message">{providerError}</p>}
           <div className="form-actions settings-actions"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button></div>
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>
-            <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} />
+            <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} onToast={onToast} />
           </div>
 
         <div className="settings-section" id="settings-section-selection" data-settings-section="selection" ref={(element) => { settingsSectionRefs.current.selection = element; }}>
-          <div className="card-heading"><div><strong>划词翻译</strong></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
+          <div className="card-heading"><div><strong>划词翻译</strong></div></div>
           <div className="form-grid selection-settings-grid">
             <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => updateSelectionDraft({ selectionMode: value as AppSettings["selectionMode"] })} />
             <label>快捷键<input value={selectionShortcut} onChange={(event) => updateSelectionDraft({ selectionShortcut: event.target.value })} placeholder="Ctrl+Shift+L" /></label>
           </div>
-          {selectionStatus?.message && <p className="error-message settings-message">{selectionStatus.message}</p>}
-          <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}</span></div>
         </div>
 
         <div className="settings-section" id="settings-section-pdf" data-settings-section="pdf" ref={(element) => { settingsSectionRefs.current.pdf = element; }}>
@@ -3357,13 +3420,6 @@ function SettingsView({
           </div>
         </div>
         </div>
-        {(saveError || message || error) && (
-          <div className="settings-feedback" aria-live="polite">
-            {saveError && <p className="error-message settings-message">{saveError}</p>}
-            {message && <p className="notice-message settings-message">{message}</p>}
-            {error && <p className="error-message settings-message">{error}</p>}
-          </div>
-        )}
       </div>
       {resourceModalMounted && resourceModal && (
         <SettingsResourceModal
@@ -3376,7 +3432,6 @@ function SettingsView({
             <DictionarySettingsPanel
               snapshot={snapshot}
               dictionaryProgress={dictionaryProgress}
-              dictionaryEventsError={dictionaryEventsError}
               onDictionaryUpdate={onDictionaryUpdate}
             />
           ) : (
@@ -3385,7 +3440,6 @@ function SettingsView({
               engineStatusLoading={pdfEngine.statusLoading}
               enginePreparing={pdfEngine.preparing}
               engineProgress={pdfEngine.progress}
-              engineError={pdfEngine.error ?? pdfEngine.eventsError}
               onPrepareEngine={() => void pdfEngine.prepare()}
             />
           )}

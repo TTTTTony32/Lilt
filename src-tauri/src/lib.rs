@@ -319,7 +319,6 @@ pub fn run() {
             export_glossary,
             create_prompt,
             update_prompt,
-            duplicate_prompt,
             delete_prompt,
             set_default_prompt,
             save_personal_word,
@@ -1678,21 +1677,12 @@ fn export_glossary(
 }
 
 #[tauri::command]
-fn create_prompt(
-    state: State<'_, AppState>,
-    name: String,
-    content: String,
-) -> Result<Prompt, String> {
-    let name = name.trim();
-    let content = content.trim();
-    if name.is_empty() || content.is_empty() {
-        return Err("Prompt 名称和内容不能为空".to_string());
-    }
+fn create_prompt(state: State<'_, AppState>) -> Result<Prompt, String> {
     let connection = state
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::create_prompt(&connection, name, content)
+    db::create_prompt(&connection)
 }
 
 #[tauri::command]
@@ -1702,36 +1692,17 @@ fn update_prompt(
     name: String,
     content: String,
 ) -> Result<Prompt, String> {
+    let id = id.trim();
     let name = name.trim();
     let content = content.trim();
-    if id.trim().is_empty() || name.is_empty() || content.is_empty() {
-        return Err("Prompt ID、名称和内容不能为空".to_string());
+    if id.is_empty() || name.is_empty() {
+        return Err("Prompt ID 和名称不能为空".to_string());
     }
     let connection = state
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::update_prompt(&connection, id.trim(), name, content)
-}
-
-#[tauri::command]
-fn duplicate_prompt(
-    state: State<'_, AppState>,
-    id: String,
-    name: Option<String>,
-) -> Result<Prompt, String> {
-    let connection = state
-        .database
-        .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    let source = db::get_prompt(&connection, id.trim())?;
-    let name = name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{}（副本）", source.name));
-    db::duplicate_prompt(&connection, id.trim(), &name)
+    db::update_prompt(&connection, id, name, content)
 }
 
 #[tauri::command]

@@ -92,6 +92,17 @@ pub struct DictionaryInstallation {
     pub database_bytes: i64,
 }
 
+const PROMPT_COLLECTION_MIGRATION_SETTING: &str = "prompt_collection_v1";
+const BUILTIN_NATURAL_PROMPT_ID: &str = "builtin-natural";
+const BUILTIN_LITERAL_PROMPT_NAME: &str = "忠实直译";
+const BUILTIN_LITERAL_PROMPT_CONTENT: &str = "将用户提供的段落忠实翻译成目标语言，尽量保持原文的句式、语气、信息顺序和段落结构。只在目标语言语法要求下调整表达，不解释、不扩写，只输出译文。";
+const BUILTIN_NATURAL_PROMPT_NAME: &str = "自然表达";
+const BUILTIN_NATURAL_PROMPT_CONTENT: &str = "将用户提供的段落重写成自然、流畅、符合目标语言习惯的文字，尽量准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出重写后的文字。";
+const LEGACY_GENERAL_PROMPT_NAME: &str = "通用段落翻译";
+const LEGACY_GENERAL_PROMPT_CONTENT: &str = "你是一名严谨的专业译者。将用户提供的段落翻译成目标语言，保留原文事实、语气、段落结构和 Markdown 格式。不要添加原文没有的信息，只输出译文。";
+const LEGACY_NATURAL_PROMPT_CONTENT: &str = "将用户提供的段落翻译成自然、流畅、符合目标语言习惯的表达，同时准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出译文。";
+const LEGACY_BUILTIN_LITERAL_ID: &str = "builtin-literal";
+
 pub fn migrate(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
@@ -290,46 +301,7 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("默认 Provider 初始化失败：{error}"))?;
 
-    let builtin_prompts = [
-        (
-            DEFAULT_PROMPT_ID,
-            "通用段落翻译",
-            "你是一名严谨的专业译者。将用户提供的段落翻译成目标语言，保留原文事实、语气、段落结构和 Markdown 格式。不要添加原文没有的信息，只输出译文。",
-        ),
-        (
-            "builtin-academic",
-            "学术论文",
-            "你是一名学术翻译者。将用户提供的段落翻译成目标语言，准确保留术语、论证关系、限定条件和引用信息，保持原文段落结构与 Markdown 格式。不要添加原文没有的信息，只输出译文。",
-        ),
-        (
-            "builtin-technical",
-            "技术文档",
-            "你是一名技术文档译者。将用户提供的段落翻译成目标语言，准确处理 API、代码、命令、产品名称和专业术语，保留列表、标题、代码块和 Markdown 格式。不要添加原文没有的信息，只输出译文。",
-        ),
-        (
-            "builtin-literal",
-            "忠实直译",
-            "将用户提供的段落忠实翻译成目标语言，尽量保持原文的句式、语气、信息顺序和段落结构。只在目标语言语法要求下调整表达，不解释、不扩写，只输出译文。",
-        ),
-        (
-            "builtin-natural",
-            "自然表达",
-            "将用户提供的段落翻译成自然、流畅、符合目标语言习惯的表达，同时准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出译文。",
-        ),
-        (
-            "builtin-concise",
-            "简洁阅读",
-            "将用户提供的段落翻译成简洁清晰、适合快速阅读的目标语言表达，保留全部关键信息、逻辑关系和原文结构。不要擅自删减信息，只输出译文。",
-        ),
-    ];
-    for (id, name, content) in builtin_prompts {
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
-                params![id, name, content],
-            )
-            .map_err(|error| format!("默认 Prompt 初始化失败：{error}"))?;
-    }
+    migrate_prompt_collection(connection)?;
 
     connection
         .execute(
@@ -338,6 +310,180 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("默认术语表初始化失败：{error}"))?;
 
+    Ok(())
+}
+
+fn migrate_prompt_collection(connection: &Connection) -> Result<(), String> {
+    if get_setting(connection, PROMPT_COLLECTION_MIGRATION_SETTING)?.as_deref() == Some("1") {
+        return Ok(());
+    }
+
+    let general_exists = connection
+        .query_row(
+            "SELECT 1 FROM prompts WHERE id = ?1",
+            params![DEFAULT_PROMPT_ID],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("检查默认 Prompt 失败：{error}"))?
+        .is_some();
+
+    if !general_exists {
+        let legacy_literal = connection
+            .query_row(
+                "SELECT name, content, version FROM prompts WHERE id = ?1",
+                params![LEGACY_BUILTIN_LITERAL_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("读取旧版忠实直译 Prompt 失败：{error}"))?;
+
+        if let Some((name, content, version)) = legacy_literal {
+            connection
+                .execute(
+                    "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![DEFAULT_PROMPT_ID, name, content, version],
+                )
+                .map_err(|error| format!("迁移忠实直译 Prompt 失败：{error}"))?;
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
+                    params![
+                        DEFAULT_PROMPT_ID,
+                        BUILTIN_LITERAL_PROMPT_NAME,
+                        BUILTIN_LITERAL_PROMPT_CONTENT,
+                    ],
+                )
+                .map_err(|error| format!("默认 Prompt 初始化失败：{error}"))?;
+        }
+    }
+
+    migrate_builtin_prompt_fields(
+        connection,
+        DEFAULT_PROMPT_ID,
+        BUILTIN_LITERAL_PROMPT_NAME,
+        BUILTIN_LITERAL_PROMPT_CONTENT,
+        &[LEGACY_GENERAL_PROMPT_NAME, BUILTIN_LITERAL_PROMPT_NAME],
+        &[
+            LEGACY_GENERAL_PROMPT_CONTENT,
+            BUILTIN_LITERAL_PROMPT_CONTENT,
+        ],
+    )?;
+    ensure_builtin_prompt(
+        connection,
+        BUILTIN_NATURAL_PROMPT_ID,
+        BUILTIN_NATURAL_PROMPT_NAME,
+        BUILTIN_NATURAL_PROMPT_CONTENT,
+        &[BUILTIN_NATURAL_PROMPT_NAME],
+        &[
+            LEGACY_NATURAL_PROMPT_CONTENT,
+            BUILTIN_NATURAL_PROMPT_CONTENT,
+        ],
+    )?;
+
+    connection
+        .execute(
+            "UPDATE providers
+             SET prompt_id = ?1
+             WHERE prompt_id IN (
+                 SELECT id FROM prompts
+                 WHERE is_builtin = 1 AND id NOT IN (?1, ?2)
+             )
+             OR NOT EXISTS (
+                 SELECT 1 FROM prompts WHERE prompts.id = providers.prompt_id
+             )",
+            params![DEFAULT_PROMPT_ID, BUILTIN_NATURAL_PROMPT_ID],
+        )
+        .map_err(|error| format!("迁移 Provider 默认 Prompt 失败：{error}"))?;
+
+    connection
+        .execute(
+            "DELETE FROM prompts WHERE is_builtin = 1 AND id NOT IN (?1, ?2)",
+            params![DEFAULT_PROMPT_ID, BUILTIN_NATURAL_PROMPT_ID],
+        )
+        .map_err(|error| format!("清理旧版内置 Prompt 失败：{error}"))?;
+
+    set_setting(connection, PROMPT_COLLECTION_MIGRATION_SETTING, "1")
+}
+
+fn ensure_builtin_prompt(
+    connection: &Connection,
+    id: &str,
+    name: &str,
+    content: &str,
+    legacy_names: &[&str],
+    legacy_contents: &[&str],
+) -> Result<(), String> {
+    let exists = connection
+        .query_row("SELECT 1 FROM prompts WHERE id = ?1", params![id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()
+        .map_err(|error| format!("检查内置 Prompt 失败：{error}"))?
+        .is_some();
+    if !exists {
+        connection
+            .execute(
+                "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 1)",
+                params![id, name, content],
+            )
+            .map_err(|error| format!("默认 Prompt 初始化失败：{error}"))?;
+        return Ok(());
+    }
+
+    migrate_builtin_prompt_fields(connection, id, name, content, legacy_names, legacy_contents)
+}
+
+fn migrate_builtin_prompt_fields(
+    connection: &Connection,
+    id: &str,
+    name: &str,
+    content: &str,
+    legacy_names: &[&str],
+    legacy_contents: &[&str],
+) -> Result<(), String> {
+    let existing = connection
+        .query_row(
+            "SELECT name, content FROM prompts WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("读取内置 Prompt 失败：{error}"))?;
+    let Some((existing_name, existing_content)) = existing else {
+        return Err(format!("内置 Prompt 不存在：{id}"));
+    };
+
+    let next_name = if legacy_names.iter().any(|legacy| *legacy == existing_name) {
+        name
+    } else {
+        existing_name.as_str()
+    };
+    let next_content = if legacy_contents
+        .iter()
+        .any(|legacy| *legacy == existing_content)
+    {
+        content
+    } else {
+        existing_content.as_str()
+    };
+    if next_name == existing_name && next_content == existing_content {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            "UPDATE prompts SET name = ?1, content = ?2, version = version + 1, is_builtin = 1 WHERE id = ?3",
+            params![next_name, next_content, id],
+        )
+        .map_err(|error| format!("更新内置 Prompt 失败：{error}"))?;
     Ok(())
 }
 
@@ -626,18 +772,26 @@ pub fn replace_models(connection: &Connection, models: &[ModelInfo]) -> Result<(
 
 pub fn list_prompts(connection: &Connection) -> Result<Vec<Prompt>, String> {
     let mut statement = connection
-        .prepare("SELECT id, name, content, version, is_builtin FROM prompts ORDER BY is_builtin DESC, name")
+        .prepare(
+            "SELECT id, name, content, version, is_builtin FROM prompts
+             ORDER BY is_builtin DESC,
+                      CASE id WHEN ?1 THEN 0 WHEN ?2 THEN 1 ELSE 2 END,
+                      name",
+        )
         .map_err(|error| format!("读取 Prompt 失败：{error}"))?;
     let rows = statement
-        .query_map([], |row| {
-            Ok(Prompt {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                content: row.get(2)?,
-                version: row.get(3)?,
-                is_builtin: row.get::<_, i64>(4)? != 0,
-            })
-        })
+        .query_map(
+            params![DEFAULT_PROMPT_ID, BUILTIN_NATURAL_PROMPT_ID],
+            |row| {
+                Ok(Prompt {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    content: row.get(2)?,
+                    version: row.get(3)?,
+                    is_builtin: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
         .map_err(|error| format!("读取 Prompt 失败：{error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("读取 Prompt 失败：{error}"))
@@ -661,13 +815,38 @@ pub fn get_prompt(connection: &Connection, prompt_id: &str) -> Result<Prompt, St
         .map_err(|error| format!("读取 Prompt 失败：{error}"))
 }
 
-pub fn create_prompt(connection: &Connection, name: &str, content: &str) -> Result<Prompt, String> {
+pub fn create_prompt(connection: &Connection) -> Result<Prompt, String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("创建 Prompt 失败：{error}"))?;
+    let mut sequence = 1_u64;
+    let name = loop {
+        let candidate = format!("自定义提示词{sequence}");
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM prompts WHERE name = ?1 LIMIT 1",
+                params![candidate.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("创建 Prompt 失败：{error}"))?
+            .is_some();
+        if !exists {
+            break candidate;
+        }
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "创建 Prompt 失败：可用编号已耗尽".to_string())?;
+    };
     let id = uuid::Uuid::new_v4().to_string();
-    connection
+    transaction
         .execute(
-            "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, ?3, 1, 0)",
-            params![id, name, content],
+            "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, '', 1, 0)",
+            params![id, name],
         )
+        .map_err(|error| format!("创建 Prompt 失败：{error}"))?;
+    transaction
+        .commit()
         .map_err(|error| format!("创建 Prompt 失败：{error}"))?;
     get_prompt(connection, &id)
 }
@@ -678,10 +857,12 @@ pub fn update_prompt(
     name: &str,
     content: &str,
 ) -> Result<Prompt, String> {
-    let prompt = get_prompt(connection, prompt_id)?;
-    if prompt.is_builtin {
-        return Err("内置 Prompt 只读，请先复制后编辑".to_string());
+    let name = name.trim();
+    let content = content.trim();
+    if name.is_empty() {
+        return Err("Prompt 名称不能为空".to_string());
     }
+    get_prompt(connection, prompt_id)?;
     connection
         .execute(
             "UPDATE prompts SET name = ?1, content = ?2, version = version + 1 WHERE id = ?3",
@@ -689,15 +870,6 @@ pub fn update_prompt(
         )
         .map_err(|error| format!("更新 Prompt 失败：{error}"))?;
     get_prompt(connection, prompt_id)
-}
-
-pub fn duplicate_prompt(
-    connection: &Connection,
-    prompt_id: &str,
-    name: &str,
-) -> Result<Prompt, String> {
-    let source = get_prompt(connection, prompt_id)?;
-    create_prompt(connection, name, &source.content)
 }
 
 pub fn delete_prompt(
@@ -2197,29 +2369,117 @@ mod tests {
     }
 
     #[test]
-    fn prompt_management_preserves_builtin_read_only_and_versions_custom_prompts() {
-        let connection = test_connection();
-        assert_eq!(list_prompts(&connection).unwrap().len(), 6);
-        assert!(update_prompt(&connection, DEFAULT_PROMPT_ID, "不能改", "不能改").is_err());
+    fn prompt_migration_keeps_two_builtins_and_preserves_custom_prompts() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE app_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+                 CREATE TABLE providers (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    prompt_id TEXT NOT NULL,
+                    thinking_effort TEXT NOT NULL DEFAULT 'none'
+                 );
+                 CREATE TABLE prompts (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    is_builtin INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO providers (id, name, base_url, model_id, prompt_id)
+                 VALUES ('default', 'OpenAI-compatible', 'https://example.com/v1', 'legacy-model', 'builtin-academic');
+                 INSERT INTO prompts (id, name, content, version, is_builtin)
+                 VALUES
+                   ('builtin-general', '通用段落翻译', '你是一名严谨的专业译者。将用户提供的段落翻译成目标语言，保留原文事实、语气、段落结构和 Markdown 格式。不要添加原文没有的信息，只输出译文。', 1, 1),
+                   ('builtin-natural', '自然表达', '将用户提供的段落翻译成自然、流畅、符合目标语言习惯的表达，同时准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出译文。', 4, 1),
+                   ('builtin-literal', '忠实直译', '将用户提供的段落忠实翻译成目标语言，尽量保持原文的句式、语气、信息顺序和段落结构。只在目标语言语法要求下调整表达，不解释、不扩写，只输出译文。', 2, 1),
+                   ('builtin-academic', '学术论文', '学术内容', 1, 1),
+                   ('custom-old', '我的提示词', '自定义内容', 3, 0);",
+            )
+            .expect("legacy prompt database should be created");
 
-        let created = create_prompt(&connection, "自定义翻译", "只输出译文")
-            .expect("custom prompt should be created");
-        assert!(!created.is_builtin);
-        assert_eq!(created.version, 1);
-        let updated = update_prompt(&connection, &created.id, "自定义翻译 2", "保留 Markdown")
+        migrate(&connection).expect("legacy prompt database should migrate");
+
+        let prompts = list_prompts(&connection).expect("migrated prompts should be readable");
+        assert_eq!(prompts.len(), 3);
+        assert_eq!(prompts.iter().filter(|prompt| prompt.is_builtin).count(), 2);
+        assert!(prompts.iter().any(|prompt| {
+            prompt.id == DEFAULT_PROMPT_ID
+                && prompt.name == BUILTIN_LITERAL_PROMPT_NAME
+                && prompt.content == BUILTIN_LITERAL_PROMPT_CONTENT
+        }));
+        assert!(prompts.iter().any(|prompt| {
+            prompt.id == BUILTIN_NATURAL_PROMPT_ID
+                && prompt.content == BUILTIN_NATURAL_PROMPT_CONTENT
+        }));
+        assert!(prompts.iter().any(|prompt| prompt.id == "custom-old"));
+        assert_eq!(
+            get_provider(&connection)
+                .expect("provider should be readable")
+                .prompt_id,
+            DEFAULT_PROMPT_ID
+        );
+        assert_eq!(
+            get_setting(&connection, PROMPT_COLLECTION_MIGRATION_SETTING)
+                .expect("migration marker should be readable")
+                .as_deref(),
+            Some("1")
+        );
+
+        update_prompt(&connection, BUILTIN_NATURAL_PROMPT_ID, "我的自然", "已编辑")
+            .expect("builtin prompt should be editable");
+        migrate(&connection).expect("prompt migration should be idempotent");
+        let natural = get_prompt(&connection, BUILTIN_NATURAL_PROMPT_ID)
+            .expect("edited builtin prompt should be readable");
+        assert_eq!(natural.name, "我的自然");
+        assert_eq!(natural.content, "已编辑");
+    }
+
+    #[test]
+    fn prompt_management_supports_direct_editing_empty_content_and_sequential_creation() {
+        let connection = test_connection();
+        let prompts = list_prompts(&connection).expect("default prompts should be readable");
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(
+            get_prompt(&connection, BUILTIN_NATURAL_PROMPT_ID)
+                .expect("natural prompt should exist")
+                .content,
+            BUILTIN_NATURAL_PROMPT_CONTENT
+        );
+
+        let first = create_prompt(&connection).expect("first custom prompt should be created");
+        assert_eq!(first.name, "自定义提示词1");
+        assert_eq!(first.content, "");
+        assert!(!first.is_builtin);
+        let second = create_prompt(&connection).expect("second custom prompt should be created");
+        assert_eq!(second.name, "自定义提示词2");
+
+        let updated_builtin =
+            update_prompt(&connection, DEFAULT_PROMPT_ID, "忠实直译（已编辑）", "")
+                .expect("builtin prompt should be editable");
+        assert_eq!(updated_builtin.content, "");
+        assert_eq!(updated_builtin.version, 2);
+
+        let updated = update_prompt(&connection, &first.id, "自定义提示词一", "保留 Markdown")
             .expect("custom prompt should be updated");
         assert_eq!(updated.version, 2);
         assert_eq!(updated.content, "保留 Markdown");
+        let emptied = update_prompt(&connection, &first.id, "自定义提示词一", "")
+            .expect("custom prompt should allow empty content");
+        assert_eq!(emptied.content, "");
 
-        set_default_prompt(&connection, &updated.id).expect("custom prompt should become default");
-        assert!(delete_prompt(&connection, &updated.id, &updated.id).is_err());
-        let duplicate = duplicate_prompt(&connection, DEFAULT_PROMPT_ID, "通用副本")
-            .expect("builtin prompt should be duplicable");
-        assert_eq!(
-            duplicate.content,
-            get_prompt(&connection, DEFAULT_PROMPT_ID).unwrap().content
-        );
-        delete_prompt(&connection, &duplicate.id, &updated.id)
+        delete_prompt(&connection, &first.id, DEFAULT_PROMPT_ID)
+            .expect("unused custom prompt should delete");
+        let reused = create_prompt(&connection).expect("smallest prompt number should be reused");
+        assert_eq!(reused.name, "自定义提示词1");
+
+        set_default_prompt(&connection, &second.id).expect("custom prompt should become default");
+        assert!(delete_prompt(&connection, &second.id, &second.id).is_err());
+        assert!(delete_prompt(&connection, DEFAULT_PROMPT_ID, &second.id).is_err());
+        delete_prompt(&connection, &reused.id, &second.id)
             .expect("unused custom prompt should delete");
     }
 
