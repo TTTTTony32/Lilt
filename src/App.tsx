@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArrowLeft, Check, ChevronDown, Copy, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
@@ -2784,13 +2783,6 @@ function SettingsView({
   const saveVersionRef = useRef(0);
   const savingRef = useRef(false);
   const disposedRef = useRef(false);
-  const openGithubRepository = useCallback((event: ReactMouseEvent<HTMLAnchorElement>) => {
-    event.preventDefault();
-    void openUrl(GITHUB_URL).catch(() => {
-      window.open(GITHUB_URL, "_blank", "noopener,noreferrer");
-    });
-  }, []);
-
   const saveDraft = useCallback(async (draft: SettingsDraft, version: number) => {
     if (savingRef.current) return;
     savingRef.current = true;
@@ -3140,7 +3132,7 @@ function SettingsView({
               <div className="about-info-row"><span>本地词典版本</span><button className="about-version-button" id="settings-about-dictionary-version" ref={aboutDictionaryRef} type="button" onClick={() => openResourceModal("dictionary")} aria-haspopup="dialog" aria-label="打开本地词典准备弹窗">{snapshot.dictionary.installedRelease ?? "未安装"}</button></div>
               <div className="about-info-row"><span>PDF Engine 版本</span><button className="about-version-button" id="settings-about-pdf-engine" ref={aboutPdfEngineRef} type="button" onClick={() => openResourceModal("pdf-engine")} aria-haspopup="dialog" aria-label="打开 PDF Engine 准备弹窗">{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</button></div>
             </div>
-            <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer" onClick={openGithubRepository}>TTTTTony32/Lilt</a></div>
+            <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer">TTTTTony32/Lilt</a></div>
             <div className="about-info-row"><span>开发者</span><span>Tony32 · <a href={`mailto:${DEVELOPER_EMAIL}`}>{DEVELOPER_EMAIL}</a></span></div>
           </div>
         </div>
