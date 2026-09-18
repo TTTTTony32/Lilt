@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appendPdfJobLogMessage, reducePdfJobLog } from "./pdf-job-log";
-import type { PdfJobEvent, PdfJobLogEntry, PdfPreflightState } from "../types/contracts";
+import type { DocumentContext, PdfJobEvent, PdfJobLogEntry, PdfPreflightState } from "../types/contracts";
 
 const preflight: PdfPreflightState = {
   requestId: "preflight-1",
@@ -70,7 +70,48 @@ describe("PDF task log projection", () => {
       "quality",
       "result",
     ]);
+    expect(logs[0]?.message).toContain("状态：翻译进行中");
+    expect(logs.find((entry) => entry.kind === "quality")?.message).toBe("警告 · placeholder_missing · 占位符数量不一致 · 第 1 页 · 段落 p1-s1");
     expect(logs.at(-1)?.message).toBe("翻译完成 · 2 页");
+  });
+
+  it("records the preflight result and document context summary in the task log", () => {
+    const context: DocumentContext = {
+      schemaVersion: 2,
+      title: "A PDF title",
+      abstract: "A short abstract",
+      documentType: "research paper",
+      domain: "linguistics",
+      headings: ["Introduction", "Results"],
+      keyTerms: [{ source: "source term", target: "目标术语", sourceKind: null, confidence: 0.9, note: null }],
+      abbreviations: [{ abbreviation: "PDF", expanded: "Portable Document Format", target: null, confidence: null }],
+      translationNotes: ["保留公式格式"],
+      contextHash: "context-hash",
+    };
+    const logs = reducePdfJobLog([], {
+      type: "preflightCompleted",
+      taskId: "task-1",
+      preflightRequestId: "preflight-1",
+      preflight: {
+        ...preflight,
+        status: "completed",
+        applied: true,
+        responsePhase: null,
+        schemaVersion: context.schemaVersion,
+        context,
+        contextHash: context.contextHash,
+      },
+    });
+
+    expect(logs.map((entry) => entry.message)).toEqual([
+      "文档预检已完成 · 上下文已应用",
+      "文档上下文：A PDF title · 类型：research paper · 领域：linguistics · 术语 1 · 缩写 1 · 标题层级 2",
+      "摘要：A short abstract",
+      "翻译注意事项：保留公式格式",
+      "任务术语：source term → 目标术语",
+      "任务缩写：PDF（Portable Document Format）",
+      "上下文 v2 · context-hash",
+    ]);
   });
 
   it("merges continuous progress and deduplicates adjacent entries", () => {
@@ -118,5 +159,6 @@ describe("PDF task log projection", () => {
     const failed = reducePdfJobLog(cancelled, { type: "failed", taskId: "task-1", code: "engine_error", message: "Engine 失败" });
     expect(failed.at(-2)?.message).toBe("任务已取消 · 用户停止");
     expect(failed.at(-1)?.level).toBe("error");
+    expect(failed.at(-1)?.message).toBe("翻译失败 · Engine 失败 · 错误代码：engine_error");
   });
 });

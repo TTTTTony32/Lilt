@@ -36,11 +36,9 @@ import {
 import { invokeCommand } from "./lib/tauri";
 import { createEmptyPdfPreflightState } from "./lib/pdf-preflight";
 import type {
-  DocumentContext,
   PdfJobLogKind,
   PdfJobUiState,
   PdfPreflightState,
-  PdfQualityDiagnostic,
 } from "./types/contracts";
 
 type PdfReaderStatus = "loading" | "ready" | "error";
@@ -125,14 +123,14 @@ function formatPdfTaskProgressDetail(
         : preflight.responsePhase === "streaming"
           ? "生成预检结果"
           : "分析文档";
-    return `预检·${phase}`;
+    return `预检 · ${phase}`;
   }
   if (job.progress) {
     const stage = formatPdfTaskProgressStage(job.progress.stage);
     if (job.progress.current !== null && job.progress.total !== null) {
-      return `${stage}·${job.progress.current}/${job.progress.total}`;
+      return `${stage} · ${job.progress.current}/${job.progress.total}`;
     }
-    return job.progress.message ? `${stage}·${job.progress.message}` : stage;
+    return job.progress.message ? `${stage} · ${job.progress.message}` : stage;
   }
   return jobStatusLabel(job.status);
 }
@@ -161,104 +159,6 @@ function jobStatusLabel(status: PdfJobUiState["status"]): string {
   }
 }
 
-function preflightStatusLabel(preflight: PdfPreflightState): string {
-  switch (preflight.status) {
-    case "running":
-      switch (preflight.responsePhase) {
-        case "waiting": return "等待模型响应";
-        case "thinking": return "模型思考中";
-        case "streaming": return "正在生成预检结果";
-        default: return "正在分析文档";
-      }
-    case "completed": return "预检完成";
-    case "degraded": return "已降级应用";
-    case "failed": return "预检失败，继续翻译";
-    default: return "等待预检";
-  }
-}
-
-function diagnosticSeverityLabel(severity: PdfQualityDiagnostic["severity"]): string {
-  switch (severity) {
-    case "error": return "错误";
-    case "warning": return "警告";
-    default: return "提示";
-  }
-}
-
-function contextTitle(context: DocumentContext | null): string {
-  return context?.title?.trim() || "未识别标题";
-}
-
-function PdfContextSummary({ context }: { context: DocumentContext }) {
-  const metadata = [
-    context.documentType ? `类型：${context.documentType}` : null,
-    context.domain ? `领域：${context.domain}` : null,
-    `术语 ${context.keyTerms.length}`,
-    `缩写 ${context.abbreviations.length}`,
-    context.headings.length > 0 ? `标题层级 ${context.headings.length}` : null,
-  ].filter((item): item is string => item !== null);
-
-  return (
-    <details className="pdf-task-context-details">
-      <summary>查看文档上下文 · {contextTitle(context)}</summary>
-      <div className="pdf-task-context-summary">
-        <p className="pdf-task-panel-meta">{metadata.join(" · ")}</p>
-        {context.abstract && <p className="pdf-task-panel-message">{context.abstract}</p>}
-        {context.translationNotes.length > 0 && (
-          <div>
-            <strong>翻译注意事项</strong>
-            <ul className="pdf-task-warnings">
-              {context.translationNotes.map((note) => <li key={note}>{note}</li>)}
-            </ul>
-          </div>
-        )}
-        {context.keyTerms.length > 0 && (
-          <p className="pdf-task-panel-meta">任务术语：{context.keyTerms.map((term) => term.target ? `${term.source} → ${term.target}` : term.source).join("、")}</p>
-        )}
-        {context.abbreviations.length > 0 && (
-          <p className="pdf-task-panel-meta">任务缩写：{context.abbreviations.map((item) => item.expanded ? `${item.abbreviation}（${item.expanded}）` : item.abbreviation).join("、")}</p>
-        )}
-      </div>
-    </details>
-  );
-}
-
-function PdfQualityDiagnostics({ diagnostics }: { diagnostics: PdfQualityDiagnostic[] }) {
-  if (diagnostics.length === 0) return null;
-  return (
-    <div className="pdf-task-panel-section pdf-task-diagnostics-section">
-      <div className="pdf-task-panel-heading">
-        <div>
-          <span className="pdf-task-panel-kicker">QUALITY CONTROL</span>
-          <strong>质量诊断 · {diagnostics.length}</strong>
-        </div>
-      </div>
-      <details>
-        <summary>查看诊断明细</summary>
-        <ul className="pdf-task-warnings">
-          {diagnostics.map((diagnostic, index) => {
-            const location = [
-              diagnostic.pageNumber === null ? null : `第 ${diagnostic.pageNumber} 页`,
-              diagnostic.segmentId ? `段落 ${diagnostic.segmentId}` : null,
-            ].filter((item): item is string => item !== null).join(" · ");
-            return (
-              <li key={`${diagnosticKeyForRender(diagnostic)}-${index}`}>
-                <strong>{diagnosticSeverityLabel(diagnostic.severity)}</strong>
-                {diagnostic.ruleId && ` · ${diagnostic.ruleId}`}：{diagnostic.message}
-                {location && <small> · {location}</small>}
-              </li>
-            );
-          })}
-        </ul>
-      </details>
-    </div>
-  );
-}
-
-function diagnosticKeyForRender(diagnostic: PdfQualityDiagnostic): string {
-  return [diagnostic.ruleId ?? "diagnostic", diagnostic.message, diagnostic.segmentId ?? "", diagnostic.pageNumber ?? ""].join("-");
-}
-
 interface PdfTaskPanelProps {
   readerStatus: PdfReaderStatus;
   job: PdfJobUiState;
@@ -266,7 +166,6 @@ interface PdfTaskPanelProps {
   jobEventsError: string | null;
   translationEnabled: boolean;
   pdfPreflightEnabled: boolean;
-  pdfPreflightPageLimit: number;
   preflightSampling: boolean;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onStartTranslation: () => void;
@@ -281,7 +180,6 @@ function PdfTaskPanel({
   jobEventsError,
   translationEnabled,
   pdfPreflightEnabled,
-  pdfPreflightPageLimit,
   preflightSampling,
   onPdfPreflightEnabledChange,
   onStartTranslation,
@@ -290,25 +188,44 @@ function PdfTaskPanel({
 }: PdfTaskPanelProps) {
   const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
   const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
+  const taskButtonIsCancel = jobBusy;
+  const taskButtonDisabled = taskButtonIsCancel
+    ? job.status === "cancelling" || !job.taskId
+    : !canStart;
+  const taskButtonLabel = job.status === "cancelling"
+    ? "正在停止翻译"
+    : taskButtonIsCancel
+      ? "停止翻译"
+      : job.status === "completed"
+        ? "再次翻译"
+        : "开始翻译";
   const jobProgressValue = progressPercent(job.progress);
   const preflight = job.preflight ?? createEmptyPdfPreflightState();
-  const context = job.documentContext ?? preflight.context;
-  const diagnostics = job.diagnostics ?? [];
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const taskLogRef = useRef<HTMLDivElement | null>(null);
   const detailsId = "pdf-task-panel-details";
   const progressDetail = formatPdfTaskProgressDetail(job, preflight, pdfPreflightEnabled);
-  const preflightLabel = pdfPreflightEnabled
-    ? `${preflightStatusLabel(preflight)} · 前 ${pdfPreflightPageLimit} 页`
-    : "未启用";
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    const taskLog = taskLogRef.current;
+    if (!taskLog) return;
+    taskLog.scrollTop = taskLog.scrollHeight;
+  }, [detailsOpen, job.logs]);
 
   return (
     <div className="pdf-task-panel">
       <div className="pdf-task-panel-topbar">
-        <button className="primary-button small-button" type="button" onClick={onStartTranslation} disabled={!canStart}>
-          {job.status === "completed" ? "再次翻译" : "开始翻译"}
+        <button
+          className={`primary-button small-button ${taskButtonIsCancel ? "cancel-button" : ""}`}
+          type="button"
+          onClick={taskButtonIsCancel ? onCancelTranslation : onStartTranslation}
+          disabled={taskButtonDisabled}
+        >
+          {taskButtonLabel}
         </button>
         <div className="pdf-task-panel-progress" aria-live="polite">
-          <div className="pdf-task-panel-heading">
+          <div className="pdf-task-panel-heading pdf-task-panel-progress-heading">
             <div>
               <span className="pdf-task-panel-kicker">PDF TRANSLATION</span>
               <strong>{jobStatusLabel(job.status)}</strong>
@@ -347,29 +264,25 @@ function PdfTaskPanel({
           </button>
         </div>
       </div>
+      {job.status === "completed" && job.outputPdf && (
+        <div className="pdf-task-panel-section pdf-task-output-section">
+          <div className="pdf-task-output">
+            <strong>输出已生成</strong>
+            <button
+              className="pdf-task-output-path"
+              type="button"
+              onClick={() => onOpenOutputDirectory(job.outputPdf!)}
+              title="打开文件所在目录"
+              aria-label={`打开输出文件所在目录：${job.outputPdf}`}
+            >
+              {job.outputPdf}
+            </button>
+            <small>{[job.outputMode, job.pageCount === null ? null : `${job.pageCount} 页`].filter((item): item is string => item !== null).join(" · ")}</small>
+          </div>
+        </div>
+      )}
       {detailsOpen && (
         <div className="pdf-task-panel-details" id={detailsId}>
-          <div className="pdf-task-panel-section pdf-task-job-section">
-            <div className="pdf-task-panel-heading">
-              <div>
-                <span className="pdf-task-panel-kicker">TRANSLATION DETAILS</span>
-                <strong>任务详情</strong>
-              </div>
-              <div className="pdf-task-panel-actions">
-                {jobBusy && job.status !== "cancelling" && (
-                  <button className="secondary-button small-button" type="button" onClick={onCancelTranslation} disabled={!job.taskId}>
-                    停止翻译
-                  </button>
-                )}
-                {job.status === "cancelling" && <span className="pdf-task-action-status">正在停止翻译</span>}
-              </div>
-            </div>
-            {!jobEventsReady && <p className="pdf-task-error">{jobEventsError ?? "PDF 任务事件监听尚未就绪。"}</p>}
-            {job.stage && <p className="pdf-task-panel-stage">{formatPdfStage(job.stage)}</p>}
-            {job.message && <p className={job.status === "failed" ? "pdf-task-error" : "pdf-task-panel-message"} role={job.status === "failed" ? "alert" : undefined}>{job.message}</p>}
-            {job.code && <p className="pdf-task-panel-meta">错误代码：{job.code}</p>}
-          </div>
-
           <div className="pdf-task-panel-section pdf-task-log-section">
             <div className="pdf-task-panel-heading">
               <div>
@@ -377,69 +290,32 @@ function PdfTaskPanel({
                 <strong>任务日志 · {job.logs.length}</strong>
               </div>
             </div>
-            <div className="pdf-task-log" role="log" aria-live="polite" aria-label="PDF 任务日志">
-              {job.logs.length === 0 ? (
-                <p className="pdf-task-panel-meta">暂无任务日志。</p>
-              ) : (
-                <ol>
+            <div ref={taskLogRef} className="pdf-task-log" role="log" aria-live="polite" aria-label="PDF 任务日志">
+              {job.logs.length === 0 && jobEventsReady && <p className="pdf-task-panel-meta">暂无任务日志。</p>}
+              {(job.logs.length > 0 || !jobEventsReady) && (
+                <div className="pdf-task-log-list" role="list">
                   {job.logs.map((entry) => (
-                    <li key={entry.seq} className={`pdf-task-log-entry is-${entry.level}`}>
-                      <span className="pdf-task-log-kind">{pdfJobLogKindLabel(entry.kind)}</span>
-                      <span>{entry.message}</span>
-                    </li>
+                    <div key={entry.seq} className={`pdf-task-log-entry is-${entry.level}`} role="listitem">
+                      <span className="pdf-task-log-kind">[{pdfJobLogKindLabel(entry.kind)}]</span>{" "}
+                      <span className="pdf-task-log-message">{entry.message}</span>
+                    </div>
                   ))}
-                </ol>
+                  {!jobEventsReady && (
+                    <div className="pdf-task-log-entry is-error" role="listitem">
+                      <span className="pdf-task-log-kind">[错误]</span>{" "}
+                      <span className="pdf-task-log-message">{jobEventsError ?? "PDF 任务事件监听尚未就绪。"}</span>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>
 
-          <div className="pdf-task-panel-section pdf-task-output-section">
-            {job.status === "completed" && job.outputPdf ? (
-              <div className="pdf-task-output">
-                <strong>输出已生成</strong>
-                <button className="pdf-task-output-path" type="button" onClick={() => onOpenOutputDirectory(job.outputPdf!)} title="打开文件所在目录">
-                  {job.outputPdf}
-                </button>
-                <small>{[job.outputMode, job.pageCount === null ? null : `${job.pageCount} 页`].filter((item): item is string => item !== null).join(" · ")}</small>
-              </div>
-            ) : null}
-            {job.warnings.length > 0 && (
-              <ul className="pdf-task-warnings">
-                {job.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-              </ul>
-            )}
-            {job.tokenUsage && <p className="pdf-task-panel-meta">Token：{job.tokenUsage.totalTokens ?? "—"}</p>}
-          </div>
-
-          <div className="pdf-task-panel-section pdf-task-preflight-section" aria-live="polite">
-            <div className="pdf-task-panel-heading">
-              <div>
-                <span className="pdf-task-panel-kicker">DOCUMENT PREFLIGHT</span>
-                <strong>{preflightLabel}</strong>
-              </div>
-              {preflight.applied && <span className="connection-status connected">自动应用</span>}
+          {job.tokenUsage && (
+            <div className="pdf-task-panel-section pdf-task-output-section">
+              <p className="pdf-task-panel-meta">Token：{job.tokenUsage.totalTokens ?? "—"}</p>
             </div>
-            {preflight.message && <p className={preflight.status === "failed" ? "pdf-task-error" : "pdf-task-panel-message"}>{preflight.message}</p>}
-            {!pdfPreflightEnabled && preflight.status === "idle" ? (
-              <p className="pdf-task-panel-meta">文档预检未启用，不会发送预检请求，PDF 翻译仍可继续。</p>
-            ) : context ? (
-              <>
-                <p className="pdf-task-panel-meta">文档上下文：{contextTitle(context)} · 术语 {context.keyTerms.length} · 缩写 {context.abbreviations.length}</p>
-                <PdfContextSummary context={context} />
-              </>
-            ) : preflight.status === "running" ? (
-              <p className="pdf-task-panel-meta">正在整理标题、摘要、术语和缩写，完成后会自动用于段落翻译。</p>
-            ) : (
-              <p className="pdf-task-panel-meta">预检结果会自动应用；没有上下文时继续使用普通 PDF 翻译。</p>
-            )}
-            {(preflight.contextHash || preflight.schemaVersion !== null) && (
-              <p className="pdf-task-panel-meta">
-                {preflight.schemaVersion === null ? null : `上下文 v${preflight.schemaVersion}`}
-                {preflight.contextHash ? ` · ${preflight.contextHash}` : null}
-              </p>
-            )}
-          </div>
-          <PdfQualityDiagnostics diagnostics={diagnostics} />
+          )}
         </div>
       )}
     </div>
@@ -835,7 +711,6 @@ export default function PdfReader({
         jobEventsError={jobEventsError}
         translationEnabled={translationEnabled && !preflightSampling}
         pdfPreflightEnabled={pdfPreflightEnabled}
-        pdfPreflightPageLimit={pdfPreflightPageLimit}
         preflightSampling={preflightSampling}
         onPdfPreflightEnabledChange={onPdfPreflightEnabledChange}
         onStartTranslation={() => void handleStartTranslation()}

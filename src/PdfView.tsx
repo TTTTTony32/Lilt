@@ -298,25 +298,36 @@ export default function PdfView({
       case "finished": {
         clearPdfTaskRefs();
         const translatedFile = validatePdfPath(event.outputPdf);
+        const outputPathError = "翻译已完成，但输出 PDF 路径无效。请从任务面板检查输出文件。";
         if (translatedFile) {
           setSelectedFile(translatedFile);
           setError(null);
         } else {
-          setError("翻译已完成，但输出 PDF 路径无效。请从任务面板检查输出文件。");
+          setError(outputPathError);
         }
-        updatePdfJob((current) => appendPdfJobEventLog(mergePdfJobEventMetadata({
-          ...current,
-          taskId: event.taskId,
-          status: "completed",
-          progress: current.progress ? { ...current.progress, fraction: 1 } : current.progress,
-          stage: "finished",
-          outputPdf: event.outputPdf,
-          outputMode: event.outputMode,
-          pageCount: event.pageCount,
-          warnings: appendUniqueStrings(current.warnings, event.warnings),
-          message: null,
-          code: null,
-        }, event), event));
+        updatePdfJob((current) => {
+          const next = appendPdfJobEventLog(mergePdfJobEventMetadata({
+            ...current,
+            taskId: event.taskId,
+            status: "completed",
+            progress: current.progress ? { ...current.progress, fraction: 1 } : current.progress,
+            stage: "finished",
+            outputPdf: event.outputPdf,
+            outputMode: event.outputMode,
+            pageCount: event.pageCount,
+            warnings: appendUniqueStrings(current.warnings, event.warnings),
+            message: null,
+            code: null,
+          }, event), event);
+          return translatedFile
+            ? next
+            : {
+              ...next,
+              code: "invalid_output_path",
+              message: outputPathError,
+              logs: appendPdfJobLogMessage(next.logs, "result", "error", `${outputPathError} · 错误代码：invalid_output_path`),
+            };
+        });
         break;
       }
       case "cancelled":
@@ -366,8 +377,9 @@ export default function PdfView({
         return {
           ...current,
           status: "failed",
+          code: "events_not_ready",
           message,
-          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", `${message} · 错误代码：events_not_ready`),
         };
       });
       return;
@@ -378,8 +390,9 @@ export default function PdfView({
         return {
           ...current,
           status: "failed",
+          code: "engine_not_ready",
           message,
-          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", `${message} · 错误代码：engine_not_ready`),
         };
       });
       return;
@@ -389,7 +402,7 @@ export default function PdfView({
     const attempt = startAttemptSequenceRef.current + 1;
     startAttemptSequenceRef.current = attempt;
     startAttemptRef.current = attempt;
-    let initialLogs = appendPdfJobLogMessage([], "system", "info", "正在准备 PDF 翻译任务");
+    let initialLogs = appendPdfJobLogMessage([], "system", "info", "状态：正在启动 Worker · 准备 PDF 翻译任务");
     initialLogs = appendPdfJobLogMessage(
       initialLogs,
       "preflight",
@@ -448,7 +461,7 @@ export default function PdfView({
           status: "failed",
           code: "start_failed",
           message,
-          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", `${message} · 错误代码：start_failed`),
         };
       });
     }
@@ -456,8 +469,25 @@ export default function PdfView({
 
   const cancelPdfTranslation = useCallback(async () => {
     const taskId = activeTaskIdRef.current;
-    if (!taskId || pdfJobRef.current.status === "cancelling") return;
-    updatePdfJob((current) => ({ ...current, status: "cancelling", message: null }));
+    const pendingStartAttempt = startAttemptRef.current;
+    if ((!taskId && pendingStartAttempt === null) || pdfJobRef.current.status === "cancelling") return;
+    if (!taskId) {
+      clearPdfTaskRefs();
+      updatePdfJob((current) => ({
+        ...current,
+        status: "cancelled",
+        message: "PDF 翻译启动已取消",
+        code: null,
+        logs: appendPdfJobLogMessage(current.logs, "result", "warning", "PDF 翻译启动已取消。"),
+      }));
+      return;
+    }
+    updatePdfJob((current) => ({
+      ...current,
+      status: "cancelling",
+      message: null,
+      logs: appendPdfJobLogMessage(current.logs, "system", "warning", "状态：正在取消翻译"),
+    }));
     clearCancelTimeout();
     cancelTimeoutRef.current = window.setTimeout(() => {
       if (disposedRef.current || activeTaskIdRef.current !== taskId || pdfJobRef.current.status !== "cancelling") return;
@@ -468,7 +498,7 @@ export default function PdfView({
         status: "cancelled",
         message: "取消确认超时，Worker 已终止。",
         code: "cancel_timeout",
-        logs: appendPdfJobLogMessage(current.logs, "result", "warning", "取消确认超时，Worker 已终止。"),
+        logs: appendPdfJobLogMessage(current.logs, "result", "warning", "取消确认超时，Worker 已终止 · 错误代码：cancel_timeout"),
       }));
     }, PDF_TRANSLATION_CANCEL_TIMEOUT_MS);
 
@@ -499,7 +529,7 @@ export default function PdfView({
           status: "failed",
           code: "cancel_failed",
           message,
-          logs: appendPdfJobLogMessage(current.logs, "result", "error", message),
+          logs: appendPdfJobLogMessage(current.logs, "result", "error", `${message} · 错误代码：cancel_failed`),
         };
       });
     }
