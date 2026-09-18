@@ -254,7 +254,7 @@ function FeedbackMessage({
 }: {
   message: string | null;
   kind: "error" | "notice";
-  as?: "span" | "p";
+  as?: "span" | "p" | "div";
   className?: string;
 }) {
   const reducedMotion = usePrefersReducedMotion();
@@ -315,6 +315,8 @@ function FeedbackMessage({
     <Element
       key={`${visible.kind}-${visible.message}`}
       className={`feedback-message ${visible.kind}-message feedback-${phase} ${className}`.trim()}
+      role={kind === "error" ? "alert" : undefined}
+      aria-live={kind === "error" ? "assertive" : undefined}
       onAnimationEnd={handleAnimationEnd}
     >
       {visible.message}
@@ -337,7 +339,6 @@ function App() {
   const [learningModeSaving, setLearningModeSaving] = useState(false);
   const [pdfPreflightSaving, setPdfPreflightSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [translationSummary, setTranslationSummary] = useState<TranslationSummary | null>(null);
   const [translationEventsReady, setTranslationEventsReady] = useState(false);
   const [translationEventsError, setTranslationEventsError] = useState<string | null>(null);
@@ -640,11 +641,9 @@ function App() {
       settings: { ...current.settings, paragraphLearningModeEnabled: enabled },
     }));
     setError(null);
-    setNotice(null);
     try {
       await invokeCommand("set_paragraph_learning_mode", { enabled });
       if (!enabled) setLearningResult(null);
-      setNotice(enabled ? "学习模式已开启" : "学习模式已关闭");
     } catch (reason) {
       setSnapshot((current) => ({
         ...current,
@@ -666,10 +665,8 @@ function App() {
       settings: { ...current.settings, pdfPreflightEnabled: enabled },
     }));
     setError(null);
-    setNotice(null);
     try {
       await invokeCommand("set_pdf_preflight_enabled", { enabled });
-      setNotice(enabled ? "PDF 文档预检已开启" : "PDF 文档预检已关闭");
     } catch (reason) {
       setSnapshot((current) => ({
         ...current,
@@ -736,7 +733,6 @@ function App() {
             setTargetLanguage(request.targetLanguage);
             setTab("translate");
             setError(null);
-            setNotice("已将选中文本载入段落翻译");
           } catch (reason) {
             if (!disposed) setError(describeError(reason, "无法读取选中文本"));
           }
@@ -1385,7 +1381,6 @@ function App() {
     activeRequestRawSourceTextRef.current = sourceText;
     setActiveRequestMode(requestMode);
     setError(null);
-    setNotice(null);
     setLearningResult(null);
     setTranslatedText("");
     setTranslationSummary(null);
@@ -1466,8 +1461,6 @@ function App() {
   const handleCopy = async () => {
     if (!translatedText) return;
     await navigator.clipboard.writeText(translatedText);
-    setNotice("译文已复制");
-    window.setTimeout(() => setNotice(null), 1800);
   };
 
   const handleSettingsSaved = useCallback((next: AppSnapshot) => {
@@ -1480,8 +1473,6 @@ function App() {
         pdfPreflightEnabled: current.settings.pdfPreflightEnabled,
       },
     }));
-    setNotice("设置已保存");
-    window.setTimeout(() => setNotice(null), 1800);
   }, []);
 
   const openPersonalDictionary = useCallback(() => {
@@ -1548,8 +1539,6 @@ function App() {
                   learningModeEnabled={snapshot.settings.paragraphLearningModeEnabled}
                   learningModeSaving={learningModeSaving}
                   learningResult={learningResult}
-                  error={error ?? translationEventsError}
-                  notice={notice}
                   translationSummary={translationSummary}
                   eventsReady={translationEventsReady}
                   onSourceTextChange={handleSourceTextChange}
@@ -1676,6 +1665,9 @@ function App() {
           onClosed={handleCloseDialogClosed}
         />
       )}
+      <div className="error-toast-anchor">
+        <FeedbackMessage message={error ?? translationEventsError} kind="error" as="div" className="error-toast" />
+      </div>
       <DownloadActivityStack activities={downloadActivities} />
     </div>
   );
@@ -1997,8 +1989,6 @@ interface TranslateViewProps {
   learningModeEnabled: boolean;
   learningModeSaving: boolean;
   learningResult: ParagraphLearningResult | null;
-  error: string | null;
-  notice: string | null;
   translationSummary: TranslationSummary | null;
   eventsReady: boolean;
   onSourceTextChange: (value: string) => void;
@@ -2227,12 +2217,6 @@ function TranslateView(props: TranslateViewProps) {
       </div>
 
       <div className="action-row">
-        <div className="message-area">
-          <FeedbackMessage
-            message={props.error ?? props.notice}
-            kind={props.error ? "error" : "notice"}
-          />
-        </div>
         {isBusy ? (
           <button className="primary-button cancel-button" type="button" onClick={props.onCancel} disabled={props.status === "cancelling"}>
             {props.status === "cancelling" ? <LoaderCircle className="spin" size={16} /> : <Square size={14} fill="currentColor" />}

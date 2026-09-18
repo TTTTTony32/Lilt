@@ -204,11 +204,12 @@ textarea::placeholder { color: #b5b6ad; }
 .icon-button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 6px; color: #899188; background: transparent; transition: color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
 .icon-button:hover:not(:disabled) { color: #38513f; background: #edf0ea; }
 
-.action-row { min-height: 52px; margin-top: 17px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.message-area { min-height: 22px; font-size: 12px; }
+.action-row { min-height: 52px; margin-top: 17px; display: flex; align-items: center; justify-content: flex-end; gap: 20px; }
 .error-message { color: #a25e53; }
 .notice-message { color: #61816a; }
 .feedback-message { display: inline-block; }
+.error-toast-anchor { position: fixed; z-index: 40; right: 22px; bottom: 22px; left: 22px; display: flex; justify-content: center; pointer-events: none; }
+.error-toast { max-width: min(520px, 100%); padding: 9px 13px; border: 1px solid #e1c7c1; border-radius: 8px; color: #8f544b; background: rgba(253, 243, 240, .97); box-shadow: 0 10px 25px rgba(72, 54, 50, .16); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .feedback-entering { animation: feedback-enter var(--motion-fast-duration) var(--motion-ease) both; }
 .feedback-exiting { animation: feedback-exit var(--motion-fast-duration) var(--motion-ease) both; }
 @keyframes feedback-enter {
