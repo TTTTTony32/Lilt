@@ -8,6 +8,7 @@ export interface ResourceDownloadPromptRequest {
   title: string;
   description: string;
   startLabel: string;
+  failedLabel?: string;
   onStart: () => void;
 }
 

@@ -17,6 +17,7 @@ export interface ResourceDownloadDialogProps {
   message: string | null;
   error: string | null;
   startLabel: string;
+  failedLabel?: string;
   onStart: () => void;
   onRequestClose: () => void;
   onClosed: () => void;
@@ -41,6 +42,7 @@ export function ResourceDownloadDialog({
   message,
   error,
   startLabel,
+  failedLabel,
   onStart,
   onRequestClose,
   onClosed,
@@ -113,7 +115,7 @@ export function ResourceDownloadDialog({
         </div>
 
         <div className="form-actions modal-actions">
-          {canStart && <button className="primary-button" type="button" onClick={onStart}><Download size={15} />{status === "failed" ? "重试" : startLabel}</button>}
+          {canStart && <button className="primary-button" type="button" onClick={onStart}><Download size={15} />{status === "failed" ? failedLabel ?? "重试" : startLabel}</button>}
           {running && <span className="resource-download-running-hint">可以关闭窗口，任务会继续。</span>}
           <button className="secondary-button" type="button" onClick={onRequestClose}>{status === "completed" ? "完成" : "关闭"}</button>
         </div>

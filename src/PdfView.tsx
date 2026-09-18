@@ -6,7 +6,7 @@ import { describeError } from "./lib/errors";
 import { type PdfFile, validatePdfPath } from "./lib/pdf";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import type { ResourceDownloadPromptRequest } from "./lib/download-activity";
-import { PdfEnginePanel } from "./PdfEnginePanel";
+import type { PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
 import {
   createEmptyPdfPreflightState,
   markPdfPreflightRunning,
@@ -15,17 +15,11 @@ import {
   reducePdfPreflightWarning,
 } from "./lib/pdf-preflight";
 import {
-  PDF_ENGINE_EVENT_NAMES,
   PDF_JOB_EVENT_NAMES,
-  decodePdfEngineEvent,
-  decodePdfEngineStatus,
   decodePdfJobEvent,
   decodePdfTranslationCancelResult,
   decodePdfTranslationStartResult,
   type PdfQualityDiagnostic,
-  type PdfEngineEvent,
-  type PdfEngineProgress,
-  type PdfEngineStatus,
   type PdfJobEvent,
   type PdfJobUiState,
 } from "./types/contracts";
@@ -35,7 +29,6 @@ const PdfReader = lazy(() => import("./PdfReader"));
 const MULTIPLE_FILES_ERROR = "当前只支持单个 PDF 文件，请一次拖放一个文件。";
 const INVALID_FILE_ERROR = "请选择 PDF 文件，文件扩展名必须为 .pdf。";
 const EMPTY_PATH_ERROR = "未找到 PDF 文件路径，请重试。";
-const PDF_ENGINE_PREPARE_TIMEOUT_MS = 600_000;
 const PDF_TRANSLATION_START_TIMEOUT_MS = 30_000;
 const PDF_TRANSLATION_CANCEL_TIMEOUT_MS = 10_000;
 
@@ -108,28 +101,27 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
-export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void }) {
+interface PdfViewProps {
+  pdfEngine: PdfEngineRuntime;
+  onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
+  onOpenPdfEngineSettings: () => void;
+}
+
+export default function PdfView({ pdfEngine, onResourceDownloadPrompt, onOpenPdfEngineSettings }: PdfViewProps) {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [engineStatus, setEngineStatus] = useState<PdfEngineStatus | null>(null);
-  const [engineStatusLoading, setEngineStatusLoading] = useState(false);
-  const [enginePreparing, setEnginePreparing] = useState(false);
-  const [engineProgress, setEngineProgress] = useState<PdfEngineProgress | null>(null);
-  const [engineError, setEngineError] = useState<string | null>(null);
-  const [engineEventsError, setEngineEventsError] = useState<string | null>(null);
+  const {
+    status: engineStatus,
+    statusLoading: engineStatusLoading,
+    error: engineError,
+  } = pdfEngine;
   const [jobEventsReady, setJobEventsReady] = useState(false);
   const [jobEventsError, setJobEventsError] = useState<string | null>(null);
   const [pdfJob, setPdfJob] = useState<PdfJobUiState>(() => emptyPdfJob());
   const pdfJobRef = useRef<PdfJobUiState>(emptyPdfJob());
   const disposedRef = useRef(false);
-  const engineStatusRequestRef = useRef(0);
-  const prepareAttemptRef = useRef(0);
-  const prepareOperationRef = useRef<string | null>(null);
-  const prepareTimeoutRef = useRef<number | null>(null);
-  const preparePreviousStatusRef = useRef<PdfEngineStatus | null>(null);
-  const preparingRef = useRef(false);
   const enginePromptShownRef = useRef(false);
   const startAttemptRef = useRef<number | null>(null);
   const startAttemptSequenceRef = useRef(0);
@@ -142,12 +134,6 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
       pdfJobRef.current = next;
       return next;
     });
-  }, []);
-
-  const clearPrepareTimeout = useCallback(() => {
-    if (prepareTimeoutRef.current === null) return;
-    window.clearTimeout(prepareTimeoutRef.current);
-    prepareTimeoutRef.current = null;
   }, []);
 
   const clearCancelTimeout = useCallback(() => {
@@ -203,215 +189,6 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
     }
     acceptPath(paths[0]);
   }, [acceptPath]);
-
-  const refreshEngineStatus = useCallback(async () => {
-    const requestId = engineStatusRequestRef.current + 1;
-    engineStatusRequestRef.current = requestId;
-    setEngineStatusLoading(true);
-    setEngineError(null);
-    try {
-      const raw = await invokeCommand<unknown>("get_pdf_engine_status");
-      const next = decodePdfEngineStatus(raw);
-      if (!next) throw new Error("PDF Engine 状态返回了无法识别的结果。");
-      if (disposedRef.current || requestId !== engineStatusRequestRef.current) return;
-      setEngineStatus(next);
-      setEngineError(next.error);
-      if (next.status === "preparing") {
-        preparingRef.current = true;
-        setEnginePreparing(true);
-      } else {
-        preparingRef.current = false;
-        clearPrepareTimeout();
-        setEnginePreparing(false);
-        setEngineProgress(null);
-      }
-    } catch (reason) {
-      if (disposedRef.current || requestId !== engineStatusRequestRef.current) return;
-      const message = describeError(reason, "无法读取 PDF Engine 状态");
-      setEngineStatus((current) => current ? { ...current, status: "invalid", error: message } : {
-        status: "invalid",
-        engineVersion: null,
-        target: null,
-        pythonVersion: null,
-        babeldocVersion: null,
-        distributionVersion: null,
-        resourceSizeBytes: null,
-        updating: false,
-        error: message,
-      });
-      setEngineError(message);
-    } finally {
-      if (!disposedRef.current && requestId === engineStatusRequestRef.current) {
-        setEngineStatusLoading(false);
-      }
-    }
-  }, [clearPrepareTimeout]);
-
-  const handleEngineEvent = useCallback((event: PdfEngineEvent) => {
-    if (disposedRef.current) return;
-    switch (event.type) {
-      case "status":
-        setEngineStatus(event.status);
-        setEngineError(event.status.error);
-        if (event.status.status !== "preparing") {
-          preparingRef.current = false;
-          clearPrepareTimeout();
-          setEnginePreparing(false);
-          setEngineProgress(null);
-        }
-        break;
-      case "prepareStarted":
-        if (!preparingRef.current) return;
-        prepareOperationRef.current = event.operationId;
-        setEnginePreparing(true);
-        setEngineProgress(null);
-        setEngineStatus((current) => current ? { ...current, status: "preparing", error: null } : current);
-        break;
-      case "prepareProgress":
-        if (!preparingRef.current) return;
-        if (prepareOperationRef.current && event.progress.operationId && prepareOperationRef.current !== event.progress.operationId) return;
-        if (!prepareOperationRef.current && event.progress.operationId) {
-          prepareOperationRef.current = event.progress.operationId;
-        }
-        setEnginePreparing(true);
-        setEngineProgress(event.progress);
-        setEngineStatus((current) => current ? { ...current, status: "preparing", error: null } : current);
-        break;
-      case "prepareCompleted":
-        if (!preparingRef.current) return;
-        if (prepareOperationRef.current && event.operationId && prepareOperationRef.current !== event.operationId) return;
-        preparingRef.current = false;
-        prepareOperationRef.current = null;
-        preparePreviousStatusRef.current = null;
-        clearPrepareTimeout();
-        setEnginePreparing(false);
-        setEngineProgress(null);
-        setEngineError(event.status?.error ?? null);
-        setEngineStatus((current) => event.status ?? (current ? { ...current, status: "ready", error: null } : {
-          status: "ready",
-          engineVersion: null,
-          target: null,
-          pythonVersion: null,
-          babeldocVersion: null,
-          distributionVersion: null,
-          resourceSizeBytes: null,
-          updating: false,
-          error: null,
-        }));
-        void refreshEngineStatus();
-        break;
-      case "prepareFailed": {
-        if (!preparingRef.current) return;
-        if (prepareOperationRef.current && event.operationId && prepareOperationRef.current !== event.operationId) return;
-        preparingRef.current = false;
-        prepareOperationRef.current = null;
-        const failedStatus = event.status;
-        clearPrepareTimeout();
-        setEnginePreparing(false);
-        setEngineProgress(null);
-        setEngineError(failedStatus?.error ?? event.message);
-        setEngineStatus((current) => failedStatus ?? (current ? {
-          ...current,
-          status: current.status === "ready" ? "ready" : "invalid",
-          error: event.message,
-        } : {
-          status: "invalid",
-          engineVersion: null,
-          target: null,
-          pythonVersion: null,
-          babeldocVersion: null,
-          distributionVersion: null,
-          resourceSizeBytes: null,
-          updating: false,
-          error: event.message,
-        }));
-        break;
-      }
-    }
-  }, [clearPrepareTimeout, refreshEngineStatus]);
-
-  const preparePdfEngine = useCallback(async () => {
-    if (preparingRef.current || engineStatus?.status === "preparing") return;
-    const attempt = prepareAttemptRef.current + 1;
-    prepareAttemptRef.current = attempt;
-    preparePreviousStatusRef.current = engineStatus;
-    preparingRef.current = true;
-    prepareOperationRef.current = null;
-    clearPrepareTimeout();
-    setEngineStatusLoading(false);
-    setEnginePreparing(true);
-    setEngineProgress(null);
-    setEngineError(null);
-    setEngineStatus((current) => current ? { ...current, status: "preparing", error: null } : current);
-    prepareTimeoutRef.current = window.setTimeout(() => {
-      if (disposedRef.current || prepareAttemptRef.current !== attempt || !preparingRef.current) return;
-      preparingRef.current = false;
-      prepareOperationRef.current = null;
-      prepareTimeoutRef.current = null;
-      setEnginePreparing(false);
-      setEngineProgress(null);
-      const message = "PDF Engine 准备超时，请检查运行环境后重试。";
-      setEngineError(message);
-      const previousStatus = preparePreviousStatusRef.current;
-      preparePreviousStatusRef.current = null;
-      setEngineStatus((current) => previousStatus?.status === "ready" ? {
-        ...previousStatus,
-        error: message,
-      } : current ? { ...current, status: "invalid", error: message } : {
-        status: "invalid",
-        engineVersion: null,
-        target: null,
-        pythonVersion: null,
-        babeldocVersion: null,
-        distributionVersion: null,
-        resourceSizeBytes: null,
-        updating: false,
-        error: message,
-      });
-    }, PDF_ENGINE_PREPARE_TIMEOUT_MS);
-
-    try {
-      const raw = await invokeCommand<unknown>("prepare_pdf_engine");
-      const next = decodePdfEngineStatus(raw);
-      if (!next) throw new Error("PDF Engine 准备命令返回了无法识别的结果。");
-      if (disposedRef.current || prepareAttemptRef.current !== attempt) return;
-      setEngineStatus(next);
-      setEngineError(next.status === "invalid" ? next.error : null);
-      if (next.status !== "preparing") {
-        preparingRef.current = false;
-        prepareOperationRef.current = null;
-        preparePreviousStatusRef.current = null;
-        clearPrepareTimeout();
-        setEnginePreparing(false);
-        setEngineProgress(null);
-      }
-    } catch (reason) {
-      if (disposedRef.current || prepareAttemptRef.current !== attempt) return;
-      preparingRef.current = false;
-      prepareOperationRef.current = null;
-      clearPrepareTimeout();
-      setEnginePreparing(false);
-      setEngineProgress(null);
-      const message = describeError(reason, "准备 PDF Engine 失败");
-      setEngineError(message);
-      const previousStatus = preparePreviousStatusRef.current;
-      preparePreviousStatusRef.current = null;
-      setEngineStatus((current) => previousStatus?.status === "ready" ? {
-        ...previousStatus,
-        error: message,
-      } : current ? { ...current, status: "invalid", error: message } : {
-        status: "invalid",
-        engineVersion: null,
-        target: null,
-        pythonVersion: null,
-        babeldocVersion: null,
-        distributionVersion: null,
-        resourceSizeBytes: null,
-        updating: false,
-        error: message,
-      });
-    }
-  }, [clearPrepareTimeout, engineStatus]);
 
   const matchesPdfTask = useCallback((taskId: string): boolean => {
     const activeTaskId = activeTaskIdRef.current;
@@ -656,27 +433,18 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
     return () => {
       disposedRef.current = true;
       const taskId = activeTaskIdRef.current;
-      clearPrepareTimeout();
       clearPdfTaskRefs();
       if (taskId) void invokeCommand("cancel_pdf_translation", { taskId }).catch(() => undefined);
     };
-  }, [clearPdfTaskRefs, clearPrepareTimeout]);
+  }, [clearPdfTaskRefs]);
 
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    setEngineEventsError(null);
     setJobEventsError(null);
     setJobEventsReady(false);
 
     const initialiseListeners = async () => {
-      const engineResults = await Promise.allSettled(PDF_ENGINE_EVENT_NAMES.map((name) => (
-        listenTo<unknown>(name, (payload) => {
-          if (disposed || disposedRef.current) return;
-          const event = decodePdfEngineEvent(name, payload);
-          if (event) handleEngineEvent(event);
-        })
-      )));
       const jobResults = await Promise.allSettled(PDF_JOB_EVENT_NAMES.map((name) => (
         listenTo<unknown>(name, (payload) => {
           if (disposed || disposedRef.current) return;
@@ -685,17 +453,13 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
         })
       )));
 
-      for (const result of [...engineResults, ...jobResults]) {
+      for (const result of jobResults) {
         if (result.status !== "fulfilled") continue;
         if (disposed) result.value();
         else unlisteners.push(result.value);
       }
       if (disposed) return;
 
-      const engineFailure = engineResults.find((result) => result.status === "rejected");
-      if (engineFailure?.status === "rejected") {
-        setEngineEventsError(describeError(engineFailure.reason, "PDF Engine 事件监听初始化失败。"));
-      }
       const jobFailure = jobResults.find((result) => result.status === "rejected");
       if (jobFailure?.status === "rejected") {
         unlisteners.splice(0).forEach((unlisten) => unlisten());
@@ -711,23 +475,20 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
       disposed = true;
       unlisteners.splice(0).forEach((unlisten) => unlisten());
     };
-  }, [handleEngineEvent, handlePdfJobEvent]);
+  }, [handlePdfJobEvent]);
 
   useEffect(() => {
-    void refreshEngineStatus();
-  }, [refreshEngineStatus]);
-
-  useEffect(() => {
-    if (engineStatusLoading || !engineStatus || enginePromptShownRef.current || engineStatus.status !== "missing") return;
+    if (engineStatusLoading || !engineStatus || enginePromptShownRef.current || (engineStatus.status !== "missing" && engineStatus.status !== "invalid")) return;
     enginePromptShownRef.current = true;
     onResourceDownloadPrompt({
       resource: "pdf-engine",
       title: "准备 PDF Engine",
       description: "PDF 全文翻译依赖本地 PDF Engine，首次使用需要准备运行环境。",
-      startLabel: "开始准备",
-      onStart: () => { void preparePdfEngine(); },
+      startLabel: "前往关于",
+      failedLabel: "前往关于",
+      onStart: onOpenPdfEngineSettings,
     });
-  }, [engineStatus, engineStatusLoading, onResourceDownloadPrompt, preparePdfEngine]);
+  }, [engineStatus, engineStatusLoading, onOpenPdfEngineSettings, onResourceDownloadPrompt]);
 
   useEffect(() => {
     let disposed = false;
@@ -807,8 +568,12 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
         <div className="page-heading">
           <div className="page-title-block">
             <p className="eyebrow">PDF TRANSLATION</p>
-            <h1>PDF 全文翻译</h1>
-            <p className="page-description">导入单个 PDF 文件，准备开始全文翻译。</p>
+            <div className="page-title-line pdf-page-title-line">
+              <h1>PDF 全文翻译</h1>
+              <span className={`pdf-engine-status-bubble ${engineStatus?.status === "ready" ? "is-ready" : "is-unavailable"}`} role="status" aria-live="polite">
+                {engineStatus?.status === "ready" ? "PDF引擎可用" : "PDF引擎不可用"}
+              </span>
+            </div>
           </div>
         </div>
       )}
@@ -850,16 +615,6 @@ export default function PdfView({ onResourceDownloadPrompt }: { onResourceDownlo
             {error && <p className="error-message" role="alert">{error}</p>}
           </div>
 
-          <div className="simple-card pdf-stage-card">
-            <PdfEnginePanel
-              engineStatus={engineStatus}
-              engineStatusLoading={engineStatusLoading}
-              enginePreparing={enginePreparing}
-              engineProgress={engineProgress}
-              engineError={engineError ?? engineEventsError}
-              onPrepareEngine={() => void preparePdfEngine()}
-            />
-          </div>
         </>
       )}
     </section>

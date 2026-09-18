@@ -45,6 +45,7 @@ interface DictionaryViewProps {
   onOpenRequestHandled: () => void;
   onPersonalDictionaryChanged: () => Promise<void>;
   onOpenPersonalDictionary: () => void;
+  onOpenDictionaryAbout: () => void;
 }
 
 export interface WordExampleRequestInput {
@@ -97,6 +98,7 @@ export default function DictionaryView({
   onOpenRequestHandled,
   onPersonalDictionaryChanged,
   onOpenPersonalDictionary,
+  onOpenDictionaryAbout,
 }: DictionaryViewProps) {
   const [word, setWord] = useState("");
   const [result, setResult] = useState<DictionaryEntry | null>(null);
@@ -226,9 +228,9 @@ export default function DictionaryView({
           <p className="eyebrow">DICTIONARY</p>
           <div className="page-title-line">
             <h1>词典</h1>
-            <div className="page-title-meta" aria-label="词典版本">
+            <button className="page-title-meta page-title-meta-link" type="button" onClick={onOpenDictionaryAbout} aria-label="查看关于中的词典版本">
               <span>版本 {state.installedRelease ?? "未安装"}</span>
-            </div>
+            </button>
           </div>
         </div>
         <div className="dictionary-heading-actions">

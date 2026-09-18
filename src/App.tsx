@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, Check, ChevronDown, Copy, FileText, FileType2, History, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Copy, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
 import type { DictionaryOpenRequest } from "./DictionaryView";
 import PdfView from "./PdfView";
+import { PdfEnginePanel } from "./PdfEnginePanel";
 import PersonalDictionaryView from "./PersonalDictionaryView";
 import { AnimatedOverlay } from "./components/AnimatedOverlay";
 import { usePrefersReducedMotion } from "./components/usePrefersReducedMotion";
 import { DownloadActivityStack } from "./components/DownloadActivityStack";
 import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./components/ResourceDownloadDialog";
 import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
+import { usePdfEngineRuntime, type PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
 import {
   downloadActivityKey,
   downloadActivityReducer,
@@ -105,6 +108,10 @@ const LANGUAGE_OPTIONS = [
   ["韩语", "ko"],
 ] as const;
 
+const APP_VERSION = packageJson.version;
+const GITHUB_URL = "https://github.com/TTTTTony32/Lilt";
+const DEVELOPER_EMAIL = "imtony32@gmail.com";
+
 interface TranslationSummary {
   durationMs: number;
   cacheHit: boolean;
@@ -119,9 +126,14 @@ const SETTINGS_SECTIONS = [
   { id: "selection", label: "划词翻译", icon: Languages },
   { id: "local", label: "本地数据", icon: FileType2 },
   { id: "behavior", label: "关闭行为", icon: X },
+  { id: "about", label: "关于", icon: Info },
 ] as const;
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+type SettingsNavigationTarget = {
+  sectionId: SettingsSectionId;
+  anchor?: "dictionary-version" | "pdf-engine";
+};
 const SETTINGS_CHROME_HEIGHT = 76;
 
 interface SettingsDraft {
@@ -346,6 +358,8 @@ function App() {
   const [resourceDownloadDialogOpen, setResourceDownloadDialogOpen] = useState(false);
   const [resourceDownloadDialogMounted, setResourceDownloadDialogMounted] = useState(false);
   const [resourceDownloadTerminalState, setResourceDownloadTerminalState] = useState<Partial<Record<DownloadActivity["resource"], ResourceDownloadDialogStatus>>>({});
+  const [settingsNavigationTarget, setSettingsNavigationTarget] = useState<SettingsNavigationTarget | null>(null);
+  const pdfEngine = usePdfEngineRuntime();
   const activeRequestId = useRef<string | null>(null);
   const activeRequestModeRef = useRef<TranslationRequestMode | null>(null);
   const activeRequestSourceTextRef = useRef<string | null>(null);
@@ -445,12 +459,31 @@ function App() {
   const openSettings = useCallback(() => {
     if (settingsOpen) return;
     settingsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSettingsNavigationTarget(null);
     setSettingsOpen(true);
   }, [settingsOpen]);
 
   const requestSettingsClose = useCallback(() => {
+    setSettingsNavigationTarget(null);
     setSettingsOpen(false);
   }, []);
+
+  const openSettingsAt = useCallback((target: SettingsNavigationTarget) => {
+    if (!settingsOpen) {
+      settingsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setSettingsOpen(true);
+    }
+    setSettingsNavigationTarget(target);
+  }, [settingsOpen]);
+
+  const openPdfEngineSettings = useCallback(() => {
+    setResourceDownloadDialogOpen(false);
+    openSettingsAt({ sectionId: "about", anchor: "pdf-engine" });
+  }, [openSettingsAt]);
+
+  const openDictionaryAbout = useCallback(() => {
+    openSettingsAt({ sectionId: "about", anchor: "dictionary-version" });
+  }, [openSettingsAt]);
 
   const openHistory = useCallback(() => {
     historyReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1423,6 +1456,8 @@ function App() {
               snapshot={snapshot}
               dictionaryProgress={dictionaryProgress}
               dictionaryEventsError={dictionaryEventsError}
+              pdfEngine={pdfEngine}
+              navigationTarget={settingsNavigationTarget}
               onDictionaryUpdate={handleDictionaryUpdate}
               onSaved={handleSettingsSaved}
             />
@@ -1476,9 +1511,10 @@ function App() {
                   onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
                   onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
                   onOpenPersonalDictionary={openPersonalDictionary}
+                  onOpenDictionaryAbout={openDictionaryAbout}
                 />
               )}
-              {tab === "pdf" && <PdfView onResourceDownloadPrompt={openResourceDownloadPrompt} />}
+              {tab === "pdf" && <PdfView pdfEngine={pdfEngine} onResourceDownloadPrompt={openResourceDownloadPrompt} onOpenPdfEngineSettings={openPdfEngineSettings} />}
               {tab === "personal" && (
                 <PersonalDictionaryView
                   entries={snapshot.personalDictionary}
@@ -1547,6 +1583,7 @@ function App() {
           message={resourceDownloadActivity?.message ?? null}
           error={resourceDownloadError}
           startLabel={resourceDownloadPrompt.startLabel}
+          failedLabel={resourceDownloadPrompt.failedLabel}
           onStart={startResourceDownload}
           onRequestClose={requestResourceDownloadClose}
           onClosed={handleResourceDownloadClosed}
@@ -2572,18 +2609,24 @@ function SettingsView({
   snapshot,
   dictionaryProgress,
   dictionaryEventsError,
+  pdfEngine,
+  navigationTarget,
   onDictionaryUpdate,
   onSaved,
 }: {
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
   dictionaryEventsError: string | null;
+  pdfEngine: PdfEngineRuntime;
+  navigationTarget: SettingsNavigationTarget | null;
   onDictionaryUpdate: () => Promise<void>;
   onSaved: (snapshot: AppSnapshot) => void;
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
   const settingsScrollRef = useRef<HTMLDivElement | null>(null);
   const settingsSectionRefs = useRef<Partial<Record<SettingsSectionId, HTMLDivElement | null>>>({});
+  const aboutDictionaryRef = useRef<HTMLDivElement | null>(null);
+  const aboutPdfEngineRef = useRef<HTMLDivElement | null>(null);
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
@@ -2704,6 +2747,25 @@ function SettingsView({
     setActiveSection(sectionId);
     scrollElement.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   }, []);
+
+  useEffect(() => {
+    if (!navigationTarget) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const scrollElement = settingsScrollRef.current;
+      const targetElement = navigationTarget.anchor === "dictionary-version"
+        ? aboutDictionaryRef.current
+        : navigationTarget.anchor === "pdf-engine"
+          ? aboutPdfEngineRef.current
+          : settingsSectionRefs.current[navigationTarget.sectionId];
+      if (!scrollElement || !targetElement) return;
+      const scrollRect = scrollElement.getBoundingClientRect();
+      const targetRect = targetElement.getBoundingClientRect();
+      const top = scrollElement.scrollTop + targetRect.top - scrollRect.top - SETTINGS_CHROME_HEIGHT;
+      setActiveSection(navigationTarget.sectionId);
+      scrollElement.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [navigationTarget]);
 
   useEffect(() => {
     const scrollElement = settingsScrollRef.current;
@@ -2935,6 +2997,29 @@ function SettingsView({
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>
           <div className="card-heading"><div><strong>关闭行为</strong><span>点击主窗口关闭按钮时的处理方式。</span></div></div>
           <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong><small>{settings.closeBehavior === "ask" ? "关闭窗口时显示选择对话框。" : "已经记住选择，可在这里恢复询问。"}</small></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
+        </div>
+
+        <div className="settings-section settings-about-section" id="settings-section-about" data-settings-section="about" ref={(element) => { settingsSectionRefs.current.about = element; }}>
+          <div className="card-heading"><div><strong>关于</strong><span>Lilt 的版本与项目信息。</span></div></div>
+          <div className="about-info-list">
+            <div className="about-info-row"><span>程序版本</span><strong>v{APP_VERSION}</strong></div>
+            <div className="about-info-row" id="settings-about-dictionary-version" ref={aboutDictionaryRef}><span>本地词典版本</span><strong>{snapshot.dictionary.installedRelease ?? "未安装"}</strong></div>
+            <div className="about-info-row" id="settings-about-pdf-engine" ref={aboutPdfEngineRef}><span>PDF Engine 版本</span><strong>{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</strong></div>
+            <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer">TTTTTony32/Lilt</a></div>
+            <div className="about-info-row"><span>开发者</span><span>Tony32 · <a href={`mailto:${DEVELOPER_EMAIL}`}>{DEVELOPER_EMAIL}</a></span></div>
+          </div>
+          {pdfEngine.status?.status !== "ready" && (
+            <div className="about-pdf-engine-panel">
+              <PdfEnginePanel
+                engineStatus={pdfEngine.status}
+                engineStatusLoading={pdfEngine.statusLoading}
+                enginePreparing={pdfEngine.preparing}
+                engineProgress={pdfEngine.progress}
+                engineError={pdfEngine.error ?? pdfEngine.eventsError}
+                onPrepareEngine={() => void pdfEngine.prepare()}
+              />
+            </div>
+          )}
         </div>
         </div>
         {(saveError || message || error) && (

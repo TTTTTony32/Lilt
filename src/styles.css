@@ -85,6 +85,15 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-section > .card-heading span, .settings-section > .list-card-heading span { color: #969d94; }
 .settings-section .form-actions { border-top: 1px solid #e8e8e1; }
 .settings-section .setting-line:last-of-type { border-bottom: 0; }
+.about-info-list { border-top: 1px solid #e5e6de; }
+.about-info-row { min-height: 48px; padding: 0 7px; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #e5e6de; color: #7e897f; font-size: 12px; }
+.about-info-row > span:first-child { color: #69766b; font-weight: 600; }
+.about-info-row > span:last-child, .about-info-row > strong { color: #526456; font-weight: 600; text-align: right; }
+.about-info-row a { color: #66806a; text-decoration: none; }
+.about-info-row a:hover { color: #4f6c56; text-decoration: underline; }
+.about-info-row a:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; border-radius: 3px; }
+.about-pdf-engine-panel { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e5e6de; }
+.about-pdf-engine-panel .pdf-engine-panel { color: #687568; }
 .settings-feedback { max-width: 900px; margin: 0 auto; padding: 0 clamp(24px, 5vw, 72px) 24px; }
 .settings-feedback .settings-message { margin: 0 0 5px; }
 .main-content.translate-main-content { overflow-y: hidden; overscroll-behavior: none; }
@@ -118,6 +127,14 @@ h1 { margin: 0; color: #303a32; font-family: Georgia, "Songti SC", serif; font-s
 .page-title-block { min-width: 0; }
 .page-title-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
 .page-title-meta { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 9px; color: #9b9d94; font-size: 11px; line-height: 1.4; }
+.page-title-meta-link { min-height: 24px; padding: 4px 9px; border: 1px solid #d9e1d7; border-radius: 999px; color: #66806a; background: #f1f6ef; font-size: 10px; cursor: pointer; transition: color var(--motion-fast-duration) var(--motion-ease), border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
+.page-title-meta-link:hover { border-color: #b6cbb6; color: #4f6c56; background: #e8f1e6; box-shadow: 0 2px 7px rgba(72, 99, 76, .1); }
+.page-title-meta-link:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; }
+.pdf-page-title-line { align-items: center; gap: 10px; }
+.pdf-engine-status-bubble { min-height: 24px; padding: 4px 9px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #e2b8b0; border-radius: 999px; color: #a25e53; background: #fbefec; font-size: 10px; line-height: 1; white-space: nowrap; }
+.pdf-engine-status-bubble::before { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #b8665a; content: ""; }
+.pdf-engine-status-bubble.is-ready { border-color: #b9cbb8; color: #4f6c56; background: #eaf1e7; }
+.pdf-engine-status-bubble.is-ready::before { background: #6e9873; }
 .learning-mode-toggle { min-height: 28px; padding: 3px 8px 3px 5px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #deded5; border-radius: 999px; color: #899188; background: rgba(251, 250, 247, .72); font-size: 10px; line-height: 1; cursor: pointer; transition: color var(--motion-fast-duration) var(--motion-ease), border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
 .learning-mode-toggle:hover { border-color: #b9cbb8; color: #5d7462; background: #f4f7f1; }
 .learning-mode-toggle.is-enabled { border-color: #b9cbb8; color: #4f6c56; background: #eaf1e7; }
@@ -291,7 +308,6 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-file-summary span { margin-top: 4px; color: #a0a39a; font-size: 10px; }
 .pdf-message-area { min-height: 34px; padding: 11px 2px 0; font-size: 12px; }
 .pdf-message-area p { margin: 0; line-height: 1.6; }
-.pdf-stage-card { margin-bottom: 0; }
 .pdf-reader-page { max-width: 1180px; height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .pdf-reader-page .pdf-reader-shell { flex: 1 1 auto; min-height: 0; }
 .pdf-reader-drop-notice { min-height: 30px; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9db49e; border-radius: 7px; color: #5e7863; background: #edf4eb; font-size: 11px; }
