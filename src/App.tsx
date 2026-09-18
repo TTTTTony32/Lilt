@@ -122,7 +122,6 @@ type TranslationRequestMode = "plain" | "learning";
 const SETTINGS_SECTIONS = [
   { id: "provider", label: "Provider", icon: Settings },
   { id: "prompt", label: "Prompt", icon: FileText },
-  { id: "dictionary", label: "本地词典", icon: BookOpen },
   { id: "selection", label: "划词翻译", icon: Languages },
   { id: "local", label: "本地数据", icon: FileType2 },
   { id: "behavior", label: "关闭行为", icon: X },
@@ -130,9 +129,11 @@ const SETTINGS_SECTIONS = [
 ] as const;
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+type SettingsResourceModal = "dictionary" | "pdf-engine";
 type SettingsNavigationTarget = {
   sectionId: SettingsSectionId;
   anchor?: "dictionary-version" | "pdf-engine";
+  modal?: SettingsResourceModal;
 };
 const SETTINGS_CHROME_HEIGHT = 76;
 
@@ -478,11 +479,11 @@ function App() {
 
   const openPdfEngineSettings = useCallback(() => {
     setResourceDownloadDialogOpen(false);
-    openSettingsAt({ sectionId: "about", anchor: "pdf-engine" });
+    openSettingsAt({ sectionId: "about", anchor: "pdf-engine", modal: "pdf-engine" });
   }, [openSettingsAt]);
 
   const openDictionaryAbout = useCallback(() => {
-    openSettingsAt({ sectionId: "about", anchor: "dictionary-version" });
+    openSettingsAt({ sectionId: "about", anchor: "dictionary-version", modal: "dictionary" });
   }, [openSettingsAt]);
 
   const openHistory = useCallback(() => {
@@ -524,7 +525,8 @@ function App() {
     if (settingsOpen) {
       const frame = window.requestAnimationFrame(() => settingsWorkspaceRef.current?.focus());
       const handleKeyDown = (event: KeyboardEvent) => {
-        if (event.key !== "Escape") return;
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        if (event.target instanceof Element && event.target.closest('[role="dialog"]')) return;
         event.preventDefault();
         requestSettingsClose();
       };
@@ -2291,7 +2293,6 @@ function PromptManager({
           setSelectedId(next.id);
           setName(next.name);
           setContent(next.content);
-          setMessage("Prompt 已自动保存");
           setError(null);
         }
       }
@@ -2417,7 +2418,7 @@ function PromptManager({
 
   return (
     <div className="prompt-manager-card">
-      <div className="card-heading"><div><strong>Prompt</strong><span>内置 Prompt 只读；复制后可以编辑并设为默认。</span></div><button className="secondary-button small-button" type="button" onClick={startNew}>新建</button></div>
+      <div className="card-heading"><div><strong>Prompt</strong></div><button className="secondary-button small-button" type="button" onClick={startNew}>新建</button></div>
       <div className="prompt-manager-grid">
         <div className="prompt-list">
           {prompts.map((prompt) => (
@@ -2432,7 +2433,7 @@ function PromptManager({
           <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => updatePromptDraft({ content: event.target.value })} readOnly={selectedPrompt?.isBuiltin ?? false} /></label>
           <div className="form-actions prompt-actions">
             <div className="button-group">
-              {selectedPrompt?.isBuiltin ? <button className="secondary-button" type="button" onClick={() => void duplicate(selectedPrompt)}>复制并编辑</button> : <span className="muted-text">修改后自动保存</span>}
+              {selectedPrompt?.isBuiltin && <button className="secondary-button" type="button" onClick={() => void duplicate(selectedPrompt)}>复制并编辑</button>}
               {selectedPrompt && selectedPrompt.id !== currentPromptId && <button className="secondary-button" type="button" onClick={() => void setDefault(selectedPrompt)}>设为默认</button>}
               {selectedPrompt && !selectedPrompt.isBuiltin && selectedPrompt.id !== currentPromptId && <button className="text-button danger-text" type="button" onClick={() => void remove(selectedPrompt)}>删除</button>}
             </div>
@@ -2605,6 +2606,104 @@ function SettingsSelectField({ label, ...props }: SettingsSelectProps & { label:
   );
 }
 
+function DictionarySettingsPanel({
+  snapshot,
+  dictionaryProgress,
+  dictionaryEventsError,
+  onDictionaryUpdate,
+}: {
+  snapshot: AppSnapshot;
+  dictionaryProgress: DictionaryProgress | null;
+  dictionaryEventsError: string | null;
+  onDictionaryUpdate: () => Promise<void>;
+}) {
+  const dictionaryUpdating = snapshot.dictionary.status === "updating" || dictionaryProgress !== null;
+  const dictionaryStatusLabel = snapshot.dictionary.status === "ready"
+    ? "已安装"
+    : snapshot.dictionary.status === "updating"
+      ? "更新中"
+      : snapshot.dictionary.status === "failed"
+        ? "需要处理"
+        : "未安装";
+  const dictionaryProgressPercent = dictionaryProgress && dictionaryProgress.total > 0
+    ? Math.min(100, Math.round((dictionaryProgress.current / dictionaryProgress.total) * 100))
+    : 0;
+
+  return (
+    <div className="dictionary-settings-panel">
+      <div className="settings-resource-status-row">
+        <span className={`connection-status ${snapshot.dictionary.status === "ready" ? "connected" : ""}`}>{dictionaryStatusLabel}</span>
+      </div>
+      <div className="dictionary-settings-grid">
+        <div><span className="fact-label">Release</span><strong>{snapshot.dictionary.installedRelease ?? "尚未安装"}</strong></div>
+        <div><span className="fact-label">词条数量</span><strong>{snapshot.dictionary.entryCount?.toLocaleString("zh-CN") ?? "—"}</strong></div>
+        <div><span className="fact-label">占用空间</span><strong>{formatBytes(snapshot.dictionary.cacheSizeBytes)}</strong></div>
+      </div>
+      {dictionaryUpdating && (
+        <div className="dictionary-progress settings-progress" aria-live="polite">
+          <div className="dictionary-progress-label"><span>{dictionaryProgress?.phase === "verify" ? "正在校验" : dictionaryProgress?.phase === "extract" ? "正在解压" : "正在下载"}</span><span>{dictionaryProgress ? `${dictionaryProgressPercent}%` : ""}</span></div>
+          <div className="dictionary-progress-track"><span style={{ width: `${dictionaryProgressPercent}%` }} /></div>
+        </div>
+      )}
+      {dictionaryEventsError && <p className="error-message settings-message">{dictionaryEventsError}</p>}
+      {snapshot.dictionary.error && !dictionaryUpdating && <p className="error-message settings-message">{snapshot.dictionary.error}</p>}
+      <div className="form-actions settings-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
+    </div>
+  );
+}
+
+function SettingsResourceModal({
+  kind,
+  open,
+  onRequestClose,
+  onClosed,
+  children,
+}: {
+  kind: SettingsResourceModal;
+  open: boolean;
+  onRequestClose: () => void;
+  onClosed: () => void;
+  children: ReactNode;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const title = kind === "dictionary" ? "本地词典" : "PDF Engine";
+  const titleId = `settings-${kind}-dialog-title`;
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onRequestClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onRequestClose, open]);
+
+  return (
+    <AnimatedOverlay
+      className="modal-backdrop settings-resource-backdrop"
+      open={open}
+      onClosed={onClosed}
+      onBackdropClick={(event) => {
+        if (event.target === event.currentTarget) onRequestClose();
+      }}
+    >
+      <div className="modal-card settings-resource-card" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+        <div className="modal-heading settings-resource-heading">
+          <strong id={titleId}>{title}</strong>
+          <button className="icon-button" type="button" onClick={onRequestClose} aria-label={`关闭${title}`} title={`关闭${title}`}><X size={17} /></button>
+        </div>
+        <div className="settings-resource-modal-body">{children}</div>
+      </div>
+    </AnimatedOverlay>
+  );
+}
+
 function SettingsView({
   snapshot,
   dictionaryProgress,
@@ -2625,8 +2724,12 @@ function SettingsView({
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
   const settingsScrollRef = useRef<HTMLDivElement | null>(null);
   const settingsSectionRefs = useRef<Partial<Record<SettingsSectionId, HTMLDivElement | null>>>({});
-  const aboutDictionaryRef = useRef<HTMLDivElement | null>(null);
-  const aboutPdfEngineRef = useRef<HTMLDivElement | null>(null);
+  const aboutDictionaryRef = useRef<HTMLButtonElement | null>(null);
+  const aboutPdfEngineRef = useRef<HTMLButtonElement | null>(null);
+  const [resourceModal, setResourceModal] = useState<SettingsResourceModal | null>(null);
+  const [resourceModalOpen, setResourceModalOpen] = useState(false);
+  const [resourceModalMounted, setResourceModalMounted] = useState(false);
+  const resourceModalReturnFocusRef = useRef<HTMLElement | null>(null);
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
@@ -2737,6 +2840,26 @@ function SettingsView({
     updateDraft((current) => ({ ...current, ...patch }));
   }, [updateDraft]);
 
+  const openResourceModal = useCallback((kind: SettingsResourceModal, returnFocusElement?: HTMLElement | null) => {
+    resourceModalReturnFocusRef.current = returnFocusElement
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setResourceModal(kind);
+    setResourceModalMounted(true);
+    setResourceModalOpen(true);
+  }, []);
+
+  const requestResourceModalClose = useCallback(() => {
+    setResourceModalOpen(false);
+  }, []);
+
+  const handleResourceModalClosed = useCallback(() => {
+    setResourceModalMounted(false);
+    setResourceModal(null);
+    const previouslyFocused = resourceModalReturnFocusRef.current;
+    resourceModalReturnFocusRef.current = null;
+    previouslyFocused?.focus();
+  }, []);
+
   const scrollToSection = useCallback((sectionId: SettingsSectionId) => {
     const scrollElement = settingsScrollRef.current;
     const sectionElement = settingsSectionRefs.current[sectionId];
@@ -2763,9 +2886,10 @@ function SettingsView({
       const top = scrollElement.scrollTop + targetRect.top - scrollRect.top - SETTINGS_CHROME_HEIGHT;
       setActiveSection(navigationTarget.sectionId);
       scrollElement.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+      if (navigationTarget.modal) openResourceModal(navigationTarget.modal, targetElement);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [navigationTarget]);
+  }, [navigationTarget, openResourceModal]);
 
   useEffect(() => {
     const scrollElement = settingsScrollRef.current;
@@ -2891,17 +3015,6 @@ function SettingsView({
     }
   };
 
-  const dictionaryUpdating = snapshot.dictionary.status === "updating" || dictionaryProgress !== null;
-  const dictionaryStatusLabel = snapshot.dictionary.status === "ready"
-    ? "已安装"
-    : snapshot.dictionary.status === "updating"
-      ? "更新中"
-      : snapshot.dictionary.status === "failed"
-        ? "需要处理"
-        : "未安装";
-  const dictionaryProgressPercent = dictionaryProgress && dictionaryProgress.total > 0
-    ? Math.min(100, Math.round((dictionaryProgress.current / dictionaryProgress.total) * 100))
-    : 0;
   const activeSelectionMode = selectionStatus?.mode ?? selectionMode;
   const modelOptions = availableModels
     ? [
@@ -2913,7 +3026,6 @@ function SettingsView({
     <section className="settings-view" aria-labelledby="settings-workspace-title">
       <aside className="settings-sidebar">
         <div className="settings-sidebar-heading">
-          <span className="settings-eyebrow">SETTINGS</span>
           <h1 id="settings-workspace-title">设置</h1>
         </div>
         <nav className="settings-navigation" aria-label="设置分类">
@@ -2939,7 +3051,7 @@ function SettingsView({
       <div className="settings-content">
         <div className="settings-content-scroll" ref={settingsScrollRef}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
-          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>即将支持其他协议。</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
+          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" /></label>
             {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" /></label>}
@@ -2948,78 +3060,46 @@ function SettingsView({
           </div>
           {providerMessage && <p className="notice-message settings-message">{providerMessage}</p>}
           {providerError && <p className="error-message settings-message">{providerError}</p>}
-          <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。修改后自动保存。</span><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button></div>
+          <div className="form-actions settings-actions"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button></div>
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>
             <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} />
           </div>
 
-        <div className="settings-section" id="settings-section-dictionary" data-settings-section="dictionary" ref={(element) => { settingsSectionRefs.current.dictionary = element; }}>
-          <div className="card-heading"><div><strong>本地词典</strong><span>open-dictionary，离线查询，不依赖 Provider</span></div><span className={`connection-status ${snapshot.dictionary.status === "ready" ? "connected" : ""}`}>{dictionaryStatusLabel}</span></div>
-          <div className="dictionary-settings-grid">
-            <div><span className="fact-label">Release</span><strong>{snapshot.dictionary.installedRelease ?? "尚未安装"}</strong></div>
-            <div><span className="fact-label">词条数量</span><strong>{snapshot.dictionary.entryCount?.toLocaleString("zh-CN") ?? "—"}</strong></div>
-            <div><span className="fact-label">占用空间</span><strong>{formatBytes(snapshot.dictionary.cacheSizeBytes)}</strong></div>
-          </div>
-          {dictionaryUpdating && (
-            <div className="dictionary-progress settings-progress" aria-live="polite">
-              <div className="dictionary-progress-label"><span>{dictionaryProgress?.phase === "verify" ? "正在校验" : dictionaryProgress?.phase === "extract" ? "正在解压" : "正在下载"}</span><span>{dictionaryProgress ? `${dictionaryProgressPercent}%` : ""}</span></div>
-              <div className="dictionary-progress-track"><span style={{ width: `${dictionaryProgressPercent}%` }} /></div>
-            </div>
-          )}
-          {dictionaryEventsError && <p className="error-message settings-message">{dictionaryEventsError}</p>}
-          {snapshot.dictionary.error && !dictionaryUpdating && <p className="error-message settings-message">{snapshot.dictionary.error}</p>}
-          <div className="form-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
-        </div>
-
         <div className="settings-section" id="settings-section-selection" data-settings-section="selection" ref={(element) => { settingsSectionRefs.current.selection = element; }}>
-          <div className="card-heading"><div><strong>划词翻译</strong><span>从其他 Windows 应用读取选中文本，浮窗复用当前翻译方向。</span></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
+          <div className="card-heading"><div><strong>划词翻译</strong></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
           <div className="form-grid selection-settings-grid">
             <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => updateSelectionDraft({ selectionMode: value as AppSettings["selectionMode"] })} />
             <label>快捷键<input value={selectionShortcut} onChange={(event) => updateSelectionDraft({ selectionShortcut: event.target.value })} placeholder="Ctrl+Shift+L" /></label>
           </div>
-          <p className="settings-hint">快捷键格式使用 Ctrl+Shift+L 这样的组合。按快捷键模式读取当前选区；自动监听模式在选区稳定 500 毫秒后显示结果。自动模式仍保留快捷键设置，切换回来即可使用。</p>
           {selectionStatus?.message && <p className="error-message settings-message">{selectionStatus.message}</p>}
-          <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}。修改后自动保存。</span></div>
+          <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}</span></div>
         </div>
 
         <div className="settings-section" id="settings-section-local" data-settings-section="local" ref={(element) => { settingsSectionRefs.current.local = element; }}>
-          <div className="card-heading"><div><strong>本地数据</strong><span>数据只保存在当前设备</span></div></div>
-          <label className="setting-line"><span><strong>翻译历史保留条数</strong><small>历史功能不可关闭，只控制保留数量。</small></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => updateAppSettingsDraft({ historyRetention: Number(event.target.value) })} /></label>
-          <label className="setting-line"><span><strong>启用段落翻译缓存</strong><small>缓存命中后仍会写入一条历史记录。</small></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => updateAppSettingsDraft({ cacheEnabled: event.target.checked })} /></label>
-          <label className="setting-line"><span><strong>缓存单词 AI 见解</strong><small>关闭后，每次查询都会重新生成例句译文和词性。</small></span><input type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => updateAppSettingsDraft({ wordAiCacheEnabled: event.target.checked })} /></label>
-          <label className="setting-line"><span><strong>从段落缓存查找例句</strong><small>关闭后，词典查询不再读取段落翻译缓存中的例句。</small></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => updateAppSettingsDraft({ paragraphExampleLookupEnabled: event.target.checked })} /></label>
-          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong><small>已使用 {formatBytes(snapshot.cacheStats.usageBytes)}，上限 {formatBytes(settings.cacheMaxBytes)}。</small></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
-          <div className="form-actions"><span className="muted-text">缓存不包含 API Key。修改后自动保存。</span></div>
+          <div className="card-heading"><div><strong>本地数据</strong></div></div>
+          <label className="setting-line"><span><strong>翻译历史保留条数</strong></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => updateAppSettingsDraft({ historyRetention: Number(event.target.value) })} /></label>
+          <label className="setting-line"><span><strong>启用段落翻译缓存</strong></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => updateAppSettingsDraft({ cacheEnabled: event.target.checked })} /></label>
+          <label className="setting-line"><span><strong>缓存单词 AI 见解</strong></span><input type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => updateAppSettingsDraft({ wordAiCacheEnabled: event.target.checked })} /></label>
+          <label className="setting-line"><span><strong>从段落缓存查找例句</strong></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => updateAppSettingsDraft({ paragraphExampleLookupEnabled: event.target.checked })} /></label>
+          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
         </div>
 
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>
-          <div className="card-heading"><div><strong>关闭行为</strong><span>点击主窗口关闭按钮时的处理方式。</span></div></div>
-          <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong><small>{settings.closeBehavior === "ask" ? "关闭窗口时显示选择对话框。" : "已经记住选择，可在这里恢复询问。"}</small></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
+          <div className="card-heading"><div><strong>关闭行为</strong></div></div>
+          <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
         </div>
 
         <div className="settings-section settings-about-section" id="settings-section-about" data-settings-section="about" ref={(element) => { settingsSectionRefs.current.about = element; }}>
-          <div className="card-heading"><div><strong>关于</strong><span>Lilt 的版本与项目信息。</span></div></div>
+          <div className="card-heading"><div><strong>关于</strong></div></div>
           <div className="about-info-list">
             <div className="about-info-row"><span>程序版本</span><strong>v{APP_VERSION}</strong></div>
-            <div className="about-info-row" id="settings-about-dictionary-version" ref={aboutDictionaryRef}><span>本地词典版本</span><strong>{snapshot.dictionary.installedRelease ?? "未安装"}</strong></div>
-            <div className="about-info-row" id="settings-about-pdf-engine" ref={aboutPdfEngineRef}><span>PDF Engine 版本</span><strong>{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</strong></div>
+            <div className="about-info-row"><span>本地词典版本</span><button className="about-version-button" id="settings-about-dictionary-version" ref={aboutDictionaryRef} type="button" onClick={() => openResourceModal("dictionary")} aria-haspopup="dialog" aria-label="打开本地词典准备弹窗">{snapshot.dictionary.installedRelease ?? "未安装"}</button></div>
+            <div className="about-info-row"><span>PDF Engine 版本</span><button className="about-version-button" id="settings-about-pdf-engine" ref={aboutPdfEngineRef} type="button" onClick={() => openResourceModal("pdf-engine")} aria-haspopup="dialog" aria-label="打开 PDF Engine 准备弹窗">{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</button></div>
             <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer">TTTTTony32/Lilt</a></div>
             <div className="about-info-row"><span>开发者</span><span>Tony32 · <a href={`mailto:${DEVELOPER_EMAIL}`}>{DEVELOPER_EMAIL}</a></span></div>
           </div>
-          {pdfEngine.status?.status !== "ready" && (
-            <div className="about-pdf-engine-panel">
-              <PdfEnginePanel
-                engineStatus={pdfEngine.status}
-                engineStatusLoading={pdfEngine.statusLoading}
-                enginePreparing={pdfEngine.preparing}
-                engineProgress={pdfEngine.progress}
-                engineError={pdfEngine.error ?? pdfEngine.eventsError}
-                onPrepareEngine={() => void pdfEngine.prepare()}
-              />
-            </div>
-          )}
         </div>
         </div>
         {(saveError || message || error) && (
@@ -3030,6 +3110,32 @@ function SettingsView({
           </div>
         )}
       </div>
+      {resourceModalMounted && resourceModal && (
+        <SettingsResourceModal
+          kind={resourceModal}
+          open={resourceModalOpen}
+          onRequestClose={requestResourceModalClose}
+          onClosed={handleResourceModalClosed}
+        >
+          {resourceModal === "dictionary" ? (
+            <DictionarySettingsPanel
+              snapshot={snapshot}
+              dictionaryProgress={dictionaryProgress}
+              dictionaryEventsError={dictionaryEventsError}
+              onDictionaryUpdate={onDictionaryUpdate}
+            />
+          ) : (
+            <PdfEnginePanel
+              engineStatus={pdfEngine.status}
+              engineStatusLoading={pdfEngine.statusLoading}
+              enginePreparing={pdfEngine.preparing}
+              engineProgress={pdfEngine.progress}
+              engineError={pdfEngine.error ?? pdfEngine.eventsError}
+              onPrepareEngine={() => void pdfEngine.prepare()}
+            />
+          )}
+        </SettingsResourceModal>
+      )}
     </section>
   );
 }
