@@ -122,6 +122,7 @@ const SETTINGS_SECTIONS = [
 ] as const;
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+const SETTINGS_CHROME_HEIGHT = 76;
 
 interface SettingsDraft {
   baseUrl: string;
@@ -1400,10 +1401,10 @@ function App() {
     <div className="app-shell">
       <div className="main-surface">
       <header className={`app-chrome ${settingsOpen ? "is-settings-open" : ""}`} onMouseDown={handleTitlebarMouseDown}>
-        {!settingsOpen && <div className="brand-lockup">
+        <div className="brand-lockup">
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
-        </div>}
+        </div>
         {!settingsOpen && <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />}
         <div className="chrome-actions" data-no-drag>
           <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={settingsOpen ? requestSettingsClose : openSettings} aria-label={settingsOpen ? "返回 Lilt" : "打开设置"} aria-expanded={settingsOpen} title={settingsOpen ? "返回 Lilt" : "设置"}>{settingsOpen ? <ArrowLeft size={16} /> : <Settings size={16} />}</button>
@@ -2596,7 +2597,6 @@ function SettingsView({
   const [error, setError] = useState<string | null>(null);
   const [providerMessage, setProviderMessage] = useState<string | null>(null);
   const [providerError, setProviderError] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const settingsDraftRef = useRef<SettingsDraft>(createSettingsDraft(snapshot));
   const saveTimerRef = useRef<number | null>(null);
@@ -2608,7 +2608,6 @@ function SettingsView({
     if (savingRef.current) return;
     savingRef.current = true;
     if (!disposedRef.current) {
-      setSaveStatus("saving");
       setSaveError(null);
     }
     try {
@@ -2641,13 +2640,11 @@ function SettingsView({
         settingsDraftRef.current = nextDraft;
         if (!disposedRef.current) {
           setApiKey("");
-          setSaveStatus("saved");
         }
         onSaved(next);
       }
     } catch (reason) {
       if (version === saveVersionRef.current && !disposedRef.current) {
-        setSaveStatus("error");
         setSaveError(describeError(reason, "设置自动保存失败"));
       }
     } finally {
@@ -2663,7 +2660,6 @@ function SettingsView({
     saveVersionRef.current += 1;
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
     if (!disposedRef.current) {
-      setSaveStatus("saving");
       setSaveError(null);
     }
     const version = saveVersionRef.current;
@@ -2704,7 +2700,7 @@ function SettingsView({
     if (!scrollElement || !sectionElement) return;
     const scrollRect = scrollElement.getBoundingClientRect();
     const sectionRect = sectionElement.getBoundingClientRect();
-    const top = scrollElement.scrollTop + sectionRect.top - scrollRect.top - 12;
+    const top = scrollElement.scrollTop + sectionRect.top - scrollRect.top - SETTINGS_CHROME_HEIGHT;
     setActiveSection(sectionId);
     scrollElement.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   }, []);
@@ -2717,7 +2713,7 @@ function SettingsView({
     const syncActiveSection = () => {
       frame = null;
       const scrollRect = scrollElement.getBoundingClientRect();
-      const anchorTop = scrollRect.top + 80;
+      const anchorTop = scrollRect.top + SETTINGS_CHROME_HEIGHT + 4;
       let nextSection: SettingsSectionId = "provider";
       let hasPassedSection = false;
 
@@ -2851,24 +2847,12 @@ function SettingsView({
       ...availableModels.map((model) => ({ value: model.id, label: model.label })),
     ]
     : [];
-  const saveStatusLabel = saveStatus === "saving"
-    ? "正在保存"
-    : saveStatus === "saved"
-      ? "已保存"
-      : saveStatus === "error"
-        ? "保存失败"
-        : "自动保存";
-
   return (
     <section className="settings-view" aria-labelledby="settings-workspace-title">
       <aside className="settings-sidebar">
         <div className="settings-sidebar-heading">
           <span className="settings-eyebrow">SETTINGS</span>
           <h1 id="settings-workspace-title">设置</h1>
-          <span className={`settings-save-status settings-sidebar-save-status is-${saveStatus}`} role="status" aria-live="polite">
-            <span className="settings-save-status-dot" aria-hidden="true" />
-            {saveStatusLabel}
-          </span>
         </div>
         <nav className="settings-navigation" aria-label="设置分类">
           {SETTINGS_SECTIONS.map((section) => {
