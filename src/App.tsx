@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, Check, ChevronDown, Copy, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ArrowLeft, Check, ChevronDown, Copy, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
@@ -17,6 +18,7 @@ import { DownloadActivityStack } from "./components/DownloadActivityStack";
 import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./components/ResourceDownloadDialog";
 import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
 import { usePdfEngineRuntime, type PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
+import { isReleaseNewerThan, selectLatestStableRelease, type GitHubReleaseSummary } from "./lib/release-version";
 import {
   downloadActivityKey,
   downloadActivityReducer,
@@ -110,7 +112,14 @@ const LANGUAGE_OPTIONS = [
 
 const APP_VERSION = packageJson.version;
 const GITHUB_URL = "https://github.com/TTTTTony32/Lilt";
+const GITHUB_RELEASES_API_URL = "https://api.github.com/repos/TTTTTony32/Lilt/releases?per_page=100";
 const DEVELOPER_EMAIL = "imtony32@gmail.com";
+
+function openExternalUrl(url: string) {
+  void openUrl(url).catch(() => {
+    window.open(url, "_blank", "noopener,noreferrer");
+  });
+}
 
 interface TranslationSummary {
   durationMs: number;
@@ -315,8 +324,8 @@ function FeedbackMessage({
     <Element
       key={`${visible.kind}-${visible.message}`}
       className={`feedback-message ${visible.kind}-message feedback-${phase} ${className}`.trim()}
-      role={kind === "error" ? "alert" : undefined}
-      aria-live={kind === "error" ? "assertive" : undefined}
+      role={kind === "error" ? "alert" : "status"}
+      aria-live={kind === "error" ? "assertive" : "polite"}
       onAnimationEnd={handleAnimationEnd}
     >
       {visible.message}
@@ -355,6 +364,11 @@ function App() {
   const [dataTransferOpen, setDataTransferOpen] = useState(false);
   const [dataTransferOverlayMounted, setDataTransferOverlayMounted] = useState(false);
   const [dataTransferMode, setDataTransferMode] = useState<DataTransferMode>("personalExport");
+  const [releaseNotice, setReleaseNotice] = useState<GitHubReleaseSummary | null>(null);
+  const [releaseNoticeOpen, setReleaseNoticeOpen] = useState(false);
+  const [releaseNoticeMounted, setReleaseNoticeMounted] = useState(false);
+  const [releaseCheckMessage, setReleaseCheckMessage] = useState<string | null>(null);
+  const [releaseCheckPending, setReleaseCheckPending] = useState(false);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const [downloadActivityState, dispatchDownloadActivity] = useReducer(
     downloadActivityReducer,
@@ -385,10 +399,74 @@ function App() {
   const dataTransferReturnFocusRef = useRef<HTMLElement | null>(null);
   const closeDialogReturnFocusRef = useRef<HTMLElement | null>(null);
   const downloadActivityTimersRef = useRef(new Map<string, number>());
+  const releaseCheckControllerRef = useRef<AbortController | null>(null);
+  const releaseCheckToastTimerRef = useRef<number | null>(null);
+
+  const showReleaseCheckMessage = useCallback((message: string) => {
+    if (releaseCheckToastTimerRef.current !== null) {
+      window.clearTimeout(releaseCheckToastTimerRef.current);
+    }
+    setReleaseCheckMessage(message);
+    releaseCheckToastTimerRef.current = window.setTimeout(() => {
+      releaseCheckToastTimerRef.current = null;
+      setReleaseCheckMessage(null);
+    }, 2800);
+  }, []);
+
+  const showReleaseNotice = useCallback((latest: GitHubReleaseSummary) => {
+    setReleaseNotice(latest);
+    setReleaseNoticeMounted(true);
+    setReleaseNoticeOpen(true);
+  }, []);
+
+  const checkForUpdates = useCallback(async (source: "startup" | "manual") => {
+    releaseCheckControllerRef.current?.abort();
+    const controller = new AbortController();
+    releaseCheckControllerRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
+
+    if (source === "manual") setReleaseCheckPending(true);
+
+    try {
+      const response = await fetch(GITHUB_RELEASES_API_URL, {
+        headers: { Accept: "application/vnd.github+json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (source === "manual") showReleaseCheckMessage("检查更新失败，请稍后重试");
+        return;
+      }
+
+      const latest = selectLatestStableRelease(await response.json());
+      if (!latest) {
+        if (source === "manual") showReleaseCheckMessage("暂未找到可用的稳定版本");
+        return;
+      }
+      if (!isReleaseNewerThan(latest, APP_VERSION)) {
+        if (source === "manual") showReleaseCheckMessage("当前已是最新版本");
+        return;
+      }
+      showReleaseNotice(latest);
+    } catch {
+      if (source === "manual") showReleaseCheckMessage("检查更新失败，请稍后重试");
+    } finally {
+      window.clearTimeout(timeout);
+      const isCurrentCheck = releaseCheckControllerRef.current === controller;
+      if (isCurrentCheck) releaseCheckControllerRef.current = null;
+      if (source === "manual" && isCurrentCheck) setReleaseCheckPending(false);
+    }
+  }, [showReleaseCheckMessage, showReleaseNotice]);
 
   useEffect(() => {
     sourceTextRef.current = sourceText;
   }, [sourceText]);
+
+  useEffect(() => {
+    void checkForUpdates("startup");
+    return () => {
+      releaseCheckControllerRef.current?.abort();
+    };
+  }, [checkForUpdates]);
 
   const scheduleDownloadActivityRemoval = useCallback((resource: DownloadActivity["resource"], operationId: string, delayMs: number) => {
     const key = downloadActivityKey(resource, operationId);
@@ -435,9 +513,25 @@ function App() {
     resourceDownloadPrompt.onStart();
   }, [clearResourceDownloadTerminal, resourceDownloadPrompt]);
 
+  const requestReleaseNoticeClose = useCallback(() => {
+    setReleaseNoticeOpen(false);
+  }, []);
+
+  const handleReleaseNoticeClosed = useCallback(() => {
+    setReleaseNoticeMounted(false);
+    setReleaseNotice(null);
+  }, []);
+
   useEffect(() => () => {
     downloadActivityTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     downloadActivityTimersRef.current.clear();
+  }, []);
+
+  useEffect(() => () => {
+    if (releaseCheckToastTimerRef.current !== null) {
+      window.clearTimeout(releaseCheckToastTimerRef.current);
+      releaseCheckToastTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -1521,6 +1615,8 @@ function App() {
               navigationTarget={settingsNavigationTarget}
               onDictionaryUpdate={handleDictionaryUpdate}
               onSaved={handleSettingsSaved}
+              onCheckForUpdates={() => void checkForUpdates("manual")}
+              releaseCheckPending={releaseCheckPending}
             />
           </div>
         )}
@@ -1665,8 +1761,18 @@ function App() {
           onClosed={handleCloseDialogClosed}
         />
       )}
+      {releaseNoticeMounted && releaseNotice && (
+        <ReleaseNoticeDialog
+          open={releaseNoticeOpen}
+          release={releaseNotice}
+          currentVersion={APP_VERSION}
+          onRequestClose={requestReleaseNoticeClose}
+          onClosed={handleReleaseNoticeClosed}
+        />
+      )}
       <div className="error-toast-anchor">
-        <FeedbackMessage message={error ?? translationEventsError} kind="error" as="div" className="error-toast" />
+        <FeedbackMessage message={error ?? translationEventsError} kind="error" as="div" className="error-toast toast-message" />
+        <FeedbackMessage message={releaseCheckMessage} kind="notice" as="div" className="notice-toast toast-message" />
       </div>
       <DownloadActivityStack activities={downloadActivities} />
     </div>
@@ -1904,6 +2010,66 @@ function CloseBehaviorDialog({
         <label className="modal-check"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住我的选择</label>
         {error && <p className="error-message settings-message">{error}</p>}
         <div className="form-actions modal-actions"><button className="secondary-button" type="button" onClick={() => void resolve("tray")}>缩小到托盘</button><button className="primary-button" type="button" onClick={() => void resolve("exit")}>退出程序</button></div>
+      </div>
+    </AnimatedOverlay>
+  );
+}
+
+function ReleaseNoticeDialog({
+  open,
+  release,
+  currentVersion,
+  onRequestClose,
+  onClosed,
+}: {
+  open: boolean;
+  release: GitHubReleaseSummary;
+  currentVersion: string;
+  onRequestClose: () => void;
+  onClosed: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onRequestClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onRequestClose, open]);
+
+  return (
+    <AnimatedOverlay
+      className="modal-backdrop release-notice-backdrop"
+      open={open}
+      onClosed={onClosed}
+      onBackdropClick={(event) => {
+        if (event.target === event.currentTarget) onRequestClose();
+      }}
+    >
+      <div className="modal-card release-notice-card" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="release-notice-title" tabIndex={-1}>
+        <div className="modal-heading">
+          <div>
+            <strong id="release-notice-title">发现新版本</strong>
+            <span>GitHub Release 已发布新的稳定版本。</span>
+          </div>
+          <button className="icon-button" type="button" onClick={onRequestClose} aria-label="关闭" title="关闭"><X size={17} /></button>
+        </div>
+        <div className="release-notice-body">
+          <p>当前版本 v{currentVersion}，最新版本 {release.tagName}。</p>
+          <span>前往 Release 页面查看更新内容和下载资源。</span>
+        </div>
+        <div className="form-actions modal-actions">
+          <button className="secondary-button" type="button" onClick={onRequestClose}>稍后</button>
+          <a className="primary-button release-notice-link" href={release.htmlUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); openExternalUrl(release.htmlUrl); }}><ExternalLink size={15} />查看 Release</a>
+        </div>
       </div>
     </AnimatedOverlay>
   );
@@ -2774,6 +2940,8 @@ function SettingsView({
   navigationTarget,
   onDictionaryUpdate,
   onSaved,
+  onCheckForUpdates,
+  releaseCheckPending,
 }: {
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
@@ -2782,6 +2950,8 @@ function SettingsView({
   navigationTarget: SettingsNavigationTarget | null;
   onDictionaryUpdate: () => Promise<void>;
   onSaved: (snapshot: AppSnapshot) => void;
+  onCheckForUpdates: () => void;
+  releaseCheckPending: boolean;
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
   const settingsScrollRef = useRef<HTMLDivElement | null>(null);
@@ -3178,11 +3348,11 @@ function SettingsView({
           <div className="card-heading"><div><strong>关于</strong></div></div>
           <div className="about-info-list">
             <div className="about-version-group">
-              <div className="about-info-row"><span>程序版本</span><strong>v{APP_VERSION}</strong></div>
+              <div className="about-info-row"><span>程序版本</span><button className="about-version-button" type="button" onClick={onCheckForUpdates} disabled={releaseCheckPending} aria-busy={releaseCheckPending} aria-label={releaseCheckPending ? "正在检查更新" : "检查更新"} title={releaseCheckPending ? "正在检查更新" : "点击检查更新"}>v{APP_VERSION}</button></div>
               <div className="about-info-row"><span>本地词典版本</span><button className="about-version-button" id="settings-about-dictionary-version" ref={aboutDictionaryRef} type="button" onClick={() => openResourceModal("dictionary")} aria-haspopup="dialog" aria-label="打开本地词典准备弹窗">{snapshot.dictionary.installedRelease ?? "未安装"}</button></div>
               <div className="about-info-row"><span>PDF Engine 版本</span><button className="about-version-button" id="settings-about-pdf-engine" ref={aboutPdfEngineRef} type="button" onClick={() => openResourceModal("pdf-engine")} aria-haspopup="dialog" aria-label="打开 PDF Engine 准备弹窗">{pdfEngine.status?.engineVersion ?? (pdfEngine.statusLoading ? "检查中" : "—")}</button></div>
             </div>
-            <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer">TTTTTony32/Lilt</a></div>
+            <div className="about-info-row"><span>Github</span><a href={GITHUB_URL} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); openExternalUrl(GITHUB_URL); }}>TTTTTony32/Lilt</a></div>
             <div className="about-info-row"><span>开发者</span><span>Tony32 · <a href={`mailto:${DEVELOPER_EMAIL}`}>{DEVELOPER_EMAIL}</a></span></div>
           </div>
         </div>
