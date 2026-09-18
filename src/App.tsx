@@ -112,6 +112,39 @@ interface TranslationSummary {
 
 type TranslationRequestMode = "plain" | "learning";
 
+const SETTINGS_SECTIONS = [
+  { id: "provider", label: "Provider", description: "模型连接", icon: Settings },
+  { id: "prompt", label: "Prompt", description: "翻译指令", icon: FileText },
+  { id: "dictionary", label: "本地词典", description: "离线词典资源", icon: BookOpen },
+  { id: "selection", label: "划词翻译", description: "选区触发方式", icon: Languages },
+  { id: "local", label: "本地数据", description: "历史与缓存", icon: FileType2 },
+  { id: "behavior", label: "关闭行为", description: "窗口关闭方式", icon: X },
+] as const;
+
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+
+interface SettingsDraft {
+  baseUrl: string;
+  modelId: string;
+  thinkingEffort: ThinkingEffort;
+  apiKey: string;
+  settings: AppSettings;
+  selectionMode: AppSettings["selectionMode"];
+  selectionShortcut: string;
+}
+
+function createSettingsDraft(snapshot: AppSnapshot): SettingsDraft {
+  return {
+    baseUrl: snapshot.provider.baseUrl,
+    modelId: snapshot.provider.modelId,
+    thinkingEffort: snapshot.provider.thinkingEffort ?? "none",
+    apiKey: "",
+    settings: snapshot.settings,
+    selectionMode: snapshot.settings.selectionMode,
+    selectionShortcut: snapshot.settings.selectionShortcut,
+  };
+}
+
 function formatTranslationSummary(summary: TranslationSummary): string {
   return `${(summary.durationMs / 1000).toFixed(2)}秒·${summary.cacheHit ? "缓存命中" : "未命中缓存"}`;
 }
@@ -298,7 +331,6 @@ function App() {
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [closeDialogMounted, setCloseDialogMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsOverlayMounted, setSettingsOverlayMounted] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyOverlayMounted, setHistoryOverlayMounted] = useState(false);
   const [dataTransferOpen, setDataTransferOpen] = useState(false);
@@ -322,7 +354,7 @@ function App() {
   const activeDictionaryOperationId = useRef<string | null>(null);
   const activePdfEngineOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
-  const settingsDialogRef = useRef<HTMLDivElement | null>(null);
+  const settingsWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
   const historyDialogRef = useRef<HTMLDivElement | null>(null);
   const historyReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -410,20 +442,13 @@ function App() {
   }, []);
 
   const openSettings = useCallback(() => {
+    if (settingsOpen) return;
     settingsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setSettingsOverlayMounted(true);
     setSettingsOpen(true);
-  }, []);
+  }, [settingsOpen]);
 
   const requestSettingsClose = useCallback(() => {
     setSettingsOpen(false);
-  }, []);
-
-  const handleSettingsClosed = useCallback(() => {
-    setSettingsOverlayMounted(false);
-    const previouslyFocused = settingsReturnFocusRef.current;
-    settingsReturnFocusRef.current = null;
-    previouslyFocused?.focus();
   }, []);
 
   const openHistory = useCallback(() => {
@@ -462,18 +487,27 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!settingsOpen) return;
-    const frame = window.requestAnimationFrame(() => settingsDialogRef.current?.focus());
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      requestSettingsClose();
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
+    if (settingsOpen) {
+      const frame = window.requestAnimationFrame(() => settingsWorkspaceRef.current?.focus());
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        requestSettingsClose();
+      };
+      document.addEventListener("keydown", handleKeyDown);
+      return () => {
+        window.cancelAnimationFrame(frame);
+        document.removeEventListener("keydown", handleKeyDown);
+      };
+    }
+
+    const previouslyFocused = settingsReturnFocusRef.current;
+    if (!previouslyFocused) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      previouslyFocused.focus();
+      settingsReturnFocusRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [requestSettingsClose, settingsOpen]);
 
   useEffect(() => {
@@ -1350,11 +1384,11 @@ function App() {
     window.setTimeout(() => setNotice(null), 1800);
   };
 
-  const handleSettingsSaved = (next: AppSnapshot) => {
+  const handleSettingsSaved = useCallback((next: AppSnapshot) => {
     setSnapshot(next);
     setNotice("设置已保存");
     window.setTimeout(() => setNotice(null), 1800);
-  };
+  }, []);
 
   const openPersonalDictionary = useCallback(() => {
     setTab("personal");
@@ -1365,12 +1399,12 @@ function App() {
   return (
     <div className="app-shell">
       <div className="main-surface">
-      <header className="app-chrome" onMouseDown={handleTitlebarMouseDown}>
+      <header className={`app-chrome ${settingsOpen ? "is-settings-open" : ""}`} onMouseDown={handleTitlebarMouseDown}>
         <div className="brand-lockup">
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
         </div>
-        <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />
+        {settingsOpen ? <span className="chrome-context-label">设置</span> : <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />}
         <div className="chrome-actions" data-no-drag>
           <button className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={openSettings} aria-label="打开设置" aria-expanded={settingsOpen} title="设置"><Settings size={16} /></button>
           <div className="window-controls" data-no-drag>
@@ -1381,126 +1415,110 @@ function App() {
         </div>
       </header>
 
-      <main className={`main-content ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""} ${usesInternalScrollLayout ? "pdf-main-content" : ""}`}>
-        <PageTransition activeKey={tab}>
-          <div className="page-view" key={tab}>
-            {tab === "translate" && (
-              <TranslateView
-                sourceText={sourceText}
-                translatedText={translatedText}
-                sourceLanguage={sourceLanguage}
-                targetLanguage={targetLanguage}
-                selectedModel={selectedModel}
-                status={status}
-                activeRequestMode={activeRequestMode}
-                learningModeEnabled={snapshot.settings.paragraphLearningModeEnabled}
-                learningModeSaving={learningModeSaving}
-                learningResult={learningResult}
-                error={error ?? translationEventsError}
-                notice={notice}
-                translationSummary={translationSummary}
-                eventsReady={translationEventsReady}
-                onSourceTextChange={handleSourceTextChange}
-                onSourceLanguageChange={setSourceLanguage}
-                onTargetLanguageChange={setTargetLanguage}
-                onLearningModeChange={(enabled) => { void handleLearningModeChange(enabled); }}
-                onTranslate={() => void handleTranslate()}
-                onCancel={() => void handleCancel()}
-                onCopy={() => void handleCopy()}
-                history={snapshot.history}
-                onOpenHistory={openHistory}
-              />
-            )}
-            {tab === "dictionary" && (
-              <DictionaryView
-                state={snapshot.dictionary}
-                history={snapshot.dictionaryHistory}
-                progress={dictionaryProgress}
-                snapshotReady={snapshotReady}
-                targetLanguage={targetLanguage}
-                wordExample={wordExample}
-                onUpdate={handleDictionaryUpdate}
-                onHistoryChanged={handleDictionaryHistoryChanged}
-                onSnapshotChanged={refreshSnapshot}
-                onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
-                onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
-                personalDictionary={snapshot.personalDictionary}
-                onResourceDownloadPrompt={openResourceDownloadPrompt}
-                openRequest={dictionaryOpenRequest}
-                onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
-                onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
-                onOpenPersonalDictionary={openPersonalDictionary}
-              />
-            )}
-            {tab === "pdf" && <PdfView onResourceDownloadPrompt={openResourceDownloadPrompt} />}
-            {tab === "personal" && (
-              <PersonalDictionaryView
-                entries={snapshot.personalDictionary}
-                onOpen={openPersonalWord}
-                onRemove={(entry) => { void removePersonalWord(entry); }}
-                onExport={() => openDataTransfer("personalExport")}
-              />
-            )}
-            {tab === "glossary" && (
-              <GlossaryView
-                terms={snapshot.glossaryTerms}
-                onChanged={() => void refreshSnapshot()}
-                onImport={() => openDataTransfer("glossaryImport")}
-                onExport={() => openDataTransfer("glossaryExport")}
-              />
-            )}
+      <main className={`main-content ${settingsOpen ? "settings-main-content" : ""} ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""} ${usesInternalScrollLayout ? "pdf-main-content" : ""}`}>
+        {settingsOpen ? (
+          <div className="settings-workspace" ref={settingsWorkspaceRef} role="region" aria-labelledby="settings-workspace-title" tabIndex={-1}>
+            <SettingsView
+              snapshot={snapshot}
+              dictionaryProgress={dictionaryProgress}
+              dictionaryEventsError={dictionaryEventsError}
+              onDictionaryUpdate={handleDictionaryUpdate}
+              onSaved={handleSettingsSaved}
+              onRequestClose={requestSettingsClose}
+            />
           </div>
-        </PageTransition>
+        ) : (
+          <PageTransition activeKey={tab}>
+            <div className="page-view" key={tab}>
+              {tab === "translate" && (
+                <TranslateView
+                  sourceText={sourceText}
+                  translatedText={translatedText}
+                  sourceLanguage={sourceLanguage}
+                  targetLanguage={targetLanguage}
+                  selectedModel={selectedModel}
+                  status={status}
+                  activeRequestMode={activeRequestMode}
+                  learningModeEnabled={snapshot.settings.paragraphLearningModeEnabled}
+                  learningModeSaving={learningModeSaving}
+                  learningResult={learningResult}
+                  error={error ?? translationEventsError}
+                  notice={notice}
+                  translationSummary={translationSummary}
+                  eventsReady={translationEventsReady}
+                  onSourceTextChange={handleSourceTextChange}
+                  onSourceLanguageChange={setSourceLanguage}
+                  onTargetLanguageChange={setTargetLanguage}
+                  onLearningModeChange={(enabled) => { void handleLearningModeChange(enabled); }}
+                  onTranslate={() => void handleTranslate()}
+                  onCancel={() => void handleCancel()}
+                  onCopy={() => void handleCopy()}
+                  history={snapshot.history}
+                  onOpenHistory={openHistory}
+                />
+              )}
+              {tab === "dictionary" && (
+                <DictionaryView
+                  state={snapshot.dictionary}
+                  history={snapshot.dictionaryHistory}
+                  progress={dictionaryProgress}
+                  snapshotReady={snapshotReady}
+                  targetLanguage={targetLanguage}
+                  wordExample={wordExample}
+                  onUpdate={handleDictionaryUpdate}
+                  onHistoryChanged={handleDictionaryHistoryChanged}
+                  onSnapshotChanged={refreshSnapshot}
+                  onWordExampleRequested={(request) => { void handleWordExampleRequested(request); }}
+                  onWordExampleCancelled={() => { void cancelWordExampleRequest(); }}
+                  personalDictionary={snapshot.personalDictionary}
+                  onResourceDownloadPrompt={openResourceDownloadPrompt}
+                  openRequest={dictionaryOpenRequest}
+                  onOpenRequestHandled={() => setDictionaryOpenRequest(null)}
+                  onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
+                  onOpenPersonalDictionary={openPersonalDictionary}
+                />
+              )}
+              {tab === "pdf" && <PdfView onResourceDownloadPrompt={openResourceDownloadPrompt} />}
+              {tab === "personal" && (
+                <PersonalDictionaryView
+                  entries={snapshot.personalDictionary}
+                  onOpen={openPersonalWord}
+                  onRemove={(entry) => { void removePersonalWord(entry); }}
+                  onExport={() => openDataTransfer("personalExport")}
+                />
+              )}
+              {tab === "glossary" && (
+                <GlossaryView
+                  terms={snapshot.glossaryTerms}
+                  onChanged={() => void refreshSnapshot()}
+                  onImport={() => openDataTransfer("glossaryImport")}
+                  onExport={() => openDataTransfer("glossaryExport")}
+                />
+              )}
+            </div>
+          </PageTransition>
+        )}
       </main>
       </div>
       {historyOverlayMounted && (
         <AnimatedOverlay
-          className="settings-overlay history-overlay"
+          className="history-overlay"
           open={historyOpen}
           onClosed={handleHistoryClosed}
           onBackdropClick={(event) => {
             if (event.target === event.currentTarget) requestHistoryClose();
           }}
         >
-          <div className="settings-dialog history-dialog" ref={historyDialogRef} role="dialog" aria-modal="true" aria-labelledby="history-dialog-title" tabIndex={-1}>
-            <div className="settings-dialog-heading">
+          <div className="history-dialog" ref={historyDialogRef} role="dialog" aria-modal="true" aria-labelledby="history-dialog-title" tabIndex={-1}>
+            <div className="history-dialog-heading">
               <div>
-                <span className="settings-dialog-eyebrow">HISTORY</span>
+                <span className="history-dialog-eyebrow">HISTORY</span>
                 <strong id="history-dialog-title">翻译历史</strong>
               </div>
               <button className="icon-button" type="button" onClick={requestHistoryClose} aria-label="关闭翻译历史" title="关闭翻译历史"><X size={17} /></button>
             </div>
-            <div className="settings-dialog-scroll history-dialog-scroll">
+            <div className="history-dialog-scroll">
               <HistoryContent history={snapshot.history} />
-            </div>
-          </div>
-        </AnimatedOverlay>
-      )}
-      {settingsOverlayMounted && (
-        <AnimatedOverlay
-          className="settings-overlay"
-          open={settingsOpen}
-          onClosed={handleSettingsClosed}
-          onBackdropClick={(event) => {
-            if (event.target === event.currentTarget) requestSettingsClose();
-          }}
-        >
-          <div className="settings-dialog" ref={settingsDialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabIndex={-1}>
-            <div className="settings-dialog-heading">
-              <div>
-                <span className="settings-dialog-eyebrow">SETTINGS</span>
-                <strong id="settings-dialog-title">设置</strong>
-              </div>
-              <button className="icon-button" type="button" onClick={requestSettingsClose} aria-label="关闭设置" title="关闭设置"><X size={17} /></button>
-            </div>
-            <div className="settings-dialog-scroll">
-              <SettingsView
-                snapshot={snapshot}
-                dictionaryProgress={dictionaryProgress}
-                dictionaryEventsError={dictionaryEventsError}
-                onDictionaryUpdate={handleDictionaryUpdate}
-                onSaved={handleSettingsSaved}
-              />
             </div>
           </div>
         </AnimatedOverlay>
@@ -2200,6 +2218,12 @@ function PromptManager({
   const [content, setContent] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const promptDraftRef = useRef({ selectedId: currentPromptId || null, name: "", content: "" });
+  const promptSaveTimerRef = useRef<number | null>(null);
+  const promptSaveVersionRef = useRef(0);
+  const promptSavingRef = useRef(false);
+  const promptDirtyRef = useRef(false);
+  const promptDisposedRef = useRef(false);
 
   const selectedPrompt = prompts.find((prompt) => prompt.id === selectedId) ?? null;
 
@@ -2209,9 +2233,82 @@ function PromptManager({
     if (!selected) return;
     setName(selected.name);
     setContent(selected.content);
+    promptDraftRef.current = { selectedId: selected.id, name: selected.name, content: selected.content };
   }, [currentPromptId, prompts, selectedId]);
 
+  const savePromptDraft = useCallback(async (version: number) => {
+    if (promptSavingRef.current) return;
+    const draft = promptDraftRef.current;
+    if (!draft.name.trim() || !draft.content.trim()) return;
+    promptSavingRef.current = true;
+    try {
+      const raw = draft.selectedId
+        ? await invokeCommand<unknown>("update_prompt", { id: draft.selectedId, name: draft.name, content: draft.content })
+        : await invokeCommand<unknown>("create_prompt", { name: draft.name, content: draft.content });
+      const next = decodePrompt(raw);
+      if (!next) throw new Error("Prompt 命令返回了无法识别的结果");
+      if (version === promptSaveVersionRef.current) {
+        promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content };
+        promptDirtyRef.current = false;
+        if (!promptDisposedRef.current) {
+          setSelectedId(next.id);
+          setName(next.name);
+          setContent(next.content);
+          setMessage("Prompt 已自动保存");
+          setError(null);
+        }
+      }
+      await onChanged();
+    } catch (reason) {
+      if (version === promptSaveVersionRef.current && !promptDisposedRef.current) {
+        setError(describeError(reason, "Prompt 自动保存失败"));
+        setMessage(null);
+      }
+    } finally {
+      promptSavingRef.current = false;
+      if (version !== promptSaveVersionRef.current) void savePromptDraft(promptSaveVersionRef.current);
+    }
+  }, [onChanged]);
+
+  const schedulePromptSave = useCallback(() => {
+    promptSaveVersionRef.current += 1;
+    if (promptSaveTimerRef.current !== null) window.clearTimeout(promptSaveTimerRef.current);
+    const version = promptSaveVersionRef.current;
+    promptSaveTimerRef.current = window.setTimeout(() => {
+      promptSaveTimerRef.current = null;
+      void savePromptDraft(version);
+    }, 650);
+  }, [savePromptDraft]);
+
+  const updatePromptDraft = (patch: Partial<{ name: string; content: string }>) => {
+    const next = { ...promptDraftRef.current, ...patch };
+    promptDraftRef.current = next;
+    promptDirtyRef.current = true;
+    setName(next.name);
+    setContent(next.content);
+    setError(null);
+    setMessage(null);
+    schedulePromptSave();
+  };
+
+  useEffect(() => () => {
+    promptDisposedRef.current = true;
+    if (promptSaveTimerRef.current !== null) {
+      window.clearTimeout(promptSaveTimerRef.current);
+      promptSaveTimerRef.current = null;
+      if (promptDirtyRef.current) void savePromptDraft(promptSaveVersionRef.current);
+    }
+  }, [savePromptDraft]);
+
   const selectPrompt = (prompt: Prompt) => {
+    if (promptSaveTimerRef.current !== null) {
+      window.clearTimeout(promptSaveTimerRef.current);
+      promptSaveTimerRef.current = null;
+    }
+    if (promptDirtyRef.current) void savePromptDraft(promptSaveVersionRef.current);
+    promptSaveVersionRef.current += 1;
+    promptDirtyRef.current = false;
+    promptDraftRef.current = { selectedId: prompt.id, name: prompt.name, content: prompt.content };
     setSelectedId(prompt.id);
     setName(prompt.name);
     setContent(prompt.content);
@@ -2220,35 +2317,19 @@ function PromptManager({
   };
 
   const startNew = () => {
+    if (promptSaveTimerRef.current !== null) {
+      window.clearTimeout(promptSaveTimerRef.current);
+      promptSaveTimerRef.current = null;
+    }
+    if (promptDirtyRef.current) void savePromptDraft(promptSaveVersionRef.current);
+    promptSaveVersionRef.current += 1;
+    promptDirtyRef.current = false;
+    promptDraftRef.current = { selectedId: null, name: "我的 Prompt", content: "" };
     setSelectedId(null);
     setName("我的 Prompt");
     setContent("");
     setError(null);
     setMessage(null);
-  };
-
-  const save = async () => {
-    if (!name.trim() || !content.trim()) {
-      setError("Prompt 名称和内容不能为空。");
-      setMessage(null);
-      return;
-    }
-    setError(null);
-    setMessage(null);
-    try {
-      const raw = selectedId
-        ? await invokeCommand<unknown>("update_prompt", { id: selectedId, name, content })
-        : await invokeCommand<unknown>("create_prompt", { name, content });
-      const next = decodePrompt(raw);
-      if (!next) throw new Error("Prompt 命令返回了无法识别的结果。");
-      setSelectedId(next.id);
-      setName(next.name);
-      setContent(next.content);
-      await onChanged();
-      setMessage(selectedId ? "Prompt 已更新" : "Prompt 已创建");
-    } catch (reason) {
-      setError(describeError(reason, "Prompt 保存失败"));
-    }
   };
 
   const duplicate = async (prompt: Prompt) => {
@@ -2258,6 +2339,9 @@ function PromptManager({
       const raw = await invokeCommand<unknown>("duplicate_prompt", { id: prompt.id });
       const next = decodePrompt(raw);
       if (!next) throw new Error("Prompt 命令返回了无法识别的结果。");
+      promptSaveVersionRef.current += 1;
+      promptDirtyRef.current = false;
+      promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content };
       setSelectedId(next.id);
       setName(next.name);
       setContent(next.content);
@@ -2295,7 +2379,7 @@ function PromptManager({
   };
 
   return (
-    <div className="simple-card prompt-manager-card">
+    <div className="prompt-manager-card">
       <div className="card-heading"><div><strong>Prompt</strong><span>内置 Prompt 只读；复制后可以编辑并设为默认。</span></div><button className="secondary-button small-button" type="button" onClick={startNew}>新建</button></div>
       <div className="prompt-manager-grid">
         <div className="prompt-list">
@@ -2307,11 +2391,11 @@ function PromptManager({
           ))}
         </div>
         <div className="prompt-editor-panel">
-          <label>名称<input value={name} onChange={(event) => setName(event.target.value)} disabled={selectedPrompt?.isBuiltin ?? false} /></label>
-          <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => setContent(event.target.value)} readOnly={selectedPrompt?.isBuiltin ?? false} /></label>
+          <label>名称<input value={name} onChange={(event) => updatePromptDraft({ name: event.target.value })} disabled={selectedPrompt?.isBuiltin ?? false} /></label>
+          <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => updatePromptDraft({ content: event.target.value })} readOnly={selectedPrompt?.isBuiltin ?? false} /></label>
           <div className="form-actions prompt-actions">
             <div className="button-group">
-              {selectedPrompt?.isBuiltin ? <button className="secondary-button" type="button" onClick={() => void duplicate(selectedPrompt)}>复制并编辑</button> : <button className="primary-button small-button" type="button" onClick={() => void save()}>保存 Prompt</button>}
+              {selectedPrompt?.isBuiltin ? <button className="secondary-button" type="button" onClick={() => void duplicate(selectedPrompt)}>复制并编辑</button> : <span className="muted-text">修改后自动保存</span>}
               {selectedPrompt && selectedPrompt.id !== currentPromptId && <button className="secondary-button" type="button" onClick={() => void setDefault(selectedPrompt)}>设为默认</button>}
               {selectedPrompt && !selectedPrompt.isBuiltin && selectedPrompt.id !== currentPromptId && <button className="text-button danger-text" type="button" onClick={() => void remove(selectedPrompt)}>删除</button>}
             </div>
@@ -2490,13 +2574,16 @@ function SettingsView({
   dictionaryEventsError,
   onDictionaryUpdate,
   onSaved,
+  onRequestClose,
 }: {
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
   dictionaryEventsError: string | null;
   onDictionaryUpdate: () => Promise<void>;
   onSaved: (snapshot: AppSnapshot) => void;
+  onRequestClose: () => void;
 }) {
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
@@ -2510,16 +2597,118 @@ function SettingsView({
   const [error, setError] = useState<string | null>(null);
   const [providerMessage, setProviderMessage] = useState<string | null>(null);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const settingsDraftRef = useRef<SettingsDraft>(createSettingsDraft(snapshot));
+  const saveTimerRef = useRef<number | null>(null);
+  const saveVersionRef = useRef(0);
+  const savingRef = useRef(false);
+  const disposedRef = useRef(false);
+
+  const saveDraft = useCallback(async (draft: SettingsDraft, version: number) => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    if (!disposedRef.current) {
+      setSaveStatus("saving");
+      setSaveError(null);
+    }
+    try {
+      const shortcut = draft.selectionShortcut.trim();
+      if (!draft.modelId.trim()) throw new Error("Model ID 不能为空");
+      if (!shortcut) throw new Error("快捷键不能为空");
+      await invokeCommand("save_provider_config", {
+        baseUrl: draft.baseUrl,
+        modelId: draft.modelId,
+        thinkingEffort: draft.thinkingEffort,
+        apiKey: draft.apiKey || null,
+      });
+      await invokeCommand("save_app_settings", {
+        historyRetention: draft.settings.historyRetention,
+        cacheEnabled: draft.settings.cacheEnabled,
+        cacheMaxBytes: draft.settings.cacheMaxBytes,
+        wordAiCacheEnabled: draft.settings.wordAiCacheEnabled,
+        paragraphExampleLookupEnabled: draft.settings.paragraphExampleLookupEnabled,
+      });
+      await invokeCommand("configure_selection", {
+        mode: draft.selectionMode,
+        shortcut,
+      });
+      const rawStatus = await invokeCommand<unknown>("get_selection_status");
+      const nextStatus = decodeSelectionStatus(rawStatus);
+      if (!disposedRef.current && nextStatus) setSelectionStatus(nextStatus);
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      if (version === saveVersionRef.current) {
+        const nextDraft = { ...settingsDraftRef.current, apiKey: "" };
+        settingsDraftRef.current = nextDraft;
+        if (!disposedRef.current) {
+          setApiKey("");
+          setSaveStatus("saved");
+        }
+        onSaved(next);
+      }
+    } catch (reason) {
+      if (version === saveVersionRef.current && !disposedRef.current) {
+        setSaveStatus("error");
+        setSaveError(describeError(reason, "设置自动保存失败"));
+      }
+    } finally {
+      savingRef.current = false;
+      if (version !== saveVersionRef.current) {
+        void saveDraft(settingsDraftRef.current, saveVersionRef.current);
+      }
+    }
+  }, [onSaved]);
+
+  const scheduleSave = useCallback((nextDraft: SettingsDraft) => {
+    settingsDraftRef.current = nextDraft;
+    saveVersionRef.current += 1;
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    if (!disposedRef.current) {
+      setSaveStatus("saving");
+      setSaveError(null);
+    }
+    const version = saveVersionRef.current;
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      void saveDraft(nextDraft, version);
+    }, 650);
+  }, [saveDraft]);
+
+  const updateDraft = useCallback((update: (current: SettingsDraft) => SettingsDraft) => {
+    const nextDraft = update(settingsDraftRef.current);
+    settingsDraftRef.current = nextDraft;
+    setBaseUrl(nextDraft.baseUrl);
+    setModelId(nextDraft.modelId);
+    setThinkingEffort(nextDraft.thinkingEffort);
+    setApiKey(nextDraft.apiKey);
+    setSettings(nextDraft.settings);
+    setSelectionMode(nextDraft.selectionMode);
+    setSelectionShortcut(nextDraft.selectionShortcut);
+    scheduleSave(nextDraft);
+  }, [scheduleSave]);
+
+  const updateProviderDraft = useCallback((patch: Partial<Pick<SettingsDraft, "baseUrl" | "modelId" | "thinkingEffort" | "apiKey">>) => {
+    updateDraft((current) => ({ ...current, ...patch }));
+  }, [updateDraft]);
+
+  const updateAppSettingsDraft = useCallback((patch: Partial<AppSettings>) => {
+    updateDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
+  }, [updateDraft]);
+
+  const updateSelectionDraft = useCallback((patch: Partial<Pick<SettingsDraft, "selectionMode" | "selectionShortcut">>) => {
+    updateDraft((current) => ({ ...current, ...patch }));
+  }, [updateDraft]);
 
   useEffect(() => {
-    setBaseUrl(snapshot.provider.baseUrl);
-    setModelId(snapshot.provider.modelId);
-    setThinkingEffort(snapshot.provider.thinkingEffort ?? "none");
-    setAvailableModels(null);
-    setSettings(snapshot.settings);
-    setSelectionMode(snapshot.settings.selectionMode);
-    setSelectionShortcut(snapshot.settings.selectionShortcut);
-  }, [snapshot]);
+    return () => {
+      disposedRef.current = true;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+        void saveDraft(settingsDraftRef.current, saveVersionRef.current);
+      }
+    };
+  }, [saveDraft]);
 
   useEffect(() => {
     let disposed = false;
@@ -2545,70 +2734,7 @@ function SettingsView({
       disposed = true;
       unlisten?.();
     };
-  }, [snapshot.settings.selectionMode, snapshot.settings.selectionShortcut]);
-
-  const saveProvider = async () => {
-    setProviderError(null);
-    setProviderMessage(null);
-    try {
-      await invokeCommand("save_provider_config", {
-        baseUrl,
-        modelId,
-        thinkingEffort,
-        apiKey: apiKey || null,
-      });
-      setApiKey("");
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      onSaved(next);
-      setProviderMessage("Provider 设置已保存");
-    } catch (reason) {
-      setProviderError(describeError(reason, "Provider 设置保存失败"));
-      setProviderMessage(null);
-    }
-  };
-
-  const saveAppSettings = async () => {
-    setError(null);
-    setMessage(null);
-    try {
-      await invokeCommand("save_app_settings", {
-        historyRetention: settings.historyRetention,
-        cacheEnabled: settings.cacheEnabled,
-        cacheMaxBytes: settings.cacheMaxBytes,
-        wordAiCacheEnabled: settings.wordAiCacheEnabled,
-        paragraphExampleLookupEnabled: settings.paragraphExampleLookupEnabled,
-      });
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      onSaved(next);
-      setMessage("本地设置已保存");
-    } catch (reason) {
-      setError(describeError(reason, "本地设置保存失败"));
-      setMessage(null);
-    }
-  };
-
-  const saveSelectionSettings = async () => {
-    const shortcut = selectionShortcut.trim();
-    if (!shortcut) {
-      setError("快捷键不能为空。");
-      setMessage(null);
-      return;
-    }
-    setError(null);
-    setMessage(null);
-    try {
-      await invokeCommand("configure_selection", { mode: selectionMode, shortcut });
-      const rawStatus = await invokeCommand<unknown>("get_selection_status");
-      const nextStatus = decodeSelectionStatus(rawStatus);
-      if (nextStatus) setSelectionStatus(nextStatus);
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      onSaved(next);
-      setMessage("划词翻译设置已保存");
-    } catch (reason) {
-      setError(describeError(reason, "划词翻译设置保存失败"));
-      setMessage(null);
-    }
-  };
+  }, [selectionMode, selectionShortcut]);
 
   const fetchModels = async () => {
     setProviderError(null);
@@ -2620,7 +2746,7 @@ function SettingsView({
       });
       setAvailableModels(models.length > 0 ? models : null);
       if (models.length > 0 && !models.some((model) => model.id === modelId)) {
-        setModelId(models[0]?.id ?? modelId);
+        updateProviderDraft({ modelId: models[0]?.id ?? modelId });
       }
       setProviderMessage(`模型列表已更新，共 ${models.length} 个模型`);
     } catch (reason) {
@@ -2630,15 +2756,18 @@ function SettingsView({
     }
   };
 
-  const refreshAfterPromptChange = async () => {
+  const refreshAfterPromptChange = useCallback(async () => {
     const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
     onSaved(next);
-  };
+  }, [onSaved]);
 
   const resetCloseBehavior = async () => {
     try {
       await invokeCommand("reset_close_behavior");
       const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      const nextDraft = { ...settingsDraftRef.current, settings: { ...settingsDraftRef.current.settings, closeBehavior: next.settings.closeBehavior } };
+      settingsDraftRef.current = nextDraft;
+      setSettings(nextDraft.settings);
       onSaved(next);
       setMessage("关闭行为已恢复为每次询问");
       setError(null);
@@ -2659,34 +2788,92 @@ function SettingsView({
   const dictionaryProgressPercent = dictionaryProgress && dictionaryProgress.total > 0
     ? Math.min(100, Math.round((dictionaryProgress.current / dictionaryProgress.total) * 100))
     : 0;
-  const activeSelectionMode = selectionStatus?.mode ?? snapshot.settings.selectionMode;
+  const activeSelectionMode = selectionStatus?.mode ?? selectionMode;
   const modelOptions = availableModels
     ? [
       ...(!availableModels.some((model) => model.id === modelId) ? [{ value: modelId, label: `当前：${modelId}` }] : []),
       ...availableModels.map((model) => ({ value: model.id, label: model.label })),
     ]
     : [];
+  const activeSectionDefinition = SETTINGS_SECTIONS.find((section) => section.id === activeSection) ?? SETTINGS_SECTIONS[0];
+  const ActiveSectionIcon = activeSectionDefinition.icon;
+  const saveStatusLabel = saveStatus === "saving"
+    ? "正在保存"
+    : saveStatus === "saved"
+      ? "已保存"
+      : saveStatus === "error"
+        ? "保存失败"
+        : "自动保存";
 
   return (
-    <section className="page-section narrow-page">
-      <PageTitle eyebrow="SETTINGS" title="设置" description="配置模型连接，并管理本地历史与段落缓存。" />
-      <div className="settings-stack">
-        <div className="simple-card">
+    <section className="settings-view" aria-labelledby="settings-workspace-title">
+      <aside className="settings-sidebar">
+        <div className="settings-sidebar-heading">
+          <span className="settings-eyebrow">SETTINGS</span>
+          <h1>设置</h1>
+          <p>管理模型连接、词典资源与本地数据。</p>
+        </div>
+        <nav className="settings-navigation" aria-label="设置分类">
+          {SETTINGS_SECTIONS.map((section) => {
+            const Icon = section.icon;
+            const selected = section.id === activeSection;
+            return (
+              <button
+                className={`settings-navigation-item ${selected ? "is-active" : ""}`}
+                type="button"
+                key={section.id}
+                aria-current={selected ? "page" : undefined}
+                onClick={() => setActiveSection(section.id)}
+              >
+                <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+                <span><strong>{section.label}</strong><small>{section.description}</small></span>
+              </button>
+            );
+          })}
+        </nav>
+        <button className="settings-back-button" type="button" onClick={onRequestClose}>
+          <X size={15} aria-hidden="true" />
+          返回 Lilt
+        </button>
+      </aside>
+
+      <div className="settings-content">
+        <header className="settings-content-heading">
+          <div className="settings-content-title">
+            <div className="settings-content-title-line">
+              <ActiveSectionIcon size={17} strokeWidth={1.8} aria-hidden="true" />
+              <h2 id="settings-workspace-title">{activeSectionDefinition.label}</h2>
+            </div>
+            <p>{activeSectionDefinition.description}</p>
+          </div>
+          <div className="settings-content-actions">
+            <span className={`settings-save-status is-${saveStatus}`} role="status" aria-live="polite">
+              <span className="settings-save-status-dot" aria-hidden="true" />
+              {saveStatusLabel}
+            </span>
+            <button className="icon-button" type="button" onClick={onRequestClose} aria-label="返回 Lilt" title="返回 Lilt"><X size={17} /></button>
+          </div>
+        </header>
+
+        <div className="settings-content-scroll">
+          <div className="settings-section" hidden={activeSection !== "provider"}>
           <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong><span>即将支持其他协议。</span></div><span className={`connection-status ${snapshot.provider.hasApiKey ? "connected" : ""}`}>{snapshot.provider.hasApiKey ? "已配置密钥" : "未配置密钥"}</span></div>
           <div className="form-grid">
-            <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" /></label>
-            {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={setModelId} /> : <label>Model ID<input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" /></label>}
-            <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => setThinkingEffort(value as ThinkingEffort)} />
-            <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
+            <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" /></label>
+            {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" /></label>}
+            <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => updateProviderDraft({ thinkingEffort: value as ThinkingEffort })} />
+            <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => updateProviderDraft({ apiKey: event.target.value })} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
           </div>
           {providerMessage && <p className="notice-message settings-message">{providerMessage}</p>}
           {providerError && <p className="error-message settings-message">{providerError}</p>}
-          <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。</span><div className="button-group"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button><button className="primary-button small-button" type="button" onClick={() => void saveProvider()}>保存 Provider</button></div></div>
-        </div>
+          <div className="form-actions"><span className="muted-text">模型列表读取失败时，Model ID 仍可手动填写。修改后自动保存。</span><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button></div>
+          </div>
 
-        <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} />
+          <div className="settings-section" hidden={activeSection !== "prompt"}>
+            <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} />
+          </div>
 
-        <div className="simple-card dictionary-settings-card">
+        <div className="settings-section" hidden={activeSection !== "dictionary"}>
           <div className="card-heading"><div><strong>本地词典</strong><span>open-dictionary，离线查询，不依赖 Provider</span></div><span className={`connection-status ${snapshot.dictionary.status === "ready" ? "connected" : ""}`}>{dictionaryStatusLabel}</span></div>
           <div className="dictionary-settings-grid">
             <div><span className="fact-label">Release</span><strong>{snapshot.dictionary.installedRelease ?? "尚未安装"}</strong></div>
@@ -2704,34 +2891,40 @@ function SettingsView({
           <div className="form-actions"><span className="muted-text">数据版本 {snapshot.dictionary.distributionSchemaVersion ?? "—"} · SQLite {snapshot.dictionary.sqliteSchemaVersion ?? "—"}</span><button className="secondary-button" type="button" onClick={() => void onDictionaryUpdate()} disabled={dictionaryUpdating}>{dictionaryUpdating ? <LoaderCircle className="spin" size={15} /> : <BookOpen size={15} />}{snapshot.dictionary.status === "ready" ? "手动更新" : "下载词典"}</button></div>
         </div>
 
-        <div className="simple-card selection-settings-card">
+        <div className="settings-section" hidden={activeSection !== "selection"}>
           <div className="card-heading"><div><strong>划词翻译</strong><span>从其他 Windows 应用读取选中文本，浮窗复用当前翻译方向。</span></div><span className={`connection-status ${selectionStatus && (activeSelectionMode === "shortcut" ? selectionStatus.shortcutRegistered : selectionStatus.uiAutomationReady) ? "connected" : ""}`}>{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键已启用" : "快捷键未启用" : selectionStatus?.uiAutomationReady ? "自动监听已启用" : "自动监听不可用"}</span></div>
           <div className="form-grid selection-settings-grid">
-            <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => setSelectionMode(value as AppSettings["selectionMode"])} />
-            <label>快捷键<input value={selectionShortcut} onChange={(event) => setSelectionShortcut(event.target.value)} placeholder="Ctrl+Shift+L" /></label>
+            <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => updateSelectionDraft({ selectionMode: value as AppSettings["selectionMode"] })} />
+            <label>快捷键<input value={selectionShortcut} onChange={(event) => updateSelectionDraft({ selectionShortcut: event.target.value })} placeholder="Ctrl+Shift+L" /></label>
           </div>
           <p className="settings-hint">快捷键格式使用 Ctrl+Shift+L 这样的组合。按快捷键模式读取当前选区；自动监听模式在选区稳定 500 毫秒后显示结果。自动模式仍保留快捷键设置，切换回来即可使用。</p>
           {selectionStatus?.message && <p className="error-message settings-message">{selectionStatus.message}</p>}
-          <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}</span><button className="primary-button small-button" type="button" onClick={() => void saveSelectionSettings()}>保存划词设置</button></div>
+          <div className="form-actions"><span className="muted-text">当前状态：{activeSelectionMode === "shortcut" ? selectionStatus?.shortcutRegistered ? "快捷键正常" : "等待注册" : selectionStatus?.uiAutomationReady ? "UI Automation 正常" : "等待初始化"}。修改后自动保存。</span></div>
         </div>
 
-        <div className="simple-card">
+        <div className="settings-section" hidden={activeSection !== "local"}>
           <div className="card-heading"><div><strong>本地数据</strong><span>数据只保存在当前设备</span></div></div>
-          <label className="setting-line"><span><strong>翻译历史保留条数</strong><small>历史功能不可关闭，只控制保留数量。</small></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => setSettings({ ...settings, historyRetention: Number(event.target.value) })} /></label>
-          <label className="setting-line"><span><strong>启用段落翻译缓存</strong><small>缓存命中后仍会写入一条历史记录。</small></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => setSettings({ ...settings, cacheEnabled: event.target.checked })} /></label>
-          <label className="setting-line"><span><strong>缓存单词 AI 见解</strong><small>关闭后，每次查询都会重新生成例句译文和词性。</small></span><input type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => setSettings({ ...settings, wordAiCacheEnabled: event.target.checked })} /></label>
-          <label className="setting-line"><span><strong>从段落缓存查找例句</strong><small>关闭后，词典查询不再读取段落翻译缓存中的例句。</small></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => setSettings({ ...settings, paragraphExampleLookupEnabled: event.target.checked })} /></label>
-          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong><small>已使用 {formatBytes(snapshot.cacheStats.usageBytes)}，上限 {formatBytes(settings.cacheMaxBytes)}。</small></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => setSettings({ ...settings, cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
-          <div className="form-actions"><span className="muted-text">缓存不包含 API Key。</span><button className="primary-button small-button" type="button" onClick={() => void saveAppSettings()}>保存本地设置</button></div>
+          <label className="setting-line"><span><strong>翻译历史保留条数</strong><small>历史功能不可关闭，只控制保留数量。</small></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => updateAppSettingsDraft({ historyRetention: Number(event.target.value) })} /></label>
+          <label className="setting-line"><span><strong>启用段落翻译缓存</strong><small>缓存命中后仍会写入一条历史记录。</small></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => updateAppSettingsDraft({ cacheEnabled: event.target.checked })} /></label>
+          <label className="setting-line"><span><strong>缓存单词 AI 见解</strong><small>关闭后，每次查询都会重新生成例句译文和词性。</small></span><input type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => updateAppSettingsDraft({ wordAiCacheEnabled: event.target.checked })} /></label>
+          <label className="setting-line"><span><strong>从段落缓存查找例句</strong><small>关闭后，词典查询不再读取段落翻译缓存中的例句。</small></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => updateAppSettingsDraft({ paragraphExampleLookupEnabled: event.target.checked })} /></label>
+          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong><small>已使用 {formatBytes(snapshot.cacheStats.usageBytes)}，上限 {formatBytes(settings.cacheMaxBytes)}。</small></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
+          <div className="form-actions"><span className="muted-text">缓存不包含 API Key。修改后自动保存。</span></div>
         </div>
 
-        <div className="simple-card">
+        <div className="settings-section" hidden={activeSection !== "behavior"}>
           <div className="card-heading"><div><strong>关闭行为</strong><span>点击主窗口关闭按钮时的处理方式。</span></div></div>
           <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong><small>{settings.closeBehavior === "ask" ? "关闭窗口时显示选择对话框。" : "已经记住选择，可在这里恢复询问。"}</small></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
         </div>
+        </div>
+        {(saveError || message || error) && (
+          <div className="settings-feedback" aria-live="polite">
+            {saveError && <p className="error-message settings-message">{saveError}</p>}
+            {message && <p className="notice-message settings-message">{message}</p>}
+            {error && <p className="error-message settings-message">{error}</p>}
+          </div>
+        )}
       </div>
-      {message && <p className="notice-message settings-message">{message}</p>}
-      {error && <p className="error-message settings-message">{error}</p>}
     </section>
   );
 }
