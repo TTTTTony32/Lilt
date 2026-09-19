@@ -391,9 +391,7 @@ impl SelectionService {
             inner.shortcut_registered = mode.includes_shortcut();
             inner.message = None;
         }
-        self.send_worker(WorkerCommand::SetAutomatic(
-            mode.includes_automatic(),
-        ));
+        self.send_worker(WorkerCommand::SetAutomatic(mode.includes_automatic()));
         self.emit_status();
         Ok(self.status())
     }
