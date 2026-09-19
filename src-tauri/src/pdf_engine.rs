@@ -21,9 +21,10 @@ use crate::AppState;
 
 pub(crate) const BABELDOC_ENGINE_VERSION: &str = "babeldoc-0.6.4";
 const BABELDOC_VERSION: &str = "0.6.4";
+const PDF_ENGINE_RELEASE_REVISION: &str = "r3";
 const SUPPORTED_ENGINE_TARGET: &str = "windows-x86_64";
 #[cfg(not(debug_assertions))]
-const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r2";
+const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r3";
 #[cfg(not(debug_assertions))]
 const RELEASE_REPOSITORY_OWNER: &str = "TTTTTony32";
 #[cfg(not(debug_assertions))]
@@ -259,7 +260,7 @@ impl PdfEngineRuntime {
     fn status(&self) -> PdfEngineStatus {
         PdfEngineStatus {
             status: "available".to_string(),
-            engine_version: BABELDOC_ENGINE_VERSION.to_string(),
+            engine_version: display_engine_version(),
             target: current_target(),
             python_version: Some(self.python_version.clone()),
             babeldoc_version: Some(self.babeldoc_version.clone()),
@@ -269,6 +270,10 @@ impl PdfEngineRuntime {
             error: None,
         }
     }
+}
+
+fn display_engine_version() -> String {
+    format!("{BABELDOC_ENGINE_VERSION}-{PDF_ENGINE_RELEASE_REVISION}")
 }
 
 fn validate_manifest(manifest: &EngineManifest) -> Result<(), String> {
@@ -525,7 +530,7 @@ fn ensure_supported_target(target: &str) -> Result<(), String> {
 fn status_for_data_dir(data_dir: &Path, preparing: bool) -> PdfEngineStatus {
     let base = |status: &str, error: Option<String>, updating: bool| PdfEngineStatus {
         status: status.to_string(),
-        engine_version: BABELDOC_ENGINE_VERSION.to_string(),
+        engine_version: display_engine_version(),
         target: current_target(),
         python_version: None,
         babeldoc_version: None,
@@ -1515,8 +1520,8 @@ fn summarize_error(error: &str) -> String {
 mod tests {
     use super::{
         BABELDOC_ENGINE_VERSION, PdfEngineRuntime, build_worker_command, copy_directory_contents,
-        current_target, ensure_supported_target, find_python_executable, resolve_runtime_file,
-        status_for_data_dir,
+        current_target, display_engine_version, ensure_supported_target, find_python_executable,
+        resolve_runtime_file, status_for_data_dir,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -1577,6 +1582,11 @@ mod tests {
     fn rejects_an_unsupported_engine_target() {
         let error = ensure_supported_target("windows-other").expect_err("target should fail");
         assert!(error.contains("只支持 Windows x64"));
+    }
+
+    #[test]
+    fn displays_engine_version_with_distribution_revision() {
+        assert_eq!(display_engine_version(), "babeldoc-0.6.4-r3");
     }
 
     #[test]

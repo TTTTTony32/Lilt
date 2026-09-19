@@ -55,7 +55,7 @@ pdf-engine-index.json
 
 `pdf-engine-index.json` 中的 ZIP 地址固定指向当前 Engine 标签。手动运行工作流只用于验证构建并保留 Actions Artifact，不会创建 Release。确认 Engine Draft 后再推送应用版本标签 `v<version>`，应用 Release 只包含 NSIS 安装包。
 
-Engine 资源需要更新时递增标签末尾的修订号，例如 `lilt-pdf-engine-babeldoc-0.6.4-r2`。先发布新的 Engine Release，再修改客户端的固定标签并发布新的 Lilt 版本；已经发布的标签不移动、不覆盖。
+Engine 资源需要更新时递增标签末尾的修订号，例如 `lilt-pdf-engine-babeldoc-0.6.4-r3`。先发布新的 Engine Release，再修改客户端的固定标签并发布新的 Lilt 版本；已经发布的标签不移动、不覆盖。
 
 ## 发布约束
 

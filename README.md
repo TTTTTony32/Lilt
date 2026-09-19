@@ -101,7 +101,7 @@ Lilt 安装包和 PDF Engine 分开发布。安装包只包含应用本体，PDF
 
 Engine Draft 验证并正式发布后，再推送应用版本标签 `v<version>`。`.github/workflows/release.yml` 只构建和发布 `Lilt_<version>_windows_amd64_setup.exe`。两个工作流都支持 `workflow_dispatch`；手动运行只保留 Actions Artifact，不创建 Release。
 
-Engine 资源发生变化时使用新的 `rN` 标签，例如 `lilt-pdf-engine-babeldoc-0.6.4-r2`，先发布 Engine，再在客户端代码中切换标签并发布新的应用版本。已经发布的 Engine 标签不移动、不覆盖。
+Engine 资源发生变化时使用新的 `rN` 标签，例如 `lilt-pdf-engine-babeldoc-0.6.4-r3`，先发布 Engine，再在客户端代码中切换标签并发布新的应用版本。已经发布的 Engine 标签不移动、不覆盖。
 
 ## TO-DO
 
