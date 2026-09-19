@@ -635,7 +635,7 @@ function App() {
       ? document.getElementById(settingsReturnFocusIdRef.current)
       : null;
     settingsReturnFocusIdRef.current = null;
-    (previouslyFocused?.isConnected ? previouslyFocused : fallbackFocus ?? settingsToggleRef.current)?.focus();
+    (previouslyFocused?.isConnected ? previouslyFocused : fallbackFocus ?? settingsToggleRef.current)?.focus({ preventScroll: true });
   }, []);
 
   const openHistory = useCallback(() => {
@@ -675,7 +675,7 @@ function App() {
 
   useEffect(() => {
     if (settingsOpen) {
-      const frame = window.requestAnimationFrame(() => settingsWorkspaceRef.current?.focus());
+      const frame = window.requestAnimationFrame(() => settingsWorkspaceRef.current?.focus({ preventScroll: true }));
       const handleKeyDown = (event: KeyboardEvent) => {
         if (event.key !== "Escape" || event.defaultPrevented) return;
         if (event.target instanceof Element && event.target.closest('[role="dialog"]')) return;
@@ -1651,7 +1651,6 @@ function App() {
         </div>
       </header>
 
-      <main className={`main-content ${settingsOpen ? "settings-main-content" : ""} ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""} ${usesInternalScrollLayout ? "pdf-main-content" : ""}`}>
         {settingsWorkspaceMounted && (
           <div
             className={`settings-workspace ${settingsOpen ? "settings-workspace-entering" : "settings-workspace-exiting"}`}
@@ -1678,6 +1677,7 @@ function App() {
             />
           </div>
         )}
+      <main inert={settingsOpen} className={`main-content ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""} ${usesInternalScrollLayout ? "pdf-main-content" : ""}`}>
         <div className={`pdf-persistent-host ${!settingsOpen && tab === "pdf" ? "is-active" : "is-inactive"}`}>
           <PdfView
             active={!settingsOpen && tab === "pdf"}

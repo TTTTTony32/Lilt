@@ -95,9 +95,11 @@ pub struct DictionaryInstallation {
 const PROMPT_COLLECTION_MIGRATION_SETTING: &str = "prompt_collection_v1";
 const BUILTIN_NATURAL_PROMPT_ID: &str = "builtin-natural";
 const BUILTIN_LITERAL_PROMPT_NAME: &str = "忠实直译";
-const BUILTIN_LITERAL_PROMPT_CONTENT: &str = "将用户提供的段落忠实翻译成目标语言，尽量保持原文的句式、语气、信息顺序和段落结构。只在目标语言语法要求下调整表达，不解释、不扩写，只输出译文。";
+const BUILTIN_LITERAL_PROMPT_CONTENT: &str = include_str!("../prompts/literal.txt");
+const PREVIOUS_LITERAL_PROMPT_CONTENT: &str = "将用户提供的段落忠实翻译成目标语言，尽量保持原文的句式、语气、信息顺序和段落结构。只在目标语言语法要求下调整表达，不解释、不扩写，只输出译文。";
 const BUILTIN_NATURAL_PROMPT_NAME: &str = "自然表达";
-const BUILTIN_NATURAL_PROMPT_CONTENT: &str = "将用户提供的段落重写成自然、流畅、符合目标语言习惯的文字，尽量准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出重写后的文字。";
+const BUILTIN_NATURAL_PROMPT_CONTENT: &str = include_str!("../prompts/natural.txt");
+const PREVIOUS_NATURAL_PROMPT_CONTENT: &str = "将用户提供的段落重写成自然、流畅、符合目标语言习惯的文字，尽量准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出重写后的文字。";
 const LEGACY_GENERAL_PROMPT_NAME: &str = "通用段落翻译";
 const LEGACY_GENERAL_PROMPT_CONTENT: &str = "你是一名严谨的专业译者。将用户提供的段落翻译成目标语言，保留原文事实、语气、段落结构和 Markdown 格式。不要添加原文没有的信息，只输出译文。";
 const LEGACY_NATURAL_PROMPT_CONTENT: &str = "将用户提供的段落翻译成自然、流畅、符合目标语言习惯的表达，同时准确保留原文含义、语气和段落结构。不要添加原文没有的信息，只输出译文。";
@@ -302,6 +304,7 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         .map_err(|error| format!("默认 Provider 初始化失败：{error}"))?;
 
     migrate_prompt_collection(connection)?;
+    upgrade_builtin_prompt_content(connection)?;
 
     connection
         .execute(
@@ -373,6 +376,7 @@ fn migrate_prompt_collection(connection: &Connection) -> Result<(), String> {
         &[LEGACY_GENERAL_PROMPT_NAME, BUILTIN_LITERAL_PROMPT_NAME],
         &[
             LEGACY_GENERAL_PROMPT_CONTENT,
+            PREVIOUS_LITERAL_PROMPT_CONTENT,
             BUILTIN_LITERAL_PROMPT_CONTENT,
         ],
     )?;
@@ -384,6 +388,7 @@ fn migrate_prompt_collection(connection: &Connection) -> Result<(), String> {
         &[BUILTIN_NATURAL_PROMPT_NAME],
         &[
             LEGACY_NATURAL_PROMPT_CONTENT,
+            PREVIOUS_NATURAL_PROMPT_CONTENT,
             BUILTIN_NATURAL_PROMPT_CONTENT,
         ],
     )?;
@@ -411,6 +416,28 @@ fn migrate_prompt_collection(connection: &Connection) -> Result<(), String> {
         .map_err(|error| format!("清理旧版内置 Prompt 失败：{error}"))?;
 
     set_setting(connection, PROMPT_COLLECTION_MIGRATION_SETTING, "1")
+}
+
+fn upgrade_builtin_prompt_content(connection: &Connection) -> Result<(), String> {
+    // Match stock text exactly: never replace a user's edited prompt or name.
+    for (id, previous, content) in [
+        (
+            DEFAULT_PROMPT_ID,
+            PREVIOUS_LITERAL_PROMPT_CONTENT,
+            BUILTIN_LITERAL_PROMPT_CONTENT,
+        ),
+        (
+            BUILTIN_NATURAL_PROMPT_ID,
+            PREVIOUS_NATURAL_PROMPT_CONTENT,
+            BUILTIN_NATURAL_PROMPT_CONTENT,
+        ),
+    ] {
+        connection.execute(
+            "UPDATE prompts SET content = ?1, version = version + 1 WHERE id = ?2 AND is_builtin = 1 AND content = ?3",
+            params![content, id, previous],
+        ).map_err(|error| format!("更新内置 Prompt 失败：{error}"))?;
+    }
+    Ok(())
 }
 
 fn ensure_builtin_prompt(
@@ -2436,6 +2463,37 @@ mod tests {
             .expect("edited builtin prompt should be readable");
         assert_eq!(natural.name, "我的自然");
         assert_eq!(natural.content, "已编辑");
+    }
+
+    #[test]
+    fn stock_prompt_upgrade_preserves_edits_and_is_idempotent() {
+        let connection = test_connection();
+        connection
+            .execute(
+                "UPDATE prompts SET content = ?1 WHERE id = ?2",
+                params![PREVIOUS_LITERAL_PROMPT_CONTENT, DEFAULT_PROMPT_ID],
+            )
+            .unwrap();
+        update_prompt(
+            &connection,
+            BUILTIN_NATURAL_PROMPT_ID,
+            "我的自然",
+            "我的翻译要求",
+        )
+        .unwrap();
+        let before = get_prompt(&connection, DEFAULT_PROMPT_ID).unwrap();
+        migrate(&connection).unwrap();
+        let literal = get_prompt(&connection, DEFAULT_PROMPT_ID).unwrap();
+        assert_eq!(literal.content, BUILTIN_LITERAL_PROMPT_CONTENT);
+        assert_eq!(literal.version, before.version + 1);
+        let natural = get_prompt(&connection, BUILTIN_NATURAL_PROMPT_ID).unwrap();
+        assert_eq!(natural.name, "我的自然");
+        assert_eq!(natural.content, "我的翻译要求");
+        migrate(&connection).unwrap();
+        assert_eq!(
+            get_prompt(&connection, DEFAULT_PROMPT_ID).unwrap().version,
+            literal.version
+        );
     }
 
     #[test]
