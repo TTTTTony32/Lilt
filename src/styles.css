@@ -322,7 +322,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .setting-line > span { display: flex; flex-direction: column; gap: 5px; }
 .setting-line strong { color: #59665a; font-size: 12px; font-weight: 600; }
 .setting-line small { color: #a0a29a; font-size: 10px; }
-.number-input { width: 86px; -moz-appearance: textfield; appearance: textfield; }
+.number-input { width: 72px; -moz-appearance: textfield; appearance: textfield; }
 .number-input::-webkit-outer-spin-button,
 .number-input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
 .settings-switch-line > .settings-switch { flex: 0 0 auto; flex-direction: row; gap: 0; }
@@ -331,7 +331,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .setting-line .settings-switch-input:focus { border: 0; box-shadow: none; outline: none; }
 .settings-switch-track { width: 42px; height: 24px; padding: 3px; display: flex; align-items: center; justify-content: flex-start; border-radius: 999px; background: #d8ded5; transition: background-color var(--motion-fast-duration) var(--motion-ease), outline-color var(--motion-fast-duration) var(--motion-ease); }
 .settings-switch-track > span { width: 18px; height: 18px; display: block; border-radius: 50%; background: #fffefb; box-shadow: 0 1px 4px rgba(48, 61, 50, .2); transition: transform var(--motion-fast-duration) var(--motion-ease); }
-.settings-switch-input:checked + .settings-switch-track { justify-content: flex-end; background: #66866c; }
+.settings-switch-input:checked + .settings-switch-track { background: #66866c; }
+.settings-switch-input:checked + .settings-switch-track > span { transform: translateX(18px); }
 .settings-switch-input:focus-visible + .settings-switch-track { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 3px; }
 .setting-line > .settings-range-control { position: relative; min-width: 0; flex: 0 1 280px; display: flex; flex-direction: row; align-items: center; gap: 10px; }
 .settings-range-input { width: 100%; min-width: 150px; height: 22px; padding: 0; border: 0; border-radius: 999px; outline: none; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; }
