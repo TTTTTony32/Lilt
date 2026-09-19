@@ -15,6 +15,12 @@ import {
   reducePdfPreflightWarning,
 } from "./lib/pdf-preflight";
 import { appendPdfJobLogMessage, reducePdfJobLog } from "./lib/pdf-job-log";
+import {
+  formatPdfTaskProgressDetail,
+  isPdfJobBusy,
+  jobStatusLabel,
+  progressPercent,
+} from "./lib/pdf-task-presentation";
 import type { PdfPreflightSample } from "./lib/pdf-reader-utils";
 import {
   PDF_JOB_EVENT_NAMES,
@@ -110,21 +116,25 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 interface PdfViewProps {
+  active: boolean;
   pdfEngine: PdfEngineRuntime;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
   onOpenPdfEngineSettings: () => void;
+  onOpenPdf: () => void;
 }
 
 export default function PdfView({
+  active,
   pdfEngine,
   pdfPreflightEnabled,
   pdfPreflightPageLimit,
   onPdfPreflightEnabledChange,
   onResourceDownloadPrompt,
   onOpenPdfEngineSettings,
+  onOpenPdf,
 }: PdfViewProps) {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -145,6 +155,7 @@ export default function PdfView({
   const startAttemptSequenceRef = useRef(0);
   const activeTaskIdRef = useRef<string | null>(null);
   const cancelTimeoutRef = useRef<number | null>(null);
+  const taskbarProgressKeyRef = useRef<string | null>(null);
 
   const updatePdfJob = useCallback((updater: (current: PdfJobUiState) => PdfJobUiState) => {
     setPdfJob((current) => {
@@ -369,6 +380,7 @@ export default function PdfView({
   const startPdfTranslation = useCallback(async (
     samples: PdfPreflightSample[] = [],
     preflightWarning: string | null = null,
+    pages: string | null = null,
   ) => {
     if (!selectedFile) return;
     if (!jobEventsReady) {
@@ -397,7 +409,7 @@ export default function PdfView({
       });
       return;
     }
-    if (activeTaskIdRef.current || startAttemptRef.current !== null || pdfJobRef.current.status === "starting") return;
+    if (activeTaskIdRef.current || startAttemptRef.current !== null || isPdfJobBusy(pdfJobRef.current.status)) return;
 
     const attempt = startAttemptSequenceRef.current + 1;
     startAttemptSequenceRef.current = attempt;
@@ -414,19 +426,27 @@ export default function PdfView({
     if (preflightWarning) {
       initialLogs = appendPdfJobLogMessage(initialLogs, "warning", "warning", preflightWarning);
     }
+    initialLogs = appendPdfJobLogMessage(
+      initialLogs,
+      "system",
+      "info",
+      pages ? `翻译页面：${pages}` : "翻译页面：全部页面",
+    );
     updatePdfJob(() => ({ ...emptyPdfJob(), status: "starting", message: null, logs: initialLogs }));
     try {
+      const pdfOptions = {
+        source_language: "en",
+        target_language: "zh-CN",
+        output_mode: "bilingual",
+        metadata: { file_name: selectedFile.fileName },
+        preflight_enabled: pdfPreflightEnabled,
+        preflight_page_limit: pdfPreflightPageLimit,
+        samples: pdfPreflightEnabled ? samples : [],
+        ...(pages ? { pages } : {}),
+      };
       const commandPromise = invokeCommand<unknown>("start_pdf_translation", {
         filePath: selectedFile.path,
-        pdfOptions: {
-          source_language: "en",
-          target_language: "zh-CN",
-          output_mode: "bilingual",
-          metadata: { file_name: selectedFile.fileName },
-          preflight_enabled: pdfPreflightEnabled,
-          preflight_page_limit: pdfPreflightPageLimit,
-          samples: pdfPreflightEnabled ? samples : [],
-        },
+        pdfOptions,
       });
       void commandPromise.then((lateRaw) => {
         if (!disposedRef.current && startAttemptRef.current === attempt) return;
@@ -546,6 +566,30 @@ export default function PdfView({
   }, [clearPdfTaskRefs]);
 
   useEffect(() => {
+    const percentage = progressPercent(pdfJob.progress);
+    const busy = isPdfJobBusy(pdfJob.status);
+    const state = busy ? (percentage === null ? "indeterminate" : "normal") : "none";
+    const value = percentage ?? 0;
+    const key = `${state}:${value}`;
+    if (taskbarProgressKeyRef.current === key) return;
+    taskbarProgressKeyRef.current = key;
+    void invokeCommand("set_main_taskbar_progress", {
+      state,
+      value,
+    }).catch(() => undefined);
+  }, [pdfJob.progress, pdfJob.status]);
+
+  useEffect(() => () => {
+    void invokeCommand("set_main_taskbar_progress", { state: "none", value: 0 }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!active) {
+      setDragging(false);
+    }
+  }, [active]);
+
+  useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     setJobEventsError(null);
@@ -585,7 +629,7 @@ export default function PdfView({
   }, [handlePdfJobEvent]);
 
   useEffect(() => {
-    if (engineStatusLoading || !engineStatus || enginePromptShownRef.current || (engineStatus.status !== "missing" && engineStatus.status !== "invalid")) return;
+    if (!active || engineStatusLoading || !engineStatus || enginePromptShownRef.current || (engineStatus.status !== "missing" && engineStatus.status !== "invalid")) return;
     enginePromptShownRef.current = true;
     onResourceDownloadPrompt({
       resource: "pdf-engine",
@@ -595,7 +639,7 @@ export default function PdfView({
       failedLabel: "前往关于",
       onStart: onOpenPdfEngineSettings,
     });
-  }, [engineStatus, engineStatusLoading, onOpenPdfEngineSettings, onResourceDownloadPrompt]);
+  }, [active, engineStatus, engineStatusLoading, onOpenPdfEngineSettings, onResourceDownloadPrompt]);
 
   useEffect(() => {
     let disposed = false;
@@ -604,7 +648,7 @@ export default function PdfView({
     const initialiseDragDrop = async () => {
       try {
         const next = await getCurrentWebview().onDragDropEvent((event) => {
-          if (disposed) return;
+          if (disposed || !active) return;
           switch (event.payload.type) {
             case "enter":
             case "over":
@@ -630,7 +674,7 @@ export default function PdfView({
       disposed = true;
       unlisten?.();
     };
-  }, [handleDrop]);
+  }, [active, handleDrop]);
 
   const chooseFile = useCallback(async () => {
     setError(null);
@@ -669,8 +713,17 @@ export default function PdfView({
     }
   }, []);
 
+  const pdfJobBusy = isPdfJobBusy(pdfJob.status);
+  const progressValue = progressPercent(pdfJob.progress);
+  const progressDetail = formatPdfTaskProgressDetail(
+    pdfJob,
+    pdfJob.preflight ?? createEmptyPdfPreflightState(),
+    pdfPreflightEnabled,
+  );
+
   return (
-    <section className={`page-section pdf-page ${selectedFile ? "pdf-reader-page" : ""}`}>
+    <>
+      <section className={`page-section pdf-page ${selectedFile ? "pdf-reader-page" : ""} ${active ? "" : "pdf-page-persisted-inactive"}`} aria-hidden={!active}>
       {!selectedFile && (
         <div className="page-heading">
           <div className="page-title-block">
@@ -707,7 +760,7 @@ export default function PdfView({
               pdfPreflightEnabled={pdfPreflightEnabled}
               pdfPreflightPageLimit={pdfPreflightPageLimit}
               onPdfPreflightEnabledChange={onPdfPreflightEnabledChange}
-              onStartTranslation={(samples, warning) => void startPdfTranslation(samples, warning)}
+              onStartTranslation={(samples, warning, pages) => void startPdfTranslation(samples, warning, pages)}
               onCancelTranslation={() => void cancelPdfTranslation()}
               onOpenOutputDirectory={(path) => void openOutputDirectory(path)}
             />
@@ -734,6 +787,19 @@ export default function PdfView({
 
         </>
       )}
-    </section>
+      </section>
+      {!active && selectedFile && pdfJobBusy && (
+        <button className="pdf-translation-floating" type="button" onClick={onOpenPdf} aria-label="打开 PDF 翻译任务详情">
+          <span className="pdf-translation-floating-heading">
+            <strong>PDF 全文翻译</strong>
+            <span>{jobStatusLabel(pdfJob.status)}</span>
+          </span>
+          <span className="pdf-translation-floating-track" aria-hidden="true">
+            {progressValue !== null && <span style={{ width: `${progressValue}%` }} />}
+          </span>
+          <span className="pdf-translation-floating-detail">{progressDetail}</span>
+        </button>
+      )}
+    </>
   );
 }

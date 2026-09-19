@@ -338,6 +338,7 @@ pub fn run() {
             pdf_engine::prepare_pdf_engine,
             pdf_jobs::start_pdf_translation,
             pdf_jobs::cancel_pdf_translation,
+            set_main_taskbar_progress,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lilt");
@@ -402,6 +403,83 @@ fn set_main_taskbar_icon(window: &WebviewWindow) -> Result<(), String> {
     // WM_SETICON 不会复制 HICON。Windows 句柄需保持到进程结束，避免任务栏重绘时失效。
     let _ = icon;
     Ok(())
+}
+
+#[tauri::command]
+fn set_main_taskbar_progress(
+    window: WebviewWindow,
+    state: String,
+    value: f64,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("任务栏进度只允许主窗口设置".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        return set_windows_taskbar_progress(&window, &state, value);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (state, value);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn set_windows_taskbar_progress(
+    window: &WebviewWindow,
+    state: &str,
+    value: f64,
+) -> Result<(), String> {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{
+        ITaskbarList3, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
+    };
+
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("获取主窗口句柄失败：{error}"))?;
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    const RPC_E_CHANGED_MODE: i32 = -2_147_417_850;
+    if init.is_err() && init.0 != RPC_E_CHANGED_MODE {
+        return Err(format!("初始化 Windows COM 失败：0x{:08X}", init.0 as u32));
+    }
+    let should_uninitialize = init.is_ok();
+
+    let result = (|| {
+        let taskbar_clsid = windows::core::GUID::from_u128(0x56fdf344_fd6d_11d0_958a_006097c9a090);
+        let taskbar: ITaskbarList3 =
+            unsafe { CoCreateInstance(&taskbar_clsid, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|error| format!("创建 Windows 任务栏对象失败：{error}"))?;
+        unsafe { taskbar.HrInit() }
+            .map_err(|error| format!("初始化 Windows 任务栏对象失败：{error}"))?;
+
+        let flag = match state {
+            "none" => TBPF_NOPROGRESS,
+            "indeterminate" => TBPF_INDETERMINATE,
+            "normal" => TBPF_NORMAL,
+            "error" => TBPF_ERROR,
+            _ => return Err("无效的任务栏进度状态".to_string()),
+        };
+        unsafe { taskbar.SetProgressState(hwnd, flag) }
+            .map_err(|error| format!("设置 Windows 任务栏进度状态失败：{error}"))?;
+        if state == "normal" {
+            let completed = (value.clamp(0.0, 100.0) * 100.0).round() as u64;
+            unsafe { taskbar.SetProgressValue(hwnd, completed, 10_000) }
+                .map_err(|error| format!("设置 Windows 任务栏进度值失败：{error}"))?;
+        }
+        Ok(())
+    })();
+
+    if should_uninitialize {
+        unsafe { CoUninitialize() };
+    }
+    result
 }
 
 fn initialise_database(data_dir: &PathBuf) -> Result<(), String> {

@@ -597,6 +597,11 @@ function App() {
     setSettingsOpen(false);
   }, []);
 
+  const openPdf = useCallback(() => {
+    if (settingsOpen) requestSettingsClose();
+    setTab("pdf");
+  }, [requestSettingsClose, settingsOpen]);
+
   const openSettingsAt = useCallback((target: SettingsNavigationTarget) => {
     if (!settingsOpen) {
       const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1644,7 +1649,19 @@ function App() {
             />
           </div>
         )}
-        {!settingsOpen && (
+        <div className={`pdf-persistent-host ${!settingsOpen && tab === "pdf" ? "is-active" : "is-inactive"}`}>
+          <PdfView
+            active={!settingsOpen && tab === "pdf"}
+            pdfEngine={pdfEngine}
+            pdfPreflightEnabled={snapshot.settings.pdfPreflightEnabled}
+            pdfPreflightPageLimit={snapshot.settings.pdfPreflightPageLimit}
+            onPdfPreflightEnabledChange={(enabled) => { void handlePdfPreflightEnabledChange(enabled); }}
+            onResourceDownloadPrompt={openResourceDownloadPrompt}
+            onOpenPdfEngineSettings={openPdfEngineSettings}
+            onOpenPdf={openPdf}
+          />
+        </div>
+        {!settingsOpen && tab !== "pdf" && (
           <PageTransition activeKey={tab}>
             <div className="page-view" key={tab}>
               {tab === "translate" && (
@@ -1692,16 +1709,6 @@ function App() {
                   onPersonalDictionaryChanged={handlePersonalDictionaryChanged}
                   onOpenPersonalDictionary={openPersonalDictionary}
                   onOpenDictionaryAbout={openDictionaryAbout}
-                />
-              )}
-              {tab === "pdf" && (
-                <PdfView
-                  pdfEngine={pdfEngine}
-                  pdfPreflightEnabled={snapshot.settings.pdfPreflightEnabled}
-                  pdfPreflightPageLimit={snapshot.settings.pdfPreflightPageLimit}
-                  onPdfPreflightEnabledChange={(enabled) => { void handlePdfPreflightEnabledChange(enabled); }}
-                  onResourceDownloadPrompt={openResourceDownloadPrompt}
-                  onOpenPdfEngineSettings={openPdfEngineSettings}
                 />
               )}
               {tab === "personal" && (

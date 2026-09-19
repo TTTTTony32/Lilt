@@ -1620,6 +1620,47 @@ fn validate_output_pdf(file_path: &str, job_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_pdf_page_range(value: Option<&Value>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(raw) = value.as_str() else {
+        return Err("PDF 页面范围必须是字符串".to_string());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let parse_page = |part: &str| -> Result<u64, String> {
+        let part = part.trim();
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("PDF 页面范围必须是单个正整数或 x-y 格式".to_string());
+        }
+        let page = part
+            .parse::<u64>()
+            .map_err(|_| "PDF 页面范围必须是单个正整数或 x-y 格式".to_string())?;
+        if page == 0 {
+            return Err("PDF 页面范围必须从第 1 页开始".to_string());
+        }
+        Ok(page)
+    };
+
+    if let Some((start_raw, end_raw)) = trimmed.split_once('-') {
+        let start = parse_page(start_raw)?;
+        let end = parse_page(end_raw)?;
+        if start > end {
+            return Err("PDF 页面范围的起始页不能大于结束页".to_string());
+        }
+        return Ok(Some(format!("{start}-{end}")));
+    }
+
+    Ok(Some(parse_page(trimmed)?.to_string()))
+}
+
 fn normalize_pdf_options(options: Value) -> Result<Value, String> {
     let mut object = options
         .as_object()
@@ -1648,6 +1689,14 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
         "preflight_page_limit".to_string(),
         Value::Number(preflight_page_limit.into()),
     );
+    match normalize_pdf_page_range(object.get("pages"))? {
+        Some(pages) => {
+            object.insert("pages".to_string(), Value::String(pages));
+        }
+        None => {
+            object.remove("pages");
+        }
+    }
     Ok(Value::Object(object))
 }
 
@@ -1656,9 +1705,9 @@ mod tests {
     use super::{
         PdfPreflightCompletedEvent, PreflightKey, PreflightRegistry, build_translation_response,
         commit_pdf_persistence, constrained_abbreviation_pairs, normalize_pdf_options,
-        quality_warnings, request_source_text, translate_pdf_preflight_with_api_key,
-        translate_pdf_request_inner, translate_pdf_request_with_api_key, validate_input_pdf,
-        validate_output_pdf,
+        normalize_pdf_page_range, quality_warnings, request_source_text,
+        translate_pdf_preflight_with_api_key, translate_pdf_request_inner,
+        translate_pdf_request_with_api_key, validate_input_pdf, validate_output_pdf,
     };
     use crate::AppState;
     use crate::StartupRuntime;
@@ -1861,6 +1910,30 @@ mod tests {
         let options = normalize_pdf_options(json!({"preflight_page_limit": 0}))
             .expect("options should be an object");
         assert_eq!(options["preflight_page_limit"], 1);
+    }
+
+    #[test]
+    fn page_ranges_are_normalized_and_invalid_values_are_rejected() {
+        assert_eq!(normalize_pdf_page_range(None).unwrap(), None);
+        assert_eq!(
+            normalize_pdf_page_range(Some(&json!(" 3 "))).unwrap(),
+            Some("3".to_string())
+        );
+        assert_eq!(
+            normalize_pdf_page_range(Some(&json!("3 - 7"))).unwrap(),
+            Some("3-7".to_string())
+        );
+        assert_eq!(normalize_pdf_page_range(Some(&json!(""))).unwrap(), None);
+        assert!(normalize_pdf_page_range(Some(&json!("0"))).is_err());
+        assert!(normalize_pdf_page_range(Some(&json!("7-3"))).is_err());
+        assert!(normalize_pdf_page_range(Some(&json!("3,7"))).is_err());
+        assert!(normalize_pdf_page_range(Some(&json!("+3"))).is_err());
+        assert!(normalize_pdf_page_range(Some(&json!(3))).is_err());
+
+        let options = normalize_pdf_options(json!({"pages": " 3 - 7 "})).unwrap();
+        assert_eq!(options["pages"], "3-7");
+        let options = normalize_pdf_options(json!({"pages": ""})).unwrap();
+        assert!(options.get("pages").is_none());
     }
 
     #[test]

@@ -108,6 +108,19 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .main-content.translate-main-content { overflow-y: hidden; overscroll-behavior: none; }
 .main-content.bounded-list-main-content { overflow-y: hidden; overscroll-behavior: none; }
 .main-content.pdf-main-content { overflow-y: hidden; overscroll-behavior: none; }
+.pdf-persistent-host { min-width: 0; min-height: 0; }
+.pdf-persistent-host.is-active { position: relative; z-index: 1; width: 100%; height: 100%; }
+.pdf-persistent-host.is-inactive { position: absolute; z-index: 5; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.pdf-page-persisted-inactive { visibility: hidden; pointer-events: none; }
+.pdf-translation-floating { position: fixed; z-index: 6; left: 18px; bottom: 18px; width: min(320px, calc(100vw - 36px)); padding: 11px 12px 10px; display: grid; gap: 7px; border: 1px solid #cbdac8; border-radius: 9px; color: #5d705f; background: rgba(249, 251, 246, .97); box-shadow: 0 10px 25px rgba(48, 61, 50, .14); text-align: left; pointer-events: auto; transition: border-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease), transform var(--motion-fast-duration) var(--motion-ease); }
+.pdf-translation-floating:hover { border-color: #9eb7a1; box-shadow: 0 12px 28px rgba(48, 61, 50, .18); transform: translateY(-1px); }
+.pdf-translation-floating:focus-visible { outline: 2px solid rgba(101, 137, 108, .5); outline-offset: 2px; }
+.pdf-translation-floating-heading { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.pdf-translation-floating-heading strong { color: #526456; font-size: 11px; font-weight: 600; }
+.pdf-translation-floating-heading span { color: #8a978b; font-size: 10px; }
+.pdf-translation-floating-track { height: 4px; overflow: hidden; border-radius: 4px; background: #e1e8df; }
+.pdf-translation-floating-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
+.pdf-translation-floating-detail { min-width: 0; overflow: hidden; color: #778479; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .bounded-list-main-content .page-transition-stack,
 .bounded-list-main-content .page-transition-layer-incoming,
 .bounded-list-main-content .page-view { height: 100%; min-height: 0; }
@@ -347,6 +360,11 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-task-panel-topbar { min-width: 0; min-height: 62px; padding: 9px 12px 9px 16px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; border-bottom: 1px solid #e2e4dc; }
 .pdf-task-panel-progress { min-width: 0; }
 .pdf-task-panel-topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.pdf-page-range-control { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; color: #68786b; font-size: 10px; }
+.pdf-page-range-control span { color: #89968b; }
+.pdf-page-range-control input { width: 58px; height: 28px; padding: 0 7px; border: 1px solid #d6dfd3; border-radius: 6px; color: #5d705f; background: #fdfefb; font-size: 10px; text-align: center; }
+.pdf-page-range-control input::placeholder { color: #aab1a9; }
+.pdf-page-range-control input:focus { border-color: #9fb1a0; box-shadow: 0 0 0 2px rgba(131, 169, 142, .12); outline: none; }
 .pdf-preflight-toggle { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #d6dfd3; border-radius: 6px; color: #627365; background: #f0f5ed; font-size: 10px; cursor: pointer; }
 .pdf-preflight-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #66866c; }
 .pdf-task-details-toggle { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 1px solid #d6dfd3; border-radius: 6px; color: #718473; background: transparent; cursor: pointer; }
@@ -698,6 +716,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .pdf-task-panel-progress { grid-column: 1 / -1; grid-row: 2; }
   .pdf-task-panel-topbar-actions { grid-row: 1; }
   .pdf-task-log { height: 180px; }
+  .pdf-translation-floating { left: 12px; bottom: 12px; width: min(300px, calc(100vw - 24px)); }
   .pdf-task-panel-heading { align-items: flex-start; }
   .pdf-file-card { align-items: flex-start; flex-direction: column; }
   .pdf-file-summary { width: 100%; }

@@ -35,10 +35,15 @@ import {
 } from "./lib/pdf-reader";
 import { invokeCommand } from "./lib/tauri";
 import { createEmptyPdfPreflightState } from "./lib/pdf-preflight";
+import { parsePdfPageRange } from "./lib/pdf-page-range";
+import {
+  formatPdfTaskProgressDetail,
+  jobStatusLabel,
+  progressPercent,
+} from "./lib/pdf-task-presentation";
 import type {
   PdfJobLogKind,
   PdfJobUiState,
-  PdfPreflightState,
 } from "./types/contracts";
 
 type PdfReaderStatus = "loading" | "ready" | "error";
@@ -56,7 +61,7 @@ interface PdfReaderProps {
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
-  onStartTranslation: (samples: PdfPreflightSample[], warning: string | null) => void;
+  onStartTranslation: (samples: PdfPreflightSample[], warning: string | null, pages: string | null) => void;
   onCancelTranslation: () => void;
   onOpenOutputDirectory: (path: string) => void;
 }
@@ -76,65 +81,6 @@ interface PageDimensions {
   height: number;
 }
 
-function formatStageName(stage: string): string {
-  return stage
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function formatPdfStage(stage: string | null): string {
-  if (!stage) return "等待 Worker";
-  const normalized = stage.toLowerCase().replace(/[-\s]+/g, "_");
-  const label = formatStageName(stage);
-  if (normalized.includes("babeldoc") || /parse|layout|render|typeset|output|finish/.test(normalized)) {
-    return `BabelDOC · ${label}`;
-  }
-  return `Worker · ${label}`;
-}
-
-function progressPercent(progress: { fraction: number | null; current: number | null; total: number | null } | null): number | null {
-  if (!progress) return null;
-  if (progress.fraction !== null) return Math.max(0, Math.min(100, Math.round(progress.fraction * 100)));
-  if (progress.current !== null && progress.total !== null && progress.total > 0) {
-    return Math.max(0, Math.min(100, Math.round((progress.current / progress.total) * 100)));
-  }
-  return null;
-}
-
-function formatPdfTaskProgressStage(stage: string | null): string {
-  if (!stage) return "等待翻译";
-  const normalized = stage.toLowerCase().replace(/[-\s]+/g, "_");
-  if (normalized.includes("preflight")) return "预检";
-  if (/(translate|translation|segment)/.test(normalized)) return "分段翻译中";
-  if (/(assemble|render|output|finish)/.test(normalized)) return "生成 PDF";
-  return formatPdfStage(stage);
-}
-
-function formatPdfTaskProgressDetail(
-  job: PdfJobUiState,
-  preflight: PdfPreflightState,
-  preflightEnabled: boolean,
-): string {
-  if (preflightEnabled && preflight.status === "running") {
-    const phase = preflight.responsePhase === "waiting"
-      ? "等待模型响应"
-      : preflight.responsePhase === "thinking"
-        ? "模型思考中"
-        : preflight.responsePhase === "streaming"
-          ? "生成预检结果"
-          : "分析文档";
-    return `预检 · ${phase}`;
-  }
-  if (job.progress) {
-    const stage = formatPdfTaskProgressStage(job.progress.stage);
-    if (job.progress.current !== null && job.progress.total !== null) {
-      return `${stage} · ${job.progress.current}/${job.progress.total}`;
-    }
-    return job.progress.message ? `${stage} · ${job.progress.message}` : stage;
-  }
-  return jobStatusLabel(job.status);
-}
-
 function pdfJobLogKindLabel(kind: PdfJobLogKind): string {
   switch (kind) {
     case "system": return "系统";
@@ -147,18 +93,6 @@ function pdfJobLogKindLabel(kind: PdfJobLogKind): string {
   }
 }
 
-function jobStatusLabel(status: PdfJobUiState["status"]): string {
-  switch (status) {
-    case "starting": return "正在启动 Worker";
-    case "running": return "翻译进行中";
-    case "cancelling": return "正在取消";
-    case "completed": return "翻译完成";
-    case "cancelled": return "已取消";
-    case "failed": return "翻译失败";
-    default: return "等待翻译";
-  }
-}
-
 interface PdfTaskPanelProps {
   readerStatus: PdfReaderStatus;
   job: PdfJobUiState;
@@ -167,6 +101,8 @@ interface PdfTaskPanelProps {
   translationEnabled: boolean;
   pdfPreflightEnabled: boolean;
   preflightSampling: boolean;
+  pageRange: string;
+  onPageRangeChange: (value: string) => void;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onStartTranslation: () => void;
   onCancelTranslation: () => void;
@@ -181,6 +117,8 @@ function PdfTaskPanel({
   translationEnabled,
   pdfPreflightEnabled,
   preflightSampling,
+  pageRange,
+  onPageRangeChange,
   onPdfPreflightEnabledChange,
   onStartTranslation,
   onCancelTranslation,
@@ -242,6 +180,17 @@ function PdfTaskPanel({
           </div>
         </div>
         <div className="pdf-task-panel-topbar-actions">
+          <label className="pdf-page-range-control">
+            <span>页面</span>
+            <input
+              value={pageRange}
+              onChange={(event) => onPageRangeChange(event.target.value)}
+              disabled={jobBusy || preflightSampling}
+              placeholder="全部"
+              aria-label="翻译页面范围"
+              inputMode="text"
+            />
+          </label>
           <label className="pdf-preflight-toggle">
             <input
               type="checkbox"
@@ -500,6 +449,7 @@ export default function PdfReader({
   const [availableWidth, setAvailableWidth] = useState(0);
   const [scrollRoot, setScrollRoot] = useState<HTMLDivElement | null>(null);
   const [preflightSampling, setPreflightSampling] = useState(false);
+  const [pageRange, setPageRange] = useState("");
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const documentRef = useRef<PDFDocumentProxy | null>(null);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
@@ -559,6 +509,10 @@ export default function PdfReader({
       void document?.cleanup().catch(() => undefined);
     };
   }, [file.path, retryToken]);
+
+  useEffect(() => {
+    setPageRange("");
+  }, [file.path]);
 
   useEffect(() => {
     if (!scrollRoot) return;
@@ -647,25 +601,31 @@ export default function PdfReader({
   ), [totalPages]);
 
   const handleStartTranslation = useCallback(async () => {
+    const pageSelection = parsePdfPageRange(pageRange, pdfDocument?.numPages ?? null);
+    if (pageSelection.error) {
+      setError(`翻译页面范围无效：${pageSelection.error}`);
+      return;
+    }
+    setError(null);
     if (!pdfPreflightEnabled) {
-      onStartTranslation([], null);
+      onStartTranslation([], null, pageSelection.pages);
       return;
     }
     if (!pdfDocument) {
-      onStartTranslation([], "PDF 文档尚未加载完成，预检将跳过文本采样并继续翻译。");
+      onStartTranslation([], "PDF 文档尚未加载完成，预检将跳过文本采样并继续翻译。", pageSelection.pages);
       return;
     }
     setPreflightSampling(true);
     try {
       const result = await collectPdfPreflightSamples(pdfDocument, pdfPreflightPageLimit);
-      onStartTranslation(result.samples, result.warning);
+      onStartTranslation(result.samples, result.warning, pageSelection.pages);
     } catch (reason) {
       const detail = reason instanceof Error && reason.message ? `：${reason.message}` : "";
-      onStartTranslation([], `PDF 文本采样失败${detail}，将继续执行翻译。`);
+      onStartTranslation([], `PDF 文本采样失败${detail}，将继续执行翻译。`, pageSelection.pages);
     } finally {
       setPreflightSampling(false);
     }
-  }, [onStartTranslation, pdfDocument, pdfPreflightEnabled, pdfPreflightPageLimit]);
+  }, [onStartTranslation, pageRange, pdfDocument, pdfPreflightEnabled, pdfPreflightPageLimit]);
 
   return (
     <section className="pdf-reader-shell" aria-label="PDF 阅读器">
@@ -712,6 +672,8 @@ export default function PdfReader({
         translationEnabled={translationEnabled && !preflightSampling}
         pdfPreflightEnabled={pdfPreflightEnabled}
         preflightSampling={preflightSampling}
+        pageRange={pageRange}
+        onPageRangeChange={setPageRange}
         onPdfPreflightEnabledChange={onPdfPreflightEnabledChange}
         onStartTranslation={() => void handleStartTranslation()}
         onCancelTranslation={onCancelTranslation}
