@@ -150,7 +150,6 @@ struct PdfTranslationPersistence {
     glossary_version: i64,
     cache_enabled: bool,
     cache_max_bytes: i64,
-    history_retention: i64,
     cache_hit: bool,
     index_examples: bool,
 }
@@ -1332,7 +1331,6 @@ fn make_pdf_persistence(
         glossary_version: prepared.glossary_version,
         cache_enabled: prepared.cache_enabled,
         cache_max_bytes: prepared.cache_max_bytes,
-        history_retention: prepared.history_retention,
         cache_hit,
         index_examples: request.segments.len() == 1,
     }
@@ -1350,7 +1348,6 @@ fn commit_pdf_persistence(
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
     let mut cache_max_bytes = None;
-    let mut history_retention = None;
     for record in records {
         if record.cache_enabled && !record.cache_hit {
             let cache = crate::db::CacheRecord {
@@ -1370,24 +1367,9 @@ fn commit_pdf_persistence(
             }
             cache_max_bytes = Some(record.cache_max_bytes);
         }
-        let history = crate::db::HistoryRecord {
-            source_text: &record.source_text,
-            translated_text: &record.translated_text,
-            source_language: &record.source_language,
-            target_language: &record.target_language,
-            provider: &record.provider,
-            prompt_id: &record.prompt_id,
-            glossary_version: record.glossary_version,
-            cache_hit: record.cache_hit,
-        };
-        crate::db::insert_history(&connection, &history)?;
-        history_retention = Some(record.history_retention);
     }
     if let Some(max_bytes) = cache_max_bytes {
         crate::db::prune_cache(&connection, max_bytes)?;
-    }
-    if let Some(retention) = history_retention {
-        crate::db::prune_history(&connection, retention)?;
     }
     Ok(())
 }
@@ -2083,6 +2065,20 @@ mod tests {
             assert_eq!(history_count, 0);
         }
         commit_pdf_persistence(&state, std::slice::from_ref(&persistence)).unwrap();
+        {
+            let connection = state.database.lock().unwrap();
+            assert!(
+                crate::db::find_cache(&connection, &persistence.cache_key)
+                    .unwrap()
+                    .is_some()
+            );
+            let history_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM translation_history", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(history_count, 0);
+        }
         let response = result.response;
         assert_eq!(
             response.outcome,
