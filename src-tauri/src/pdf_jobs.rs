@@ -304,6 +304,33 @@ pub fn cancel_pdf_translation(state: State<'_, AppState>, task_id: String) -> Re
     Ok(true)
 }
 
+pub(crate) fn shutdown_for_update(state: &AppState) {
+    let handles = match state.pdf_jobs.lock() {
+        Ok(jobs) => jobs.values().cloned().collect::<Vec<_>>(),
+        Err(_) => {
+            diagnostics::error(
+                "pdf_translation.update_shutdown_failed reason=job_state_lock_poisoned",
+            );
+            return;
+        }
+    };
+
+    for handle in handles {
+        handle.cancellation.cancel();
+        if let Err(error) = handle.session.cancel("app_update") {
+            diagnostics::warn(format!(
+                "pdf_translation.update_shutdown_cancel_failed error={error}"
+            ));
+        }
+        handle.session.close_writer();
+        wait_for_worker_exit(&handle.session);
+    }
+
+    if let Ok(mut jobs) = state.pdf_jobs.lock() {
+        jobs.clear();
+    }
+}
+
 fn run_job_loop(
     app: AppHandle,
     state: AppState,

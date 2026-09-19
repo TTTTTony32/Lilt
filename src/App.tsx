@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { ArrowLeft, Check, ChevronDown, Copy, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
@@ -18,7 +19,7 @@ import { DownloadActivityStack } from "./components/DownloadActivityStack";
 import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./components/ResourceDownloadDialog";
 import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
 import { usePdfEngineRuntime, type PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
-import { isReleaseNewerThan, selectLatestStableRelease, type GitHubReleaseSummary } from "./lib/release-version";
+import { summarizeUpdaterUpdate, type GitHubReleaseSummary } from "./lib/release-version";
 import {
   downloadActivityKey,
   downloadActivityReducer,
@@ -113,7 +114,6 @@ const LANGUAGE_OPTIONS = [
 
 const APP_VERSION = packageJson.version;
 const GITHUB_URL = "https://github.com/TTTTTony32/Lilt";
-const GITHUB_RELEASES_API_URL = "https://api.github.com/repos/TTTTTony32/Lilt/releases?per_page=100";
 const DEVELOPER_EMAIL = "imtony32@gmail.com";
 
 function openExternalUrl(url: string) {
@@ -256,6 +256,7 @@ function PageTransition({ activeKey, children }: { activeKey: string; children: 
 type DataTransferMode = "personalExport" | "glossaryExport" | "glossaryImport";
 type DataTransferStatus = "selecting" | "processing" | "success" | "empty" | "cancelled" | "error";
 type ToastKind = "error" | "notice";
+type ReleaseUpdateStatus = "ready" | "downloading" | "installing" | "failed";
 type AppToast = { message: string; kind: ToastKind };
 type ShowToast = (message: string, kind?: ToastKind) => void;
 
@@ -375,6 +376,10 @@ function App() {
   const [releaseNoticeMounted, setReleaseNoticeMounted] = useState(false);
   const [releaseCheckMessage, setReleaseCheckMessage] = useState<string | null>(null);
   const [releaseCheckPending, setReleaseCheckPending] = useState(false);
+  const [releaseUpdateStatus, setReleaseUpdateStatus] = useState<ReleaseUpdateStatus>("ready");
+  const [releaseDownloadBytes, setReleaseDownloadBytes] = useState(0);
+  const [releaseDownloadTotal, setReleaseDownloadTotal] = useState<number | null>(null);
+  const [releaseUpdateError, setReleaseUpdateError] = useState<string | null>(null);
   const [appToast, setAppToast] = useState<AppToast | null>(null);
   const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const [downloadActivityState, dispatchDownloadActivity] = useReducer(
@@ -407,7 +412,10 @@ function App() {
   const dataTransferReturnFocusRef = useRef<HTMLElement | null>(null);
   const closeDialogReturnFocusRef = useRef<HTMLElement | null>(null);
   const downloadActivityTimersRef = useRef(new Map<string, number>());
-  const releaseCheckControllerRef = useRef<AbortController | null>(null);
+  const pendingUpdateRef = useRef<Update | null>(null);
+  const releaseCheckGenerationRef = useRef(0);
+  const releaseCheckPendingRef = useRef(false);
+  const releaseInstallInProgressRef = useRef(false);
   const releaseCheckToastTimerRef = useRef<number | null>(null);
   const appToastTimerRef = useRef<number | null>(null);
 
@@ -440,40 +448,49 @@ function App() {
   }, []);
 
   const checkForUpdates = useCallback(async (source: "startup" | "manual") => {
-    releaseCheckControllerRef.current?.abort();
-    const controller = new AbortController();
-    releaseCheckControllerRef.current = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 8000);
+    if (releaseCheckPendingRef.current || releaseInstallInProgressRef.current) return;
+    releaseCheckPendingRef.current = true;
+    const generation = releaseCheckGenerationRef.current;
 
     if (source === "manual") setReleaseCheckPending(true);
 
     try {
-      const response = await fetch(GITHUB_RELEASES_API_URL, {
-        headers: { Accept: "application/vnd.github+json" },
-        signal: controller.signal,
-      });
-      if (!response.ok) {
+      const update = await check({ timeout: 8000 });
+      if (generation !== releaseCheckGenerationRef.current) {
+        if (update) await update.close().catch(() => undefined);
+        return;
+      }
+      if (!update) {
+        if (source === "manual") showReleaseCheckMessage("当前已是最新版本");
+        return;
+      }
+
+      const latest = summarizeUpdaterUpdate(update);
+      if (!latest) {
+        await update.close().catch(() => undefined);
         if (source === "manual") showReleaseCheckMessage("检查更新失败，请稍后重试");
         return;
       }
 
-      const latest = selectLatestStableRelease(await response.json());
-      if (!latest) {
-        if (source === "manual") showReleaseCheckMessage("暂未找到可用的稳定版本");
-        return;
+      const previousUpdate = pendingUpdateRef.current;
+      pendingUpdateRef.current = update;
+      if (previousUpdate && previousUpdate !== update) {
+        void previousUpdate.close().catch(() => undefined);
       }
-      if (!isReleaseNewerThan(latest, APP_VERSION)) {
-        if (source === "manual") showReleaseCheckMessage("当前已是最新版本");
-        return;
-      }
+      setReleaseUpdateStatus("ready");
+      setReleaseDownloadBytes(0);
+      setReleaseDownloadTotal(null);
+      setReleaseUpdateError(null);
       showReleaseNotice(latest);
     } catch {
-      if (source === "manual") showReleaseCheckMessage("检查更新失败，请稍后重试");
+      if (generation === releaseCheckGenerationRef.current && source === "manual") {
+        showReleaseCheckMessage("检查更新失败，请稍后重试");
+      }
     } finally {
-      window.clearTimeout(timeout);
-      const isCurrentCheck = releaseCheckControllerRef.current === controller;
-      if (isCurrentCheck) releaseCheckControllerRef.current = null;
-      if (source === "manual" && isCurrentCheck) setReleaseCheckPending(false);
+      if (generation === releaseCheckGenerationRef.current) {
+        releaseCheckPendingRef.current = false;
+        if (source === "manual") setReleaseCheckPending(false);
+      }
     }
   }, [showReleaseCheckMessage, showReleaseNotice]);
 
@@ -483,9 +500,6 @@ function App() {
 
   useEffect(() => {
     void checkForUpdates("startup");
-    return () => {
-      releaseCheckControllerRef.current?.abort();
-    };
   }, [checkForUpdates]);
 
   const scheduleDownloadActivityRemoval = useCallback((resource: DownloadActivity["resource"], operationId: string, delayMs: number) => {
@@ -534,12 +548,69 @@ function App() {
   }, [clearResourceDownloadTerminal, resourceDownloadPrompt]);
 
   const requestReleaseNoticeClose = useCallback(() => {
+    if (releaseUpdateStatus === "downloading" || releaseUpdateStatus === "installing") return;
     setReleaseNoticeOpen(false);
-  }, []);
+  }, [releaseUpdateStatus]);
 
   const handleReleaseNoticeClosed = useCallback(() => {
+    const update = pendingUpdateRef.current;
+    pendingUpdateRef.current = null;
+    if (update) void update.close().catch(() => undefined);
     setReleaseNoticeMounted(false);
     setReleaseNotice(null);
+    setReleaseUpdateStatus("ready");
+    setReleaseDownloadBytes(0);
+    setReleaseDownloadTotal(null);
+    setReleaseUpdateError(null);
+  }, []);
+
+  const handleReleaseUpdate = useCallback(async () => {
+    const update = pendingUpdateRef.current;
+    if (!update || releaseInstallInProgressRef.current) return;
+
+    releaseInstallInProgressRef.current = true;
+    setReleaseUpdateStatus("downloading");
+    setReleaseDownloadBytes(0);
+    setReleaseDownloadTotal(null);
+    setReleaseUpdateError(null);
+    let downloadedBytes = 0;
+
+    try {
+      await update.download((event: DownloadEvent) => {
+        if (event.event === "Started") {
+          downloadedBytes = 0;
+          setReleaseDownloadBytes(0);
+          setReleaseDownloadTotal(typeof event.data.contentLength === "number" && event.data.contentLength > 0
+            ? event.data.contentLength
+            : null);
+          return;
+        }
+        if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+          setReleaseDownloadBytes(downloadedBytes);
+          return;
+        }
+      });
+      setReleaseUpdateStatus("installing");
+      await invokeCommand("prepare_for_updater_exit");
+      await update.install({ restartAfterInstall: true });
+    } catch (reason) {
+      await invokeCommand("recover_after_updater_failure").catch(() => undefined);
+      const message = describeError(reason, "更新下载或安装失败，请重试");
+      setReleaseUpdateStatus("failed");
+      setReleaseUpdateError(message);
+      showAppToast(message, "error");
+    } finally {
+      releaseInstallInProgressRef.current = false;
+    }
+  }, [showAppToast]);
+
+  useEffect(() => () => {
+    releaseCheckGenerationRef.current += 1;
+    releaseCheckPendingRef.current = false;
+    const update = pendingUpdateRef.current;
+    pendingUpdateRef.current = null;
+    if (update) void update.close().catch(() => undefined);
   }, []);
 
   useEffect(() => () => {
@@ -1837,6 +1908,11 @@ function App() {
           open={releaseNoticeOpen}
           release={releaseNotice}
           currentVersion={APP_VERSION}
+          updateStatus={releaseUpdateStatus}
+          downloadedBytes={releaseDownloadBytes}
+          downloadTotal={releaseDownloadTotal}
+          updateError={releaseUpdateError}
+          onInstall={() => void handleReleaseUpdate()}
           onRequestClose={requestReleaseNoticeClose}
           onClosed={handleReleaseNoticeClosed}
         />
@@ -2097,16 +2173,30 @@ function ReleaseNoticeDialog({
   open,
   release,
   currentVersion,
+  updateStatus,
+  downloadedBytes,
+  downloadTotal,
+  updateError,
+  onInstall,
   onRequestClose,
   onClosed,
 }: {
   open: boolean;
   release: GitHubReleaseSummary;
   currentVersion: string;
+  updateStatus: ReleaseUpdateStatus;
+  downloadedBytes: number;
+  downloadTotal: number | null;
+  updateError: string | null;
+  onInstall: () => void;
   onRequestClose: () => void;
   onClosed: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const isBusy = updateStatus === "downloading" || updateStatus === "installing";
+  const progress = downloadTotal === null
+    ? null
+    : Math.min(100, Math.round((downloadedBytes / Math.max(downloadTotal, 1)) * 100));
 
   useEffect(() => {
     if (!open) return;
@@ -2138,14 +2228,42 @@ function ReleaseNoticeDialog({
             <strong id="release-notice-title">发现新版本</strong>
             <span>GitHub Release 已发布新的稳定版本。</span>
           </div>
-          <button className="icon-button" type="button" onClick={onRequestClose} aria-label="关闭" title="关闭"><X size={17} /></button>
+          <button className="icon-button" type="button" onClick={onRequestClose} disabled={isBusy} aria-label="关闭" title="关闭"><X size={17} /></button>
         </div>
         <div className="release-notice-body">
           <p>当前版本 v{currentVersion}，最新版本 {release.tagName}。</p>
-          <span>前往 Release 页面查看更新内容和下载资源。</span>
+          <span>官方更新器会下载并安装 Windows x64 版本，完成后自动重启应用。</span>
+          <div className="release-notice-notes">{release.notes ?? "此次版本未提供 Release 说明。"}</div>
+          {updateStatus === "downloading" && (
+            <div className="release-notice-progress" aria-live="polite">
+              <div className="release-notice-progress-label">
+                <span>正在下载更新</span>
+                <span>{downloadTotal === null ? formatBytes(downloadedBytes) : `${formatBytes(downloadedBytes)} / ${formatBytes(downloadTotal)}`}</span>
+              </div>
+              <div
+                className={`release-notice-progress-track ${progress === null ? "is-indeterminate" : ""}`}
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={downloadTotal ?? undefined}
+                aria-valuenow={downloadTotal === null ? undefined : downloadedBytes}
+                aria-label="更新下载进度"
+              >
+                <span style={progress === null ? undefined : { width: `${progress}%` }} />
+              </div>
+            </div>
+          )}
+          {updateStatus === "installing" && (
+            <p className="release-notice-status" aria-live="polite"><LoaderCircle className="spin" size={14} />正在安装更新，应用即将重启。</p>
+          )}
+          {updateStatus === "failed" && updateError && <p className="error-message release-notice-error">{updateError}</p>}
         </div>
         <div className="form-actions modal-actions">
-          <button className="secondary-button" type="button" onClick={onRequestClose}>稍后</button>
+          <button className="secondary-button" type="button" onClick={onRequestClose} disabled={isBusy}>稍后</button>
+          {(updateStatus === "ready" || updateStatus === "failed") && (
+            <button className="primary-button release-notice-install" type="button" onClick={onInstall} disabled={isBusy}>
+              {updateStatus === "failed" ? <><Download size={15} />重试更新</> : <><Download size={15} />更新并重启</>}
+            </button>
+          )}
           <a className="primary-button release-notice-link" href={release.htmlUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); openExternalUrl(release.htmlUrl); }}><ExternalLink size={15} />查看 Release</a>
         </div>
       </div>

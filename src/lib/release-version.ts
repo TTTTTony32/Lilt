@@ -2,6 +2,14 @@ export interface GitHubReleaseSummary {
   tagName: string;
   htmlUrl: string;
   version: [number, number, number];
+  notes?: string;
+  date?: string;
+}
+
+export interface UpdaterReleaseMetadata {
+  version: string;
+  body?: string | null;
+  date?: string | null;
 }
 
 type ReleaseVersion = [number, number, number];
@@ -51,4 +59,26 @@ export function isReleaseNewerThan(latest: GitHubReleaseSummary, currentVersion:
     : `v${currentVersion.trim()}`;
   const current = parseReleaseVersion(normalizedCurrentVersion);
   return current !== null && compareReleaseVersions(latest.version, current) > 0;
+}
+
+export function summarizeUpdaterUpdate(metadata: UpdaterReleaseMetadata): GitHubReleaseSummary | null {
+  const normalizedVersion = metadata.version.trim().replace(/^v/, "");
+  const tagName = `v${normalizedVersion}`;
+  const version = parseReleaseVersion(tagName);
+  if (!version) return null;
+
+  const notes = typeof metadata.body === "string" && metadata.body.trim().length > 0
+    ? metadata.body.trim()
+    : "此次版本未提供 Release 说明。";
+  const date = typeof metadata.date === "string" && metadata.date.trim().length > 0
+    ? metadata.date.trim()
+    : undefined;
+
+  return {
+    tagName,
+    htmlUrl: `${RELEASE_TAG_URL_PREFIX}${encodeURIComponent(tagName)}`,
+    version,
+    notes,
+    date,
+  };
 }

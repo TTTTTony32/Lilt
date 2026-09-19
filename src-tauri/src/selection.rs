@@ -50,6 +50,7 @@ const FOCUS_LOST_CHECK_DELAY: Duration = Duration::from_millis(320);
 pub struct SelectionService {
     inner: Arc<Mutex<SelectionInner>>,
     worker: Arc<Mutex<Option<mpsc::Sender<WorkerCommand>>>>,
+    worker_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     app: Arc<Mutex<Option<AppHandle>>>,
     cancellations: Arc<Mutex<std::collections::HashMap<String, CancellationToken>>>,
 }
@@ -249,6 +250,7 @@ impl SelectionService {
                 content_height: DEFAULT_SELECTION_WINDOW_HEIGHT,
             })),
             worker: Arc::new(Mutex::new(None)),
+            worker_thread: Arc::new(Mutex::new(None)),
             app: Arc::new(Mutex::new(None)),
             cancellations,
         }
@@ -274,9 +276,12 @@ impl SelectionService {
             .name("lilt-selection-worker".to_string())
             .spawn(move || worker_loop(receiver, service));
         match result {
-            Ok(_) => {
+            Ok(handle) => {
                 diagnostics::info("selection.worker.start");
                 *worker_guard = Some(sender);
+                if let Ok(mut thread_guard) = self.worker_thread.lock() {
+                    *thread_guard = Some(handle);
+                }
             }
             Err(error) => diagnostics::error(format!("selection.worker.failed reason={error}")),
         }
@@ -666,6 +671,16 @@ impl SelectionService {
         let sender = self.worker.lock().ok().and_then(|mut worker| worker.take());
         if let Some(sender) = sender {
             let _ = sender.send(WorkerCommand::Shutdown);
+        }
+        let worker_thread = self
+            .worker_thread
+            .lock()
+            .ok()
+            .and_then(|mut worker| worker.take());
+        if let Some(worker_thread) = worker_thread
+            && worker_thread.join().is_err()
+        {
+            diagnostics::warn("selection.worker.shutdown_failed reason=worker_panicked");
         }
     }
 

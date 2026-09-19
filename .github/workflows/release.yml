@@ -147,8 +147,20 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Validate updater signing secret
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw '缺少 TAURI_SIGNING_PRIVATE_KEY Secret，无法生成 updater 签名产物'
+          }
+
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
           tauriScript: npm run tauri
           args: --target ${{ matrix.rust_target }} --bundles nsis
@@ -168,10 +180,16 @@ jobs:
             throw "NSIS 安装包数量异常：$($installers.Count)，搜索路径为 $bundlePath"
           }
 
+          $signaturePath = "$($installers[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "未找到 NSIS updater 签名：$signaturePath"
+          }
+
           $stagingPath = 'release-staging'
           New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
           $destination = Join-Path $stagingPath "Lilt_$($package.version)_windows_$env:ARCH`_setup.exe"
           Copy-Item -LiteralPath $installers[0].FullName -Destination $destination
+          Copy-Item -LiteralPath $signaturePath -Destination "$destination.sig"
           Write-Host "已暂存安装包：$destination"
 
       - name: Upload workflow artifact
@@ -205,13 +223,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -name '*.exe' -print)
-          if [[ "${#assets[@]}" -ne 1 ]]; then
-            echo "期望一个 Windows x64 安装包，实际找到 ${#assets[@]} 个"
-            printf '%s\n' "${assets[@]}"
+          mapfile -t installers < <(find release-assets -maxdepth 1 -type f -name '*.exe' -print)
+          mapfile -t signatures < <(find release-assets -maxdepth 1 -type f -name '*.sig' -print)
+          if [[ "${#installers[@]}" -ne 1 ]]; then
+            echo "期望一个 Windows x64 安装包，实际找到 ${#installers[@]} 个"
+            printf '%s\n' "${installers[@]}"
             exit 1
           fi
-          printf '%s\n' "${assets[@]}" | grep -q 'windows_amd64_setup\.exe$'
+          if [[ "${#signatures[@]}" -ne 1 ]]; then
+            echo "期望一个 updater 签名文件，实际找到 ${#signatures[@]} 个"
+            printf '%s\n' "${signatures[@]}"
+            exit 1
+          fi
+          installer="${installers[0]}"
+          signature="${signatures[0]}"
+          [[ "$installer" == *windows_amd64_setup.exe ]]
+          [[ "$signature" == "$installer.sig" ]]
+          [[ -s "$signature" ]]
       - name: Create or reuse Draft Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -233,8 +261,68 @@ jobs:
               --title "Lilt $RELEASE_TAG" \
               --draft \
               --generate-notes \
-              --notes 'Windows 安装包暂未进行代码签名，首次安装时可能出现 SmartScreen 提示。'
+              --notes 'Windows 安装包暂未进行代码签名，首次安装时可能出现 SmartScreen 提示。Updater 签名用于应用内更新包校验。'
           fi
+
+      - name: Generate updater manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          setup_name="Lilt_${version}_windows_amd64_setup.exe"
+          setup_path="release-assets/$setup_name"
+          signature_path="$setup_path.sig"
+          if [[ ! -f "$setup_path" || ! -s "$signature_path" ]]; then
+            echo "缺少 updater 安装包或签名：$setup_path"
+            exit 1
+          fi
+
+          signature="$(<"$signature_path")"
+          notes="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body // ""')"
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${setup_name}"
+          jq -n \
+            --arg version "$version" \
+            --arg notes "$notes" \
+            --arg pub_date "$pub_date" \
+            --arg url "$url" \
+            --arg signature "$signature" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"windows-x86_64": {url: $url, signature: $signature}}}' \
+            > release-assets/latest.json
+
+          jq -e \
+            --arg version "$version" \
+            --arg url "$url" \
+            '.version == $version and .platforms["windows-x86_64"].url == $url and (.platforms["windows-x86_64"].signature | length > 0)' \
+            release-assets/latest.json > /dev/null
+          rm -- "$signature_path"
+
+          mapfile -t final_assets < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          expected_setup="$setup_name"
+          if [[ "${#final_assets[@]}" -ne 2 ]] \
+            || ! printf '%s\n' "${final_assets[@]}" | grep -Fxq 'latest.json' \
+            || ! printf '%s\n' "${final_assets[@]}" | grep -Fxq "$expected_setup"; then
+            echo '最终 Release 资产必须只包含 setup.exe 与 latest.json'
+            printf '%s\n' "${final_assets[@]}"
+            exit 1
+          fi
+
+      - name: Remove stale draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          setup_name="Lilt_${version}_windows_amd64_setup.exe"
+          while IFS= read -r asset_name; do
+            [[ -z "$asset_name" || "$asset_name" == "$setup_name" || "$asset_name" == 'latest.json' ]] && continue
+            gh release delete-asset "$RELEASE_TAG" "$asset_name" --repo "$GITHUB_REPOSITORY" --yes
+          done < <(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
 
       - name: Upload release assets
         env:

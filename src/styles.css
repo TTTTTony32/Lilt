@@ -556,10 +556,21 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .modal-check { margin-top: 21px; display: flex; align-items: center; gap: 8px; color: #70796f; font-size: 12px; }
 .modal-check input { width: 16px; height: 16px; accent-color: #5b775f; }
 .modal-actions { justify-content: flex-end; }
-.release-notice-card { width: min(430px, calc(100vw - 48px)); }
+.release-notice-card { width: min(520px, calc(100vw - 48px)); }
 .release-notice-body { margin-top: 19px; color: #70796f; font-size: 12px; line-height: 1.7; }
 .release-notice-body p { margin: 0; color: #59695d; }
 .release-notice-body span { display: block; margin-top: 5px; color: #92978e; font-size: 11px; }
+.release-notice-notes { max-height: 150px; margin-top: 14px; padding: 11px 12px; overflow-y: auto; border: 1px solid #e5e5dd; border-radius: 7px; color: #69756b; background: #f5f6f1; font-size: 11px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.release-notice-progress { margin-top: 15px; }
+.release-notice-progress-label { display: flex; justify-content: space-between; gap: 12px; color: #6e7d70; font-size: 11px; }
+.release-notice-progress-label span:last-child { margin-top: 0; color: #8b958c; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; }
+.release-notice-progress-track { position: relative; height: 6px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: #e4e9df; }
+.release-notice-progress-track span { height: 100%; display: block; margin-top: 0; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
+.release-notice-progress-track.is-indeterminate span { width: 38%; animation: release-progress-indeterminate 1.2s ease-in-out infinite; }
+@keyframes release-progress-indeterminate { from { transform: translateX(-110%); } to { transform: translateX(280%); } }
+.release-notice-status { min-height: 23px; margin-top: 15px !important; display: flex; align-items: center; gap: 7px; color: #647a68 !important; font-size: 11px !important; }
+.release-notice-error { margin: 14px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
+.release-notice-install { gap: 6px; }
 .release-notice-link { text-decoration: none; }
 .data-transfer-card { width: min(520px, calc(100vw - 48px)); }
 .data-transfer-body { min-height: 78px; margin-top: 19px; color: #70796f; font-size: 12px; line-height: 1.7; }

@@ -168,10 +168,14 @@ impl AppState {
 }
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    let app = builder
         .on_window_event(|window, event| {
             if window.label() == "selection" {
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
@@ -265,6 +269,10 @@ pub fn run() {
                 .set_window_size(selection_window_width, selection_window_height);
             app.manage(state.clone());
             #[cfg(windows)]
+            {
+                diagnostics::info("updater.plugin.ready");
+            }
+            #[cfg(windows)]
             if let Some(main_window) = app.get_webview_window("main") {
                 if let Err(error) = set_main_taskbar_icon(&main_window) {
                     diagnostics::warn(format!("window.icon.taskbar_failed reason={error}"));
@@ -338,6 +346,8 @@ pub fn run() {
             pdf_engine::prepare_pdf_engine,
             pdf_jobs::start_pdf_translation,
             pdf_jobs::cancel_pdf_translation,
+            prepare_for_updater_exit,
+            recover_after_updater_failure,
             set_main_taskbar_progress,
         ])
         .build(tauri::generate_context!())
@@ -349,6 +359,58 @@ pub fn run() {
             }
         }
     });
+}
+
+#[tauri::command]
+fn prepare_for_updater_exit(app: AppHandle) -> Result<(), String> {
+    // Update.install invokes the official updater's on_before_exit hook immediately
+    // before launching the installer. Release app resources before that hook exits us.
+    #[cfg(windows)]
+    cleanup_before_update(&app);
+    #[cfg(not(windows))]
+    let _ = app;
+    Ok(())
+}
+
+#[tauri::command]
+fn recover_after_updater_failure(app: AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(state) = app.try_state::<AppState>() {
+        // The updater preparation is deliberately reversible when download or
+        // signature verification fails before Windows launches the installer.
+        state.selection.start_worker();
+        diagnostics::warn("updater.failure.recovered selection_worker_restarted");
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn cleanup_before_update(app: &AppHandle) {
+    diagnostics::info("updater.before_exit.cleanup.begin");
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut cancellations) = state.cancellations.lock() {
+            for cancellation in cancellations.values() {
+                cancellation.cancel();
+            }
+            cancellations.clear();
+        }
+        pdf_jobs::shutdown_for_update(state.inner());
+        state.selection.shutdown();
+    }
+
+    if let Some(main_window) = app.get_webview_window("main") {
+        if let Err(error) = set_windows_taskbar_progress(&main_window, "none", 0.0) {
+            diagnostics::warn(format!(
+                "updater.before_exit.taskbar_cleanup_failed error={error}"
+            ));
+        }
+    }
+    if let Some(selection_window) = app.get_webview_window("selection") {
+        let _ = selection_window.close();
+    }
+    diagnostics::info("updater.before_exit.cleanup.completed");
 }
 
 #[cfg(windows)]

@@ -12,6 +12,7 @@
     "dialog:allow-save",
     "opener:allow-open-url",
     "opener:allow-default-urls",
+    "updater:default",
     "core:event:allow-listen",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",

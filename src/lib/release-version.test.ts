@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isReleaseNewerThan, parseReleaseVersion, selectLatestStableRelease } from "./release-version";
+import { isReleaseNewerThan, parseReleaseVersion, selectLatestStableRelease, summarizeUpdaterUpdate } from "./release-version";
 
 describe("release version tracking", () => {
   it("parses only stable vX.Y.Z tags", () => {
@@ -36,5 +36,26 @@ describe("release version tracking", () => {
     expect(isReleaseNewerThan(release!, "0.5.3")).toBe(true);
     expect(isReleaseNewerThan(release!, "0.5.4")).toBe(false);
     expect(isReleaseNewerThan(release!, "0.6.0")).toBe(false);
+  });
+
+  it("summarizes updater metadata with a Release link and notes", () => {
+    expect(summarizeUpdaterUpdate({
+      version: "0.6.3",
+      body: "修复启动问题",
+      date: "2026-09-19T08:00:00Z",
+    })).toEqual({
+      tagName: "v0.6.3",
+      htmlUrl: "https://github.com/TTTTTony32/Lilt/releases/tag/v0.6.3",
+      version: [0, 6, 3],
+      notes: "修复启动问题",
+      date: "2026-09-19T08:00:00Z",
+    });
+  });
+
+  it("rejects malformed updater metadata and supplies a fallback note", () => {
+    expect(summarizeUpdaterUpdate({ version: "v0.6.3", body: "  " })).toMatchObject({
+      notes: "此次版本未提供 Release 说明。",
+    });
+    expect(summarizeUpdaterUpdate({ version: "0.6.3-beta.1" })).toBeNull();
   });
 });
