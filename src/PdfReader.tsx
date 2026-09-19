@@ -37,6 +37,7 @@ import { invokeCommand } from "./lib/tauri";
 import { createEmptyPdfPreflightState } from "./lib/pdf-preflight";
 import { parsePdfPageRange } from "./lib/pdf-page-range";
 import {
+  canStartPdfTranslation,
   formatPdfTaskProgressDetail,
   jobStatusLabel,
   progressPercent,
@@ -60,6 +61,7 @@ interface PdfReaderProps {
   translationEnabled: boolean;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
+  pdfPreflightSaving: boolean;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onStartTranslation: (samples: PdfPreflightSample[], warning: string | null, pages: string | null) => void;
   onCancelTranslation: () => void;
@@ -100,6 +102,7 @@ interface PdfTaskPanelProps {
   jobEventsError: string | null;
   translationEnabled: boolean;
   pdfPreflightEnabled: boolean;
+  pdfPreflightSaving: boolean;
   preflightSampling: boolean;
   pageRange: string;
   onPageRangeChange: (value: string) => void;
@@ -116,6 +119,7 @@ function PdfTaskPanel({
   jobEventsError,
   translationEnabled,
   pdfPreflightEnabled,
+  pdfPreflightSaving,
   preflightSampling,
   pageRange,
   onPageRangeChange,
@@ -125,7 +129,7 @@ function PdfTaskPanel({
   onOpenOutputDirectory,
 }: PdfTaskPanelProps) {
   const jobBusy = job.status === "starting" || job.status === "running" || job.status === "cancelling";
-  const canStart = translationEnabled && readerStatus === "ready" && !jobBusy;
+  const canStart = canStartPdfTranslation(translationEnabled, readerStatus === "ready", jobBusy, pdfPreflightSaving);
   const taskButtonIsCancel = jobBusy;
   const taskButtonDisabled = taskButtonIsCancel
     ? job.status === "cancelling" || !job.taskId
@@ -185,7 +189,7 @@ function PdfTaskPanel({
             <input
               value={pageRange}
               onChange={(event) => onPageRangeChange(event.target.value)}
-              disabled={jobBusy || preflightSampling}
+              disabled={jobBusy || preflightSampling || pdfPreflightSaving}
               placeholder="全部"
               aria-label="翻译页面范围"
               inputMode="text"
@@ -195,7 +199,7 @@ function PdfTaskPanel({
             <input
               type="checkbox"
               checked={pdfPreflightEnabled}
-              disabled={jobBusy || preflightSampling}
+              disabled={jobBusy || preflightSampling || pdfPreflightSaving}
               onChange={(event) => onPdfPreflightEnabledChange(event.target.checked)}
             />
             <span>预检</span>
@@ -432,6 +436,7 @@ export default function PdfReader({
   translationEnabled,
   pdfPreflightEnabled,
   pdfPreflightPageLimit,
+  pdfPreflightSaving,
   onPdfPreflightEnabledChange,
   onStartTranslation,
   onCancelTranslation,
@@ -601,6 +606,7 @@ export default function PdfReader({
   ), [totalPages]);
 
   const handleStartTranslation = useCallback(async () => {
+    if (pdfPreflightSaving) return;
     const pageSelection = parsePdfPageRange(pageRange, pdfDocument?.numPages ?? null);
     if (pageSelection.error) {
       setError(`翻译页面范围无效：${pageSelection.error}`);
@@ -625,7 +631,7 @@ export default function PdfReader({
     } finally {
       setPreflightSampling(false);
     }
-  }, [onStartTranslation, pageRange, pdfDocument, pdfPreflightEnabled, pdfPreflightPageLimit]);
+  }, [onStartTranslation, pageRange, pdfDocument, pdfPreflightEnabled, pdfPreflightPageLimit, pdfPreflightSaving]);
 
   return (
     <section className="pdf-reader-shell" aria-label="PDF 阅读器">
@@ -671,6 +677,7 @@ export default function PdfReader({
         jobEventsError={jobEventsError}
         translationEnabled={translationEnabled && !preflightSampling}
         pdfPreflightEnabled={pdfPreflightEnabled}
+        pdfPreflightSaving={pdfPreflightSaving}
         preflightSampling={preflightSampling}
         pageRange={pageRange}
         onPageRangeChange={setPageRange}

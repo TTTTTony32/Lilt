@@ -120,6 +120,7 @@ interface PdfViewProps {
   pdfEngine: PdfEngineRuntime;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
+  pdfPreflightSaving: boolean;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
   onOpenPdfEngineSettings: () => void;
@@ -131,6 +132,7 @@ export default function PdfView({
   pdfEngine,
   pdfPreflightEnabled,
   pdfPreflightPageLimit,
+  pdfPreflightSaving,
   onPdfPreflightEnabledChange,
   onResourceDownloadPrompt,
   onOpenPdfEngineSettings,
@@ -383,6 +385,7 @@ export default function PdfView({
     pages: string | null = null,
   ) => {
     if (!selectedFile) return;
+    if (pdfPreflightSaving) return;
     if (!jobEventsReady) {
       updatePdfJob((current) => {
         const message = jobEventsError ?? "PDF 任务事件监听尚未就绪，请稍后再试。";
@@ -485,7 +488,7 @@ export default function PdfView({
         };
       });
     }
-  }, [clearPdfTaskRefs, engineError, engineStatus?.status, jobEventsError, jobEventsReady, pdfPreflightEnabled, pdfPreflightPageLimit, selectedFile, updatePdfJob]);
+  }, [clearPdfTaskRefs, engineError, engineStatus?.status, jobEventsError, jobEventsReady, pdfPreflightEnabled, pdfPreflightPageLimit, pdfPreflightSaving, selectedFile, updatePdfJob]);
 
   const cancelPdfTranslation = useCallback(async () => {
     const taskId = activeTaskIdRef.current;
@@ -759,6 +762,7 @@ export default function PdfView({
               translationEnabled={engineStatus?.status === "ready" && jobEventsReady}
               pdfPreflightEnabled={pdfPreflightEnabled}
               pdfPreflightPageLimit={pdfPreflightPageLimit}
+              pdfPreflightSaving={pdfPreflightSaving}
               onPdfPreflightEnabledChange={onPdfPreflightEnabledChange}
               onStartTranslation={(samples, warning, pages) => void startPdfTranslation(samples, warning, pages)}
               onCancelTranslation={() => void cancelPdfTranslation()}

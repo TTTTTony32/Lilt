@@ -74,3 +74,12 @@ export function jobStatusLabel(status: PdfJobUiState["status"]): string {
 export function isPdfJobBusy(status: PdfJobUiState["status"]): boolean {
   return status === "starting" || status === "running" || status === "cancelling";
 }
+
+export function canStartPdfTranslation(
+  translationEnabled: boolean,
+  readerReady: boolean,
+  jobBusy: boolean,
+  preflightSaving: boolean,
+): boolean {
+  return translationEnabled && readerReady && !jobBusy && !preflightSaving;
+}

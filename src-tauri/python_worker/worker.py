@@ -872,7 +872,10 @@ class BabelDocWorker:
             lang_in = str(options.get("source_language") or "en")
             lang_out = str(options.get("target_language") or "zh-CN")
             preflight = None
-            if options.get("preflight_enabled", True) is not False:
+            preflight_enabled = options.get("preflight_enabled", True)
+            if not isinstance(preflight_enabled, bool):
+                preflight_enabled = True
+            if preflight_enabled:
                 preflight = DocumentPreflightCoordinator(
                     task_id=task_id,
                     source_language=lang_in,

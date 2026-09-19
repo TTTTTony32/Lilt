@@ -350,6 +350,8 @@ function App() {
   const [learningResult, setLearningResult] = useState<ParagraphLearningResult | null>(null);
   const [learningModeSaving, setLearningModeSaving] = useState(false);
   const [pdfPreflightSaving, setPdfPreflightSaving] = useState(false);
+  const pdfPreflightSaveSequenceRef = useRef(0);
+  const pdfPreflightSaveActiveRef = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [translationSummary, setTranslationSummary] = useState<TranslationSummary | null>(null);
   const [translationEventsReady, setTranslationEventsReady] = useState(false);
@@ -738,9 +740,22 @@ function App() {
   }, []);
 
   const refreshSnapshot = useCallback(async () => {
+    const pdfPreflightSaveAtRequestStart = pdfPreflightSaveActiveRef.current;
     try {
       const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      setSnapshot(next);
+      setSnapshot((current) => {
+        const preserveLocalPdfPreflight = pdfPreflightSaveActiveRef.current !== null
+          || pdfPreflightSaveAtRequestStart !== pdfPreflightSaveActiveRef.current;
+        return preserveLocalPdfPreflight
+          ? {
+            ...next,
+            settings: {
+              ...next.settings,
+              pdfPreflightEnabled: current.settings.pdfPreflightEnabled,
+            },
+          }
+          : next;
+      });
       setSnapshotReady(true);
     } catch (reason) {
       setError(describeError(reason, "无法读取应用配置"));
@@ -781,6 +796,9 @@ function App() {
     if (pdfPreflightSaving) return;
     const previous = snapshot.settings.pdfPreflightEnabled;
     if (previous === enabled) return;
+    const saveId = pdfPreflightSaveSequenceRef.current + 1;
+    pdfPreflightSaveSequenceRef.current = saveId;
+    pdfPreflightSaveActiveRef.current = saveId;
     setPdfPreflightSaving(true);
     setSnapshot((current) => ({
       ...current,
@@ -789,14 +807,25 @@ function App() {
     setError(null);
     try {
       await invokeCommand("set_pdf_preflight_enabled", { enabled });
+      if (pdfPreflightSaveActiveRef.current === saveId) {
+        setSnapshot((current) => ({
+          ...current,
+          settings: { ...current.settings, pdfPreflightEnabled: enabled },
+        }));
+      }
     } catch (reason) {
-      setSnapshot((current) => ({
-        ...current,
-        settings: { ...current.settings, pdfPreflightEnabled: previous },
-      }));
+      if (pdfPreflightSaveActiveRef.current === saveId) {
+        setSnapshot((current) => ({
+          ...current,
+          settings: { ...current.settings, pdfPreflightEnabled: previous },
+        }));
+      }
       setError(describeError(reason, "PDF 文档预检设置保存失败"));
     } finally {
-      setPdfPreflightSaving(false);
+      if (pdfPreflightSaveActiveRef.current === saveId) {
+        pdfPreflightSaveActiveRef.current = null;
+        setPdfPreflightSaving(false);
+      }
     }
   }, [pdfPreflightSaving, snapshot.settings.pdfPreflightEnabled]);
 
@@ -1655,6 +1684,7 @@ function App() {
             pdfEngine={pdfEngine}
             pdfPreflightEnabled={snapshot.settings.pdfPreflightEnabled}
             pdfPreflightPageLimit={snapshot.settings.pdfPreflightPageLimit}
+            pdfPreflightSaving={pdfPreflightSaving}
             onPdfPreflightEnabledChange={(enabled) => { void handlePdfPreflightEnabledChange(enabled); }}
             onResourceDownloadPrompt={openResourceDownloadPrompt}
             onOpenPdfEngineSettings={openPdfEngineSettings}
