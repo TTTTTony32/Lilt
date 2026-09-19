@@ -417,7 +417,7 @@ fn set_main_taskbar_progress(
 
     #[cfg(windows)]
     {
-        return set_windows_taskbar_progress(&window, &state, value);
+        set_windows_taskbar_progress(&window, &state, value)
     }
 
     #[cfg(not(windows))]
