@@ -14,14 +14,14 @@ export interface AppSettings {
   paragraphLearningModeEnabled: boolean;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
-  selectionMode: "shortcut" | "automatic";
+  selectionMode: SelectionMode;
   selectionShortcut: string;
   selectionWindowWidth: number;
   selectionWindowHeight: number;
   closeBehavior: CloseBehavior;
 }
 
-export type SelectionMode = "shortcut" | "automatic";
+export type SelectionMode = "none" | "shortcut" | "automatic" | "both";
 export type SelectionTrigger = "shortcut" | "automatic";
 export type CloseBehavior = "ask" | "exit" | "tray";
 
@@ -1373,7 +1373,7 @@ export function decodeSelectionUnavailable(value: unknown): SelectionUnavailable
 
 export function decodeSelectionStatus(value: unknown): SelectionRuntimeStatus | null {
   if (!isRecord(value)) return null;
-  const mode = value.mode === "shortcut" || value.mode === "automatic" ? value.mode : null;
+  const mode = value.mode === "none" || value.mode === "shortcut" || value.mode === "automatic" || value.mode === "both" ? value.mode : null;
   const shortcut = stringValue(value.shortcut);
   const message = value.message === null || value.message === undefined ? null : stringValue(value.message);
   return mode === null || shortcut === null || typeof value.shortcutRegistered !== "boolean"

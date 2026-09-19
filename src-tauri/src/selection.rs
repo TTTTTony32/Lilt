@@ -352,14 +352,14 @@ impl SelectionService {
             shortcuts
                 .unregister_all()
                 .map_err(|error| format!("清理旧快捷键失败：{error}"))?;
-            if mode == SelectionMode::Shortcut {
+            if mode.includes_shortcut() {
                 let service = self.clone();
                 if let Err(error) = shortcuts.on_shortcut(parsed, move |_app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
                         service.read_focused_selection();
                     }
                 }) {
-                    if previous.mode == SelectionMode::Shortcut {
+                    if previous.mode.includes_shortcut() {
                         let old = normalize_shortcut(&previous.shortcut);
                         if let Ok(old_shortcut) =
                             old.parse::<tauri_plugin_global_shortcut::Shortcut>()
@@ -388,11 +388,11 @@ impl SelectionService {
         if let Ok(mut inner) = self.inner.lock() {
             inner.mode = mode;
             inner.shortcut = shortcut.to_string();
-            inner.shortcut_registered = mode == SelectionMode::Shortcut;
+            inner.shortcut_registered = mode.includes_shortcut();
             inner.message = None;
         }
         self.send_worker(WorkerCommand::SetAutomatic(
-            mode == SelectionMode::Automatic,
+            mode.includes_automatic(),
         ));
         self.emit_status();
         Ok(self.status())
@@ -1690,7 +1690,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                     service.set_uia_status(root.is_some() && walker.is_some(), None);
                 }
             }
-            Ok(WorkerCommand::ReadFocused { trigger_id }) if !automatic => {
+            Ok(WorkerCommand::ReadFocused { trigger_id }) => {
                 if !service.owns_current_trigger(&trigger_id) {
                     continue;
                 }
@@ -1824,7 +1824,6 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
             }
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(WorkerCommand::ReadFocused { .. }) => {}
             Ok(WorkerCommand::Prepared(_)) => {}
         }
     }

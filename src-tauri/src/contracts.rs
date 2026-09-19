@@ -77,8 +77,20 @@ pub fn clamp_selection_window_dimension(
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SelectionMode {
+    None,
     Shortcut,
     Automatic,
+    Both,
+}
+
+impl SelectionMode {
+    pub const fn includes_shortcut(self) -> bool {
+        matches!(self, Self::Shortcut | Self::Both)
+    }
+
+    pub const fn includes_automatic(self) -> bool {
+        matches!(self, Self::Automatic | Self::Both)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

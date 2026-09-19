@@ -605,7 +605,9 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
 
 pub fn get_selection_settings(connection: &Connection) -> Result<(SelectionMode, String), String> {
     let selection_mode = match get_setting(connection, "selection_mode")?.as_deref() {
+        Some("none") => SelectionMode::None,
         Some("automatic") => SelectionMode::Automatic,
+        Some("both") => SelectionMode::Both,
         _ => DEFAULT_SELECTION_MODE,
     };
     let selection_shortcut = get_setting(connection, "selection_shortcut")?
@@ -693,8 +695,10 @@ pub fn save_selection_settings(
         connection,
         "selection_mode",
         match mode {
+            SelectionMode::None => "none",
             SelectionMode::Shortcut => "shortcut",
             SelectionMode::Automatic => "automatic",
+            SelectionMode::Both => "both",
         },
     )?;
     set_setting(connection, "selection_shortcut", shortcut)
@@ -2212,11 +2216,11 @@ mod tests {
         assert!(settings.pdf_preflight_enabled);
         assert_eq!(settings.pdf_preflight_page_limit, 24);
 
-        save_selection_settings(&connection, SelectionMode::Automatic, "Alt+L")
+        save_selection_settings(&connection, SelectionMode::Both, "Alt+L")
             .expect("selection settings write should succeed");
         let selection_settings =
             get_settings(&connection).expect("selection settings read should succeed");
-        assert_eq!(selection_settings.selection_mode, SelectionMode::Automatic);
+        assert_eq!(selection_settings.selection_mode, SelectionMode::Both);
         assert_eq!(selection_settings.selection_shortcut, "Alt+L");
     }
 

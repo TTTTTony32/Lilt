@@ -530,8 +530,6 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .selection-mode-card.is-selected:hover { border-color: #91ad94; background: #e3eedf; }
 .selection-mode-card-copy { min-width: 0; display: flex; align-items: center; }
 .selection-mode-card-copy strong { color: inherit; font-size: 12px; font-weight: 600; }
-.selection-mode-card-indicator { width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #d4ddd2; border-radius: 50%; color: transparent; background: #fffefb; }
-.selection-mode-card.is-selected .selection-mode-card-indicator { border-color: #77957b; color: #fffefb; background: #66866c; }
 .selection-shortcut-field { min-width: 0; }
 .selection-shortcut-input { cursor: pointer; }
 .selection-shortcut-field.is-listening .selection-shortcut-input { border-color: #8fae92; background: #f0f5ed; box-shadow: 0 0 0 3px rgba(113, 145, 120, .16); }

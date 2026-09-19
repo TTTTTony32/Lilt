@@ -142,13 +142,25 @@ const SETTINGS_SECTIONS = [
   { id: "about", label: "关于", icon: Info },
 ] as const;
 
+type SelectionModeOption = Exclude<AppSettings["selectionMode"], "none" | "both">;
+
 const SELECTION_MODE_OPTIONS: ReadonlyArray<{
-  value: AppSettings["selectionMode"];
+  value: SelectionModeOption;
   label: string;
 }> = [
   { value: "shortcut", label: "按快捷键" },
   { value: "automatic", label: "自动监听选区" },
 ];
+
+function isSelectionModeEnabled(mode: AppSettings["selectionMode"], option: SelectionModeOption): boolean {
+  return mode === option || mode === "both";
+}
+
+function toggleSelectionMode(mode: AppSettings["selectionMode"], option: SelectionModeOption): AppSettings["selectionMode"] {
+  if (mode === "both") return option === "shortcut" ? "automatic" : "shortcut";
+  if (mode === option) return "none";
+  return mode === "none" ? option : "both";
+}
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 type SettingsResourceModal = "dictionary" | "pdf-engine";
@@ -3345,7 +3357,8 @@ function SettingsView({
   const handleSelectionModeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const currentIndex = SELECTION_MODE_OPTIONS.findIndex((option) => option.value === selectionMode);
+    const currentValue = event.currentTarget.dataset.selectionMode as SelectionModeOption | undefined;
+    const currentIndex = SELECTION_MODE_OPTIONS.findIndex((option) => option.value === currentValue);
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
@@ -3353,9 +3366,8 @@ function SettingsView({
         : (currentIndex + (["ArrowUp", "ArrowLeft"].includes(event.key) ? -1 : 1) + SELECTION_MODE_OPTIONS.length) % SELECTION_MODE_OPTIONS.length;
     const nextOption = SELECTION_MODE_OPTIONS[nextIndex];
     if (!nextOption) return;
-    updateSelectionDraft({ selectionMode: nextOption.value });
     event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-selection-mode="${nextOption.value}"]`)?.focus();
-  }, [selectionMode, updateSelectionDraft]);
+  }, []);
 
   const openResourceModal = useCallback((kind: SettingsResourceModal, returnFocusElement?: HTMLElement | null) => {
     resourceModalReturnFocusRef.current = returnFocusElement
@@ -3603,23 +3615,21 @@ function SettingsView({
           <div className="form-grid selection-settings-grid">
             <div className="selection-mode-field">
               <span className="settings-select-label" id="settings-selection-mode-label">触发方式</span>
-              <div className="selection-mode-options" role="radiogroup" aria-labelledby="settings-selection-mode-label">
+              <div className="selection-mode-options" role="group" aria-labelledby="settings-selection-mode-label">
                 {SELECTION_MODE_OPTIONS.map((option) => {
-                  const selected = option.value === selectionMode;
+                  const selected = isSelectionModeEnabled(selectionMode, option.value);
                   return (
                     <button
                       className={`selection-mode-card ${selected ? "is-selected" : ""}`}
                       type="button"
                       key={option.value}
-                      role="radio"
-                      aria-checked={selected}
-                      tabIndex={selected ? 0 : -1}
+                      aria-pressed={selected}
+                      tabIndex={0}
                       data-selection-mode={option.value}
-                      onClick={() => updateSelectionDraft({ selectionMode: option.value })}
+                      onClick={() => updateSelectionDraft({ selectionMode: toggleSelectionMode(selectionMode, option.value) })}
                       onKeyDown={handleSelectionModeKeyDown}
                     >
                       <span className="selection-mode-card-copy"><strong>{option.label}</strong></span>
-                      <span className="selection-mode-card-indicator" aria-hidden="true"><Check size={14} strokeWidth={2.2} /></span>
                     </button>
                   );
                 })}
