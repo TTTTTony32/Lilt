@@ -3229,6 +3229,7 @@ function SettingsView({
   const [selectionShortcut, setSelectionShortcut] = useState(snapshot.settings.selectionShortcut);
   const [selectionShortcutListening, setSelectionShortcutListening] = useState(false);
   const [selectionStatus, setSelectionStatus] = useState<SelectionRuntimeStatus | null>(null);
+  const [cacheClearing, setCacheClearing] = useState(false);
   const selectionShortcutBeforeListeningRef = useRef(snapshot.settings.selectionShortcut);
   const selectionShortcutListeningRef = useRef(false);
   const settingsDraftRef = useRef<SettingsDraft>(createSettingsDraft(snapshot));
@@ -3320,6 +3321,21 @@ function SettingsView({
   const updateSelectionDraft = useCallback((patch: Partial<Pick<SettingsDraft, "selectionMode" | "selectionShortcut">>) => {
     updateDraft((current) => ({ ...current, ...patch }));
   }, [updateDraft]);
+
+  const clearCache = useCallback(async () => {
+    if (cacheClearing) return;
+    setCacheClearing(true);
+    try {
+      await invokeCommand("clear_cache");
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      onSaved(next);
+      onToast("缓存已清空");
+    } catch (reason) {
+      onToast(describeError(reason, "清空缓存失败"), "error");
+    } finally {
+      setCacheClearing(false);
+    }
+  }, [cacheClearing, onSaved, onToast]);
 
   const startSelectionShortcutListening = useCallback(() => {
     selectionShortcutBeforeListeningRef.current = selectionShortcut;
@@ -3696,6 +3712,15 @@ function SettingsView({
               <span className="settings-switch-track" aria-hidden="true"><span /></span>
             </span>
           </label>
+          <div className="setting-line cache-summary-line">
+            <span>
+              <strong>当前缓存</strong>
+              <small>{formatBytes(snapshot.cacheStats.usageBytes)} · {snapshot.cacheStats.entryCount.toLocaleString("zh-CN")} 条</small>
+            </span>
+            <button className="secondary-button" type="button" onClick={() => void clearCache()} disabled={cacheClearing || (snapshot.cacheStats.usageBytes === 0 && snapshot.cacheStats.entryCount === 0)}>
+              {cacheClearing ? "清空中…" : "清空缓存"}
+            </button>
+          </div>
           <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={MIN_CACHE_SIZE_MB} max={MAX_CACHE_SIZE_MB} step={16} value={cacheMaxMb} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${cacheMaxMb} MB`} /><output className="settings-range-value" style={{ left: `${cacheRangePercent}%` }}>{cacheMaxMb} MB</output></span></label>
         </div>
 

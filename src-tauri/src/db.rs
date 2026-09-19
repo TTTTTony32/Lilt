@@ -1158,6 +1158,21 @@ pub fn delete_cache(connection: &Connection, cache_key: &str) -> Result<(), Stri
     Ok(())
 }
 
+pub fn clear_cache(connection: &Connection) -> Result<(), String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("开启缓存清理事务失败：{error}"))?;
+    transaction
+        .execute("DELETE FROM word_ai_cache", [])
+        .map_err(|error| format!("清理单词 AI 缓存失败：{error}"))?;
+    transaction
+        .execute("DELETE FROM translation_cache", [])
+        .map_err(|error| format!("清理翻译缓存失败：{error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交缓存清理失败：{error}"))
+}
+
 pub fn save_cache(connection: &Connection, record: &CacheRecord<'_>) -> Result<(), String> {
     save_cache_record(connection, record, true)
 }
@@ -1999,6 +2014,28 @@ mod tests {
 
         prune_cache(&connection, 1).expect("cache pruning should succeed");
         assert_eq!(get_cache_stats(&connection, 1).unwrap().entry_count, 0);
+    }
+
+    #[test]
+    fn clear_cache_removes_all_translation_cache_entries() {
+        let connection = test_connection();
+        let provider = test_provider();
+        let record = CacheRecord {
+            cache_key: "cache-key",
+            source_text: "source",
+            translated_text: "translated",
+            source_language: "en",
+            target_language: "zh-CN",
+            provider: &provider,
+            prompt_id: DEFAULT_PROMPT_ID,
+            glossary_version: 1,
+        };
+
+        save_cache(&connection, &record).expect("cache write should succeed");
+        clear_cache(&connection).expect("cache clear should succeed");
+
+        assert_eq!(get_cache_stats(&connection, 1024).unwrap().usage_bytes, 0);
+        assert_eq!(get_cache_stats(&connection, 1024).unwrap().entry_count, 0);
     }
 
     #[test]

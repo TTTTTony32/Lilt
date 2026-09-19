@@ -306,6 +306,7 @@ pub fn run() {
             save_provider_config,
             fetch_models,
             save_app_settings,
+            clear_cache,
             set_pdf_preflight_enabled,
             set_paragraph_learning_mode,
             configure_selection,
@@ -798,6 +799,15 @@ fn save_app_settings(
         paragraph_example_lookup_enabled,
         pdf_preflight_page_limit,
     )
+}
+
+#[tauri::command]
+fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::clear_cache(&connection)
 }
 
 #[tauri::command]
