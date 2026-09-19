@@ -9,7 +9,7 @@ import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
 import type { DictionaryOpenRequest } from "./DictionaryView";
-import PdfView from "./PdfView";
+import PdfView, { type PdfTranslationFloatingState } from "./PdfView";
 import { PdfEnginePanel } from "./PdfEnginePanel";
 import PersonalDictionaryView from "./PersonalDictionaryView";
 import { AnimatedOverlay } from "./components/AnimatedOverlay";
@@ -27,6 +27,7 @@ import {
   normalizeStagePercent,
   selectDownloadActivity,
   type DownloadActivity,
+  type DownloadResource,
   type ResourceDownloadPromptRequest,
 } from "./lib/download-activity";
 import {
@@ -380,6 +381,7 @@ function App() {
     downloadActivityReducer,
     initialDownloadActivityState,
   );
+  const [pdfTranslationFloating, setPdfTranslationFloating] = useState<PdfTranslationFloatingState | null>(null);
   const [resourceDownloadPrompt, setResourceDownloadPrompt] = useState<ResourceDownloadPromptRequest | null>(null);
   const [resourceDownloadDialogOpen, setResourceDownloadDialogOpen] = useState(false);
   const [resourceDownloadDialogMounted, setResourceDownloadDialogMounted] = useState(false);
@@ -623,6 +625,14 @@ function App() {
   const openDictionaryAbout = useCallback(() => {
     openSettingsAt({ sectionId: "about", anchor: "dictionary-version", modal: "dictionary" });
   }, [openSettingsAt]);
+
+  const handleDownloadActivityClick = useCallback((resource: DownloadResource) => {
+    if (resource === "pdf-engine") {
+      openPdfEngineSettings();
+      return;
+    }
+    openDictionaryAbout();
+  }, [openDictionaryAbout, openPdfEngineSettings]);
 
   settingsOpenRef.current = settingsOpen;
 
@@ -1688,7 +1698,7 @@ function App() {
             onPdfPreflightEnabledChange={(enabled) => { void handlePdfPreflightEnabledChange(enabled); }}
             onResourceDownloadPrompt={openResourceDownloadPrompt}
             onOpenPdfEngineSettings={openPdfEngineSettings}
-            onOpenPdf={openPdf}
+            onPdfTranslationFloatingChange={setPdfTranslationFloating}
           />
         </div>
         {!settingsOpen && tab !== "pdf" && (
@@ -1837,7 +1847,12 @@ function App() {
         <FeedbackMessage message={appToast?.kind === "notice" ? appToast.message : null} kind="notice" as="div" className="notice-toast toast-message" />
         <FeedbackMessage message={releaseCheckMessage} kind="notice" as="div" className="notice-toast toast-message" />
       </div>
-      <DownloadActivityStack activities={downloadActivities} />
+      <DownloadActivityStack
+        activities={downloadActivities}
+        pdfTranslation={pdfTranslationFloating}
+        onPdfTranslationClick={openPdf}
+        onResourceClick={handleDownloadActivityClick}
+      />
     </div>
   );
 }

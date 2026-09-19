@@ -114,15 +114,6 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .pdf-persistent-host.is-active { position: relative; z-index: 1; width: 100%; height: 100%; }
 .pdf-persistent-host.is-inactive { position: absolute; z-index: 5; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .pdf-page-persisted-inactive { visibility: hidden; pointer-events: none; }
-.pdf-translation-floating { position: fixed; z-index: 6; left: 18px; bottom: 18px; width: min(320px, calc(100vw - 36px)); padding: 11px 12px 10px; display: grid; gap: 7px; border: 1px solid #cbdac8; border-radius: 9px; color: #5d705f; background: rgba(249, 251, 246, .97); box-shadow: 0 10px 25px rgba(48, 61, 50, .14); text-align: left; pointer-events: auto; transition: border-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease), transform var(--motion-fast-duration) var(--motion-ease); }
-.pdf-translation-floating:hover { border-color: #9eb7a1; box-shadow: 0 12px 28px rgba(48, 61, 50, .18); transform: translateY(-1px); }
-.pdf-translation-floating:focus-visible { outline: 2px solid rgba(101, 137, 108, .5); outline-offset: 2px; }
-.pdf-translation-floating-heading { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.pdf-translation-floating-heading strong { color: #526456; font-size: 11px; font-weight: 600; }
-.pdf-translation-floating-heading span { color: #8a978b; font-size: 10px; }
-.pdf-translation-floating-track { height: 4px; overflow: hidden; border-radius: 4px; background: #e1e8df; }
-.pdf-translation-floating-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
-.pdf-translation-floating-detail { min-width: 0; overflow: hidden; color: #778479; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .bounded-list-main-content .page-transition-stack,
 .bounded-list-main-content .page-transition-layer-incoming,
 .bounded-list-main-content .page-view { height: 100%; min-height: 0; }
@@ -595,24 +586,27 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .resource-download-error { margin: 12px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
 .resource-download-running-hint { margin-right: auto; color: #9a9f96; font-size: 10px; }
 
-.download-activity-stack { position: fixed; z-index: 20; right: 18px; bottom: 18px; width: min(300px, calc(100vw - 36px)); display: grid; gap: 9px; pointer-events: none; }
-.download-activity-item { position: relative; overflow: hidden; padding: 11px 12px 10px; border: 1px solid #d8ded5; border-radius: 8px; background: rgba(251, 250, 247, .97); box-shadow: 0 10px 25px rgba(48, 61, 50, .14); animation: download-activity-in var(--motion-standard-duration) var(--motion-ease) both; }
-.download-activity-item-completed { border-color: #c7dbc7; animation: download-activity-complete-out 2.6s var(--motion-ease) both; }
-.download-activity-item-failed { border-color: #e1c7c1; }
-.download-activity-heading { min-width: 0; display: flex; align-items: center; gap: 7px; color: #536456; font-size: 11px; }
-.download-activity-icon { width: 16px; height: 16px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; color: #6e8a72; }
-.download-activity-item-failed .download-activity-icon { color: #a25e53; }
-.download-activity-item-completed .download-activity-icon { color: #61816a; }
-.download-activity-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.download-activity-progress { height: 5px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: #e1e5de; }
-.download-activity-progress span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
-.download-activity-item-completed .download-activity-progress span { background: #78a07d; }
-.download-activity-error { display: block; margin-top: 6px; overflow: hidden; color: #a25e53; font-size: 10px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
-@keyframes download-activity-in {
+.progress-floating-stack { position: fixed; z-index: 20; left: 18px; bottom: 18px; width: min(300px, calc(100vw - 36px)); display: grid; gap: 9px; pointer-events: none; }
+.progress-floating-card { position: relative; width: 100%; overflow: hidden; padding: 11px 12px 10px; border: 1px solid #d8ded5; border-radius: 8px; color: #536456; background: rgba(251, 250, 247, .97); box-shadow: 0 10px 25px rgba(48, 61, 50, .14); font: inherit; text-align: left; pointer-events: auto; animation: progress-floating-in var(--motion-standard-duration) var(--motion-ease) both; }
+.progress-floating-card-clickable { cursor: pointer; transition: border-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease), transform var(--motion-fast-duration) var(--motion-ease); }
+.progress-floating-card-clickable:hover { border-color: #9eb7a1; box-shadow: 0 12px 28px rgba(48, 61, 50, .18); transform: translateY(-1px); }
+.progress-floating-card-clickable:focus-visible { outline: 2px solid rgba(101, 137, 108, .5); outline-offset: 2px; }
+.progress-floating-card-completed { border-color: #c7dbc7; animation: progress-floating-complete-out 2.6s var(--motion-ease) both; }
+.progress-floating-card-failed { border-color: #e1c7c1; }
+.progress-floating-heading { min-width: 0; display: flex; align-items: center; gap: 7px; color: #536456; font-size: 11px; }
+.progress-floating-icon { width: 16px; height: 16px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; color: #6e8a72; }
+.progress-floating-card-failed .progress-floating-icon { color: #a25e53; }
+.progress-floating-card-completed .progress-floating-icon { color: #61816a; }
+.progress-floating-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress-floating-progress { height: 5px; margin-top: 8px; display: block; overflow: hidden; border-radius: 5px; background: #e1e5de; }
+.progress-floating-progress span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
+.progress-floating-card-completed .progress-floating-progress span { background: #78a07d; }
+.progress-floating-error { display: block; margin-top: 6px; overflow: hidden; color: #a25e53; font-size: 10px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes progress-floating-in {
   from { opacity: 0; transform: translateY(7px); }
   to { opacity: 1; transform: translateY(0); }
 }
-@keyframes download-activity-complete-out {
+@keyframes progress-floating-complete-out {
   0%, 65% { opacity: 1; transform: translateY(0); }
   100% { opacity: 0; transform: translateY(4px); }
 }
@@ -718,12 +712,11 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .pdf-task-panel-progress { grid-column: 1 / -1; grid-row: 2; }
   .pdf-task-panel-topbar-actions { grid-row: 1; }
   .pdf-task-log { height: 180px; }
-  .pdf-translation-floating { left: 12px; bottom: 12px; width: min(300px, calc(100vw - 24px)); }
   .pdf-task-panel-heading { align-items: flex-start; }
   .pdf-file-card { align-items: flex-start; flex-direction: column; }
   .pdf-file-summary { width: 100%; }
   .pdf-file-summary strong { max-width: 100%; }
-  .download-activity-stack { right: 12px; bottom: 12px; width: min(300px, calc(100vw - 24px)); }
+  .progress-floating-stack { left: 12px; bottom: 12px; width: min(300px, calc(100vw - 24px)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

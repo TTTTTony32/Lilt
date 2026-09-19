@@ -6,6 +6,7 @@ import { describeError } from "./lib/errors";
 import { type PdfFile, validatePdfPath } from "./lib/pdf";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import type { ResourceDownloadPromptRequest } from "./lib/download-activity";
+import type { FloatingProgressCardData } from "./components/FloatingProgressCard";
 import type { PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
 import {
   createEmptyPdfPreflightState,
@@ -18,7 +19,6 @@ import { appendPdfJobLogMessage, reducePdfJobLog } from "./lib/pdf-job-log";
 import {
   formatPdfTaskProgressDetail,
   isPdfJobBusy,
-  jobStatusLabel,
   progressPercent,
 } from "./lib/pdf-task-presentation";
 import type { PdfPreflightSample } from "./lib/pdf-reader-utils";
@@ -124,8 +124,10 @@ interface PdfViewProps {
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
   onOpenPdfEngineSettings: () => void;
-  onOpenPdf: () => void;
+  onPdfTranslationFloatingChange: (state: PdfTranslationFloatingState | null) => void;
 }
+
+export type PdfTranslationFloatingState = FloatingProgressCardData;
 
 export default function PdfView({
   active,
@@ -136,7 +138,7 @@ export default function PdfView({
   onPdfPreflightEnabledChange,
   onResourceDownloadPrompt,
   onOpenPdfEngineSettings,
-  onOpenPdf,
+  onPdfTranslationFloatingChange,
 }: PdfViewProps) {
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -718,11 +720,28 @@ export default function PdfView({
 
   const pdfJobBusy = isPdfJobBusy(pdfJob.status);
   const progressValue = progressPercent(pdfJob.progress);
+  const selectedFilePath = selectedFile?.path;
   const progressDetail = formatPdfTaskProgressDetail(
     pdfJob,
     pdfJob.preflight ?? createEmptyPdfPreflightState(),
     pdfPreflightEnabled,
   );
+
+  useEffect(() => {
+    if (!active && selectedFilePath && pdfJobBusy) {
+      onPdfTranslationFloatingChange({
+        status: "running",
+        statusText: `PDF 全文翻译 · ${progressDetail}`,
+        progress: progressValue,
+      });
+    } else {
+      onPdfTranslationFloatingChange(null);
+    }
+  }, [active, onPdfTranslationFloatingChange, pdfJobBusy, progressDetail, progressValue, selectedFilePath]);
+
+  useEffect(() => () => {
+    onPdfTranslationFloatingChange(null);
+  }, [onPdfTranslationFloatingChange]);
 
   return (
     <>
@@ -792,18 +811,6 @@ export default function PdfView({
         </>
       )}
       </section>
-      {!active && selectedFile && pdfJobBusy && (
-        <button className="pdf-translation-floating" type="button" onClick={onOpenPdf} aria-label="打开 PDF 翻译任务详情">
-          <span className="pdf-translation-floating-heading">
-            <strong>PDF 全文翻译</strong>
-            <span>{jobStatusLabel(pdfJob.status)}</span>
-          </span>
-          <span className="pdf-translation-floating-track" aria-hidden="true">
-            {progressValue !== null && <span style={{ width: `${progressValue}%` }} />}
-          </span>
-          <span className="pdf-translation-floating-detail">{progressDetail}</span>
-        </button>
-      )}
     </>
   );
 }
