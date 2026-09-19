@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import { ArrowLeft, Check, ChevronDown, Copy, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
 import { describeError } from "./lib/errors";
@@ -20,6 +20,7 @@ import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./com
 import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
 import { usePdfEngineRuntime, type PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
 import { summarizeUpdaterUpdate, type GitHubReleaseSummary } from "./lib/release-version";
+import { formatSelectionShortcut } from "./lib/selection-shortcut";
 import {
   downloadActivityKey,
   downloadActivityReducer,
@@ -130,14 +131,22 @@ interface TranslationSummary {
 type TranslationRequestMode = "plain" | "learning";
 
 const SETTINGS_SECTIONS = [
-  { id: "provider", label: "Provider", icon: Settings },
-  { id: "prompt", label: "Prompt", icon: FileText },
+  { id: "provider", label: "LLM提供商", icon: Settings },
+  { id: "prompt", label: "提示词", icon: FileText },
   { id: "selection", label: "划词翻译", icon: Languages },
   { id: "pdf", label: "PDF 全文翻译", icon: FileType2 },
-  { id: "local", label: "本地数据", icon: FileType2 },
+  { id: "local", label: "本地数据", icon: Database },
   { id: "behavior", label: "关闭行为", icon: X },
   { id: "about", label: "关于", icon: Info },
 ] as const;
+
+const SELECTION_MODE_OPTIONS: ReadonlyArray<{
+  value: AppSettings["selectionMode"];
+  label: string;
+}> = [
+  { value: "shortcut", label: "按快捷键" },
+  { value: "automatic", label: "自动监听选区" },
+];
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 type SettingsResourceModal = "dictionary" | "pdf-engine";
@@ -2734,7 +2743,7 @@ function PromptManager({
         content: draft.content,
       });
       const next = decodePrompt(raw);
-      if (!next) throw new Error("Prompt 命令返回了无法识别的结果");
+      if (!next) throw new Error("提示词命令返回了无法识别的结果");
       if (version === promptSaveVersionRef.current) {
         promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content };
         promptDirtyRef.current = false;
@@ -2747,7 +2756,7 @@ function PromptManager({
       await onChanged();
     } catch (reason) {
       if (version === promptSaveVersionRef.current && !promptDisposedRef.current) {
-        onToast(describeError(reason, "Prompt 自动保存失败"), "error");
+        onToast(describeError(reason, "提示词自动保存失败"), "error");
       }
     } finally {
       promptSavingRef.current = false;
@@ -2822,7 +2831,7 @@ function PromptManager({
     try {
       const raw = await invokeCommand<unknown>("create_prompt");
       const next = decodePrompt(raw);
-      if (!next) throw new Error("Prompt 命令返回了无法识别的结果。");
+      if (!next) throw new Error("提示词命令返回了无法识别的结果。");
       promptSaveVersionRef.current += 1;
       promptDirtyRef.current = false;
       pendingSelectionIdRef.current = next.id;
@@ -2833,7 +2842,7 @@ function PromptManager({
       await onChanged();
       onToast(`已创建${next.name}`);
     } catch (reason) {
-      onToast(describeError(reason, "创建 Prompt 失败"), "error");
+      onToast(describeError(reason, "创建提示词失败"), "error");
     } finally {
       setCreating(false);
     }
@@ -2843,28 +2852,28 @@ function PromptManager({
     try {
       await invokeCommand("set_default_prompt", { id: prompt.id });
       await onChanged();
-      onToast(`已将${prompt.name}设为默认 Prompt`);
+      onToast(`已将${prompt.name}设为默认提示词`);
     } catch (reason) {
-      onToast(describeError(reason, "设置默认 Prompt 失败"), "error");
+      onToast(describeError(reason, "设置默认提示词失败"), "error");
     }
   };
 
   const remove = async (prompt: Prompt) => {
     if (prompt.isBuiltin || prompt.id === currentPromptId) return;
-    if (!window.confirm(`确定删除 Prompt「${prompt.name}」吗？`)) return;
+    if (!window.confirm(`确定删除提示词「${prompt.name}」吗？`)) return;
     try {
       await invokeCommand("delete_prompt", { id: prompt.id });
       await onChanged();
       setSelectedId(currentPromptId);
-      onToast("Prompt 已删除");
+      onToast("提示词已删除");
     } catch (reason) {
-      onToast(describeError(reason, "删除 Prompt 失败"), "error");
+      onToast(describeError(reason, "删除提示词失败"), "error");
     }
   };
 
   return (
     <div className="prompt-manager-card">
-      <div className="card-heading settings-section-heading"><div><strong>Prompt</strong></div></div>
+      <div className="card-heading settings-section-heading"><div><strong>提示词</strong></div></div>
       <div className="prompt-manager-grid">
         <div className="prompt-list">
           {prompts.map((prompt) => (
@@ -2878,8 +2887,8 @@ function PromptManager({
                   type="button"
                   onClick={() => void setDefault(prompt)}
                   disabled={prompt.id === currentPromptId}
-                  title={prompt.id === currentPromptId ? "当前已是默认 Prompt" : `将${prompt.name}设为默认 Prompt`}
-                  aria-label={prompt.id === currentPromptId ? "当前已是默认 Prompt" : `将${prompt.name}设为默认 Prompt`}
+                  title={prompt.id === currentPromptId ? "当前已是默认提示词" : `将${prompt.name}设为默认提示词`}
+                  aria-label={prompt.id === currentPromptId ? "当前已是默认提示词" : `将${prompt.name}设为默认提示词`}
                 >
                   <Check size={14} strokeWidth={2.2} aria-hidden="true" />
                 </button>
@@ -2888,8 +2897,8 @@ function PromptManager({
                   type="button"
                   onClick={() => void remove(prompt)}
                   disabled={prompt.isBuiltin || prompt.id === currentPromptId}
-                  title={prompt.id === currentPromptId ? "当前默认 Prompt 不可删除" : prompt.isBuiltin ? "内置 Prompt 不可删除" : `删除${prompt.name}`}
-                  aria-label={prompt.id === currentPromptId ? "当前默认 Prompt 不可删除" : prompt.isBuiltin ? "内置 Prompt 不可删除" : `删除${prompt.name}`}
+                  title={prompt.id === currentPromptId ? "当前默认提示词不可删除" : prompt.isBuiltin ? "内置提示词不可删除" : `删除${prompt.name}`}
+                  aria-label={prompt.id === currentPromptId ? "当前默认提示词不可删除" : prompt.isBuiltin ? "内置提示词不可删除" : `删除${prompt.name}`}
                 >
                   <Trash2 size={14} aria-hidden="true" />
                 </button>
@@ -2897,7 +2906,7 @@ function PromptManager({
             </div>
           ))}
           <button className="prompt-list-item prompt-list-create" type="button" onClick={() => void createPrompt()} disabled={creating}>
-            <span><strong>新增自定义 Prompt</strong><small>创建空白提示词</small></span>
+            <span><strong>新增自定义提示词</strong><small>创建空白提示词</small></span>
             <em aria-hidden="true">＋</em>
           </button>
         </div>
@@ -3204,7 +3213,10 @@ function SettingsView({
   const [settings, setSettings] = useState<AppSettings>(snapshot.settings);
   const [selectionMode, setSelectionMode] = useState(snapshot.settings.selectionMode);
   const [selectionShortcut, setSelectionShortcut] = useState(snapshot.settings.selectionShortcut);
+  const [selectionShortcutListening, setSelectionShortcutListening] = useState(false);
   const [selectionStatus, setSelectionStatus] = useState<SelectionRuntimeStatus | null>(null);
+  const selectionShortcutBeforeListeningRef = useRef(snapshot.settings.selectionShortcut);
+  const selectionShortcutListeningRef = useRef(false);
   const settingsDraftRef = useRef<SettingsDraft>(createSettingsDraft(snapshot));
   const saveTimerRef = useRef<number | null>(null);
   const saveVersionRef = useRef(0);
@@ -3294,6 +3306,54 @@ function SettingsView({
   const updateSelectionDraft = useCallback((patch: Partial<Pick<SettingsDraft, "selectionMode" | "selectionShortcut">>) => {
     updateDraft((current) => ({ ...current, ...patch }));
   }, [updateDraft]);
+
+  const startSelectionShortcutListening = useCallback(() => {
+    selectionShortcutBeforeListeningRef.current = selectionShortcut;
+    selectionShortcutListeningRef.current = true;
+    setSelectionShortcutListening(true);
+    setSelectionShortcut("");
+  }, [selectionShortcut]);
+
+  const cancelSelectionShortcutListening = useCallback(() => {
+    if (!selectionShortcutListeningRef.current) return;
+    selectionShortcutListeningRef.current = false;
+    setSelectionShortcutListening(false);
+    setSelectionShortcut(selectionShortcutBeforeListeningRef.current);
+  }, []);
+
+  const handleSelectionShortcutKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (!selectionShortcutListeningRef.current) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelSelectionShortcutListening();
+      event.currentTarget.blur();
+      return;
+    }
+    if (event.key === "Tab") return;
+
+    event.preventDefault();
+    const nextShortcut = formatSelectionShortcut(event);
+    if (!nextShortcut) return;
+
+    selectionShortcutListeningRef.current = false;
+    setSelectionShortcutListening(false);
+    updateSelectionDraft({ selectionShortcut: nextShortcut });
+  }, [cancelSelectionShortcutListening, updateSelectionDraft]);
+
+  const handleSelectionModeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = SELECTION_MODE_OPTIONS.findIndex((option) => option.value === selectionMode);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? SELECTION_MODE_OPTIONS.length - 1
+        : (currentIndex + (["ArrowUp", "ArrowLeft"].includes(event.key) ? -1 : 1) + SELECTION_MODE_OPTIONS.length) % SELECTION_MODE_OPTIONS.length;
+    const nextOption = SELECTION_MODE_OPTIONS[nextIndex];
+    if (!nextOption) return;
+    updateSelectionDraft({ selectionMode: nextOption.value });
+    event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-selection-mode="${nextOption.value}"]`)?.focus();
+  }, [selectionMode, updateSelectionDraft]);
 
   const openResourceModal = useCallback((kind: SettingsResourceModal, returnFocusElement?: HTMLElement | null) => {
     resourceModalReturnFocusRef.current = returnFocusElement
@@ -3520,7 +3580,7 @@ function SettingsView({
       <div className="settings-content">
         <div className="settings-content-scroll" ref={settingsScrollRef}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
-          <div className="card-heading"><div><strong>OpenAI-compatible Provider</strong></div></div>
+          <div className="card-heading"><div><strong>LLM提供商</strong></div></div>
           <div className="form-grid">
             <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" /></label>
             {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" /></label>}
@@ -3537,8 +3597,43 @@ function SettingsView({
         <div className="settings-section" id="settings-section-selection" data-settings-section="selection" ref={(element) => { settingsSectionRefs.current.selection = element; }}>
           <div className="card-heading"><div><strong>划词翻译</strong></div></div>
           <div className="form-grid selection-settings-grid">
-            <SettingsSelectField label="触发方式" id="settings-selection-mode" ariaLabel="触发方式" value={selectionMode} options={[{ value: "shortcut", label: "按快捷键" }, { value: "automatic", label: "自动监听选区" }]} onChange={(value) => updateSelectionDraft({ selectionMode: value as AppSettings["selectionMode"] })} />
-            <label>快捷键<input value={selectionShortcut} onChange={(event) => updateSelectionDraft({ selectionShortcut: event.target.value })} placeholder="Ctrl+Shift+L" /></label>
+            <div className="selection-mode-field">
+              <span className="settings-select-label" id="settings-selection-mode-label">触发方式</span>
+              <div className="selection-mode-options" role="radiogroup" aria-labelledby="settings-selection-mode-label">
+                {SELECTION_MODE_OPTIONS.map((option) => {
+                  const selected = option.value === selectionMode;
+                  return (
+                    <button
+                      className={`selection-mode-card ${selected ? "is-selected" : ""}`}
+                      type="button"
+                      key={option.value}
+                      role="radio"
+                      aria-checked={selected}
+                      tabIndex={selected ? 0 : -1}
+                      data-selection-mode={option.value}
+                      onClick={() => updateSelectionDraft({ selectionMode: option.value })}
+                      onKeyDown={handleSelectionModeKeyDown}
+                    >
+                      <span className="selection-mode-card-copy"><strong>{option.label}</strong></span>
+                      <span className="selection-mode-card-indicator" aria-hidden="true"><Check size={14} strokeWidth={2.2} /></span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <label className={`selection-shortcut-field ${selectionShortcutListening ? "is-listening" : ""}`}>
+              <span>快捷键</span>
+              <input
+                className="selection-shortcut-input"
+                value={selectionShortcut}
+                readOnly
+                onFocus={startSelectionShortcutListening}
+                onBlur={cancelSelectionShortcutListening}
+                onKeyDown={handleSelectionShortcutKeyDown}
+                placeholder="按任意键/组合键"
+                aria-label="快捷键"
+              />
+            </label>
           </div>
         </div>
 
@@ -3566,10 +3661,28 @@ function SettingsView({
         <div className="settings-section" id="settings-section-local" data-settings-section="local" ref={(element) => { settingsSectionRefs.current.local = element; }}>
           <div className="card-heading"><div><strong>本地数据</strong></div></div>
           <label className="setting-line"><span><strong>翻译历史保留条数</strong></span><input className="number-input" type="number" min={1} max={1000} value={settings.historyRetention} onChange={(event) => updateAppSettingsDraft({ historyRetention: Number(event.target.value) })} /></label>
-          <label className="setting-line"><span><strong>启用段落翻译缓存</strong></span><input type="checkbox" checked={settings.cacheEnabled} onChange={(event) => updateAppSettingsDraft({ cacheEnabled: event.target.checked })} /></label>
-          <label className="setting-line"><span><strong>缓存单词 AI 见解</strong></span><input type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => updateAppSettingsDraft({ wordAiCacheEnabled: event.target.checked })} /></label>
-          <label className="setting-line"><span><strong>从段落缓存查找例句</strong></span><input type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => updateAppSettingsDraft({ paragraphExampleLookupEnabled: event.target.checked })} /></label>
-          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><input type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} /></label>
+          <label className={`setting-line settings-switch-line ${settings.cacheEnabled ? "is-enabled" : ""}`}>
+            <span><strong>启用段落翻译缓存</strong></span>
+            <span className="settings-switch">
+              <input className="settings-switch-input" type="checkbox" checked={settings.cacheEnabled} onChange={(event) => updateAppSettingsDraft({ cacheEnabled: event.target.checked })} aria-label="启用段落翻译缓存" />
+              <span className="settings-switch-track" aria-hidden="true"><span /></span>
+            </span>
+          </label>
+          <label className={`setting-line settings-switch-line ${settings.wordAiCacheEnabled ? "is-enabled" : ""}`}>
+            <span><strong>缓存单词 AI 见解</strong></span>
+            <span className="settings-switch">
+              <input className="settings-switch-input" type="checkbox" checked={settings.wordAiCacheEnabled} onChange={(event) => updateAppSettingsDraft({ wordAiCacheEnabled: event.target.checked })} aria-label="缓存单词 AI 见解" />
+              <span className="settings-switch-track" aria-hidden="true"><span /></span>
+            </span>
+          </label>
+          <label className={`setting-line settings-switch-line ${settings.paragraphExampleLookupEnabled ? "is-enabled" : ""}`}>
+            <span><strong>从段落缓存查找例句</strong></span>
+            <span className="settings-switch">
+              <input className="settings-switch-input" type="checkbox" checked={settings.paragraphExampleLookupEnabled} onChange={(event) => updateAppSettingsDraft({ paragraphExampleLookupEnabled: event.target.checked })} aria-label="从段落缓存查找例句" />
+              <span className="settings-switch-track" aria-hidden="true"><span /></span>
+            </span>
+          </label>
+          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB`} /><output className="settings-range-value">{Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB</output></span></label>
         </div>
 
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>
