@@ -5,6 +5,8 @@ use crate::paragraph_learning::ParagraphLearningResult;
 
 pub const DEFAULT_PROVIDER_ID: &str = "default";
 pub const DEFAULT_PROMPT_ID: &str = "builtin-general";
+pub const DEFAULT_PROMPT_SOURCE_LANGUAGE: &str = "auto";
+pub const DEFAULT_PROMPT_TARGET_LANGUAGE: &str = "zh-CN";
 pub const DEFAULT_THINKING_EFFORT: ThinkingEffort = ThinkingEffort::None;
 pub const DEFAULT_GLOSSARY_ID: &str = "global";
 pub const DEFAULT_HISTORY_RETENTION: i64 = 50;
@@ -238,6 +240,8 @@ pub struct Prompt {
     pub id: String,
     pub name: String,
     pub content: String,
+    pub source_language: String,
+    pub target_language: String,
     pub version: i64,
     pub is_builtin: bool,
 }

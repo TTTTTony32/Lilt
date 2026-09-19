@@ -2,15 +2,15 @@ use crate::contracts::{
     AppSettings, CacheStats, CachedTranslation, CloseBehavior, DEFAULT_CACHE_MAX_BYTES,
     DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED,
     DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED, DEFAULT_PDF_PREFLIGHT_ENABLED,
-    DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT, DEFAULT_PROMPT_ID, DEFAULT_PROVIDER_ID,
-    DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT,
-    DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED,
-    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
-    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_CACHE_MAX_BYTES,
-    MAX_PDF_PREFLIGHT_PAGE_LIMIT, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-    MIN_CACHE_MAX_BYTES, MIN_PDF_PREFLIGHT_PAGE_LIMIT, MIN_SELECTION_WINDOW_HEIGHT,
-    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
-    SelectionMode, ThinkingEffort, parse_selection_window_dimension,
+    DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT, DEFAULT_PROMPT_ID, DEFAULT_PROMPT_SOURCE_LANGUAGE,
+    DEFAULT_PROMPT_TARGET_LANGUAGE, DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE,
+    DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH,
+    DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
+    DICTIONARY_SQLITE_SCHEMA_VERSION, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
+    MAX_CACHE_MAX_BYTES, MAX_PDF_PREFLIGHT_PAGE_LIMIT, MAX_SELECTION_WINDOW_HEIGHT,
+    MAX_SELECTION_WINDOW_WIDTH, MIN_CACHE_MAX_BYTES, MIN_PDF_PREFLIGHT_PAGE_LIMIT,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry,
+    Prompt, ProviderRecord, SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
 use crate::glossary::GlossaryImportTerm;
 use chrono::Utc;
@@ -139,6 +139,8 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 id TEXT PRIMARY KEY NOT NULL,
                 name TEXT NOT NULL,
                 content TEXT NOT NULL,
+                source_language TEXT NOT NULL DEFAULT 'auto',
+                target_language TEXT NOT NULL DEFAULT 'zh-CN',
                 version INTEGER NOT NULL,
                 is_builtin INTEGER NOT NULL DEFAULT 0
             );
@@ -287,6 +289,7 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         .map_err(|error| format!("数据库迁移失败：{error}"))?;
 
     ensure_provider_thinking_effort_column(connection)?;
+    ensure_prompt_language_columns(connection)?;
 
     connection
         .execute(
@@ -314,6 +317,34 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("默认术语表初始化失败：{error}"))?;
 
+    Ok(())
+}
+
+fn ensure_prompt_language_columns(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(prompts)")
+        .map_err(|error| format!("检查 Prompt 数据库结构失败：{error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("读取 Prompt 数据库结构失败：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取 Prompt 数据库结构失败：{error}"))?;
+    if !columns.iter().any(|column| column == "source_language") {
+        connection
+            .execute(
+                "ALTER TABLE prompts ADD COLUMN source_language TEXT NOT NULL DEFAULT 'auto'",
+                [],
+            )
+            .map_err(|error| format!("升级 Prompt 源语言字段失败：{error}"))?;
+    }
+    if !columns.iter().any(|column| column == "target_language") {
+        connection
+            .execute(
+                "ALTER TABLE prompts ADD COLUMN target_language TEXT NOT NULL DEFAULT 'zh-CN'",
+                [],
+            )
+            .map_err(|error| format!("升级 Prompt 目标语言字段失败：{error}"))?;
+    }
     Ok(())
 }
 
@@ -805,7 +836,7 @@ pub fn replace_models(connection: &Connection, models: &[ModelInfo]) -> Result<(
 pub fn list_prompts(connection: &Connection) -> Result<Vec<Prompt>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, name, content, version, is_builtin FROM prompts
+            "SELECT id, name, content, source_language, target_language, version, is_builtin FROM prompts
              ORDER BY is_builtin DESC,
                       CASE id WHEN ?1 THEN 0 WHEN ?2 THEN 1 ELSE 2 END,
                       name",
@@ -819,8 +850,10 @@ pub fn list_prompts(connection: &Connection) -> Result<Vec<Prompt>, String> {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     content: row.get(2)?,
-                    version: row.get(3)?,
-                    is_builtin: row.get::<_, i64>(4)? != 0,
+                    source_language: row.get(3)?,
+                    target_language: row.get(4)?,
+                    version: row.get(5)?,
+                    is_builtin: row.get::<_, i64>(6)? != 0,
                 })
             },
         )
@@ -832,15 +865,17 @@ pub fn list_prompts(connection: &Connection) -> Result<Vec<Prompt>, String> {
 pub fn get_prompt(connection: &Connection, prompt_id: &str) -> Result<Prompt, String> {
     connection
         .query_row(
-            "SELECT id, name, content, version, is_builtin FROM prompts WHERE id = ?1",
+            "SELECT id, name, content, source_language, target_language, version, is_builtin FROM prompts WHERE id = ?1",
             params![prompt_id],
             |row| {
                 Ok(Prompt {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     content: row.get(2)?,
-                    version: row.get(3)?,
-                    is_builtin: row.get::<_, i64>(4)? != 0,
+                    source_language: row.get(3)?,
+                    target_language: row.get(4)?,
+                    version: row.get(5)?,
+                    is_builtin: row.get::<_, i64>(6)? != 0,
                 })
             },
         )
@@ -873,8 +908,8 @@ pub fn create_prompt(connection: &Connection) -> Result<Prompt, String> {
     let id = uuid::Uuid::new_v4().to_string();
     transaction
         .execute(
-            "INSERT INTO prompts (id, name, content, version, is_builtin) VALUES (?1, ?2, '', 1, 0)",
-            params![id, name],
+            "INSERT INTO prompts (id, name, content, source_language, target_language, version, is_builtin) VALUES (?1, ?2, '', ?3, ?4, 1, 0)",
+            params![id, name, DEFAULT_PROMPT_SOURCE_LANGUAGE, DEFAULT_PROMPT_TARGET_LANGUAGE],
         )
         .map_err(|error| format!("创建 Prompt 失败：{error}"))?;
     transaction
@@ -888,17 +923,24 @@ pub fn update_prompt(
     prompt_id: &str,
     name: &str,
     content: &str,
+    source_language: &str,
+    target_language: &str,
 ) -> Result<Prompt, String> {
     let name = name.trim();
     let content = content.trim();
+    let source_language = source_language.trim();
+    let target_language = target_language.trim();
     if name.is_empty() {
         return Err("Prompt 名称不能为空".to_string());
+    }
+    if source_language.is_empty() || target_language.is_empty() {
+        return Err("Prompt 源语言和目标语言不能为空".to_string());
     }
     get_prompt(connection, prompt_id)?;
     connection
         .execute(
-            "UPDATE prompts SET name = ?1, content = ?2, version = version + 1 WHERE id = ?3",
-            params![name, content, prompt_id],
+            "UPDATE prompts SET name = ?1, content = ?2, source_language = ?3, target_language = ?4, version = version + 1 WHERE id = ?5",
+            params![name, content, source_language, target_language, prompt_id],
         )
         .map_err(|error| format!("更新 Prompt 失败：{error}"))?;
     get_prompt(connection, prompt_id)
@@ -2479,6 +2521,8 @@ mod tests {
             prompt.id == DEFAULT_PROMPT_ID
                 && prompt.name == BUILTIN_LITERAL_PROMPT_NAME
                 && prompt.content == BUILTIN_LITERAL_PROMPT_CONTENT
+                && prompt.source_language == DEFAULT_PROMPT_SOURCE_LANGUAGE
+                && prompt.target_language == DEFAULT_PROMPT_TARGET_LANGUAGE
         }));
         assert!(prompts.iter().any(|prompt| {
             prompt.id == BUILTIN_NATURAL_PROMPT_ID
@@ -2498,8 +2542,15 @@ mod tests {
             Some("1")
         );
 
-        update_prompt(&connection, BUILTIN_NATURAL_PROMPT_ID, "我的自然", "已编辑")
-            .expect("builtin prompt should be editable");
+        update_prompt(
+            &connection,
+            BUILTIN_NATURAL_PROMPT_ID,
+            "我的自然",
+            "已编辑",
+            "auto",
+            "zh-CN",
+        )
+        .expect("builtin prompt should be editable");
         migrate(&connection).expect("prompt migration should be idempotent");
         let natural = get_prompt(&connection, BUILTIN_NATURAL_PROMPT_ID)
             .expect("edited builtin prompt should be readable");
@@ -2521,6 +2572,8 @@ mod tests {
             BUILTIN_NATURAL_PROMPT_ID,
             "我的自然",
             "我的翻译要求",
+            "en",
+            "zh-CN",
         )
         .unwrap();
         let before = get_prompt(&connection, DEFAULT_PROMPT_ID).unwrap();
@@ -2553,21 +2606,38 @@ mod tests {
         let first = create_prompt(&connection).expect("first custom prompt should be created");
         assert_eq!(first.name, "自定义提示词1");
         assert_eq!(first.content, "");
+        assert_eq!(first.source_language, DEFAULT_PROMPT_SOURCE_LANGUAGE);
+        assert_eq!(first.target_language, DEFAULT_PROMPT_TARGET_LANGUAGE);
         assert!(!first.is_builtin);
         let second = create_prompt(&connection).expect("second custom prompt should be created");
         assert_eq!(second.name, "自定义提示词2");
 
-        let updated_builtin =
-            update_prompt(&connection, DEFAULT_PROMPT_ID, "忠实直译（已编辑）", "")
-                .expect("builtin prompt should be editable");
+        let updated_builtin = update_prompt(
+            &connection,
+            DEFAULT_PROMPT_ID,
+            "忠实直译（已编辑）",
+            "",
+            "auto",
+            "zh-CN",
+        )
+        .expect("builtin prompt should be editable");
         assert_eq!(updated_builtin.content, "");
         assert_eq!(updated_builtin.version, 2);
 
-        let updated = update_prompt(&connection, &first.id, "自定义提示词一", "保留 Markdown")
-            .expect("custom prompt should be updated");
+        let updated = update_prompt(
+            &connection,
+            &first.id,
+            "自定义提示词一",
+            "保留 Markdown",
+            "en",
+            "zh-CN",
+        )
+        .expect("custom prompt should be updated");
         assert_eq!(updated.version, 2);
         assert_eq!(updated.content, "保留 Markdown");
-        let emptied = update_prompt(&connection, &first.id, "自定义提示词一", "")
+        assert_eq!(updated.source_language, "en");
+        assert_eq!(updated.target_language, "zh-CN");
+        let emptied = update_prompt(&connection, &first.id, "自定义提示词一", "", "en", "zh-CN")
             .expect("custom prompt should allow empty content");
         assert_eq!(emptied.content, "");
 

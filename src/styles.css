@@ -557,6 +557,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .prompt-list-item.prompt-list-create { flex-direction: row; align-items: center; }
 .prompt-list-create em { color: #7a9a7e; font-size: 17px; line-height: 1; }
 .prompt-editor-panel { min-width: 0; display: grid; gap: 12px; }
+.prompt-language-fields { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .prompt-editor-panel label { display: grid; gap: 7px; color: #7c8178; font-size: 11px; }
 .prompt-editor { height: 190px; min-height: 190px; max-height: 190px; padding: 11px; resize: none; overflow-y: auto; scrollbar-width: none; border: 1px solid #deded5; border-radius: 6px; color: #4c554d; background: #fffefb; font-size: 12px; line-height: 1.7; }
 .prompt-editor::-webkit-scrollbar { width: 0; height: 0; display: none; }

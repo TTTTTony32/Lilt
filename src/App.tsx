@@ -112,6 +112,7 @@ const LANGUAGE_OPTIONS = [
   ["日语", "ja"],
   ["韩语", "ko"],
 ] as const;
+const SOURCE_LANGUAGE_OPTIONS = [["自动检测", "auto"], ...LANGUAGE_OPTIONS] as const;
 
 const APP_VERSION = packageJson.version;
 const MIN_CACHE_SIZE_MB = 16;
@@ -197,8 +198,8 @@ function formatTranslationSummary(summary: TranslationSummary): string {
   return `${(summary.durationMs / 1000).toFixed(2)}秒·${summary.cacheHit ? "缓存命中" : "未命中缓存"}`;
 }
 
-function languageLabel(value: string): string {
-  return LANGUAGE_OPTIONS.find(([, code]) => code === value)?.[0] ?? value;
+function languageLabel(value: string, options: readonly (readonly [string, string])[] = LANGUAGE_OPTIONS): string {
+  return options.find(([, code]) => code === value)?.[0] ?? value;
 }
 
 function formatBytes(bytes: number): string {
@@ -368,7 +369,7 @@ function App() {
   const [tab, setTab] = useState<AppTab>("translate");
   const [sourceText, setSourceText] = useState("");
   const [translatedText, setTranslatedText] = useState("");
-  const [sourceLanguage, setSourceLanguage] = useState("en");
+  const [sourceLanguage, setSourceLanguage] = useState("auto");
   const [targetLanguage, setTargetLanguage] = useState("zh-CN");
   const [status, setStatus] = useState<TranslationStatus>("idle");
   const [activeRequestMode, setActiveRequestMode] = useState<TranslationRequestMode | null>(null);
@@ -2392,17 +2393,19 @@ function LanguageSelect({
   ariaLabel,
   value,
   onChange,
+  options = LANGUAGE_OPTIONS,
 }: {
   id: string;
   ariaLabel: string;
   value: string;
   onChange: (value: string) => void;
+  options?: readonly (readonly [string, string])[];
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [open, setOpen] = useState(false);
-  const selectedIndex = Math.max(0, LANGUAGE_OPTIONS.findIndex(([, code]) => code === value));
+  const selectedIndex = Math.max(0, options.findIndex(([, code]) => code === value));
   const [highlightedIndex, setHighlightedIndex] = useState(selectedIndex);
 
   useEffect(() => {
@@ -2442,7 +2445,7 @@ function LanguageSelect({
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
       const nextIndex = open
-        ? (highlightedIndex + direction + LANGUAGE_OPTIONS.length) % LANGUAGE_OPTIONS.length
+        ? (highlightedIndex + direction + options.length) % options.length
         : selectedIndex;
       setOpen(true);
       focusOption(nextIndex);
@@ -2458,12 +2461,12 @@ function LanguageSelect({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      focusOption((index + direction + LANGUAGE_OPTIONS.length) % LANGUAGE_OPTIONS.length);
+      focusOption((index + direction + options.length) % options.length);
       return;
     }
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
-      focusOption(event.key === "Home" ? 0 : LANGUAGE_OPTIONS.length - 1);
+      focusOption(event.key === "Home" ? 0 : options.length - 1);
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -2493,12 +2496,12 @@ function LanguageSelect({
         onClick={() => setOpen((current) => !current)}
         onKeyDown={handleButtonKeyDown}
       >
-        <span>{languageLabel(value)}</span>
+        <span>{languageLabel(value, options)}</span>
         <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
       </button>
       {open && (
         <div className="translation-language-menu" id={`${id}-menu`} role="listbox" aria-label={ariaLabel}>
-          {LANGUAGE_OPTIONS.map(([label, optionValue], index) => (
+          {options.map(([label, optionValue], index) => (
             <button
               className={`translation-language-option ${index === selectedIndex ? "is-selected" : ""} ${index === highlightedIndex ? "is-highlighted" : ""}`}
               key={optionValue}
@@ -2553,7 +2556,7 @@ function TranslateView(props: TranslateViewProps) {
         <div className="translation-column">
           <div className="translation-language">
             <span>原文</span>
-            <LanguageSelect id="source-language" ariaLabel="原文语言" value={props.sourceLanguage} onChange={props.onSourceLanguageChange} />
+            <LanguageSelect id="source-language" ariaLabel="原文语言" value={props.sourceLanguage} onChange={props.onSourceLanguageChange} options={SOURCE_LANGUAGE_OPTIONS} />
           </div>
           <div className="translation-panel">
             <div className="translation-scroll-region">
@@ -2701,16 +2704,20 @@ function PromptManager({
   onChanged: () => Promise<void>;
   onToast: ShowToast;
 }) {
-  type PromptDraft = { selectedId: string | null; name: string; content: string };
+  type PromptDraft = { selectedId: string | null; name: string; content: string; sourceLanguage: string; targetLanguage: string };
   const initialPrompt = prompts.find((prompt) => prompt.id === currentPromptId) ?? prompts[0] ?? null;
   const [selectedId, setSelectedId] = useState<string | null>(initialPrompt?.id ?? null);
   const [name, setName] = useState(initialPrompt?.name ?? "");
   const [content, setContent] = useState(initialPrompt?.content ?? "");
+  const [sourceLanguage, setSourceLanguage] = useState(initialPrompt?.sourceLanguage ?? "auto");
+  const [targetLanguage, setTargetLanguage] = useState(initialPrompt?.targetLanguage ?? "zh-CN");
   const [creating, setCreating] = useState(false);
   const promptDraftRef = useRef<PromptDraft>({
     selectedId: initialPrompt?.id ?? null,
     name: initialPrompt?.name ?? "",
     content: initialPrompt?.content ?? "",
+    sourceLanguage: initialPrompt?.sourceLanguage ?? "auto",
+    targetLanguage: initialPrompt?.targetLanguage ?? "zh-CN",
   });
   const promptSaveTimerRef = useRef<number | null>(null);
   const promptSaveVersionRef = useRef(0);
@@ -2733,13 +2740,17 @@ function PromptManager({
       setSelectedId(null);
       setName("");
       setContent("");
-      promptDraftRef.current = { selectedId: null, name: "", content: "" };
+      setSourceLanguage("auto");
+      setTargetLanguage("zh-CN");
+      promptDraftRef.current = { selectedId: null, name: "", content: "", sourceLanguage: "auto", targetLanguage: "zh-CN" };
       return;
     }
     if (selected.id !== selectedId) setSelectedId(selected.id);
     setName(selected.name);
     setContent(selected.content);
-    promptDraftRef.current = { selectedId: selected.id, name: selected.name, content: selected.content };
+    setSourceLanguage(selected.sourceLanguage);
+    setTargetLanguage(selected.targetLanguage);
+    promptDraftRef.current = { selectedId: selected.id, name: selected.name, content: selected.content, sourceLanguage: selected.sourceLanguage, targetLanguage: selected.targetLanguage };
   }, [currentPromptId, prompts, selectedId]);
 
   const savePromptDraft = useCallback(async (draft: PromptDraft, version: number) => {
@@ -2755,16 +2766,20 @@ function PromptManager({
         id: draft.selectedId,
         name: draft.name,
         content: draft.content,
+        sourceLanguage: draft.sourceLanguage,
+        targetLanguage: draft.targetLanguage,
       });
       const next = decodePrompt(raw);
       if (!next) throw new Error("提示词命令返回了无法识别的结果");
       if (version === promptSaveVersionRef.current) {
-        promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content };
+        promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content, sourceLanguage: next.sourceLanguage, targetLanguage: next.targetLanguage };
         promptDirtyRef.current = false;
         if (!promptDisposedRef.current) {
           setSelectedId(next.id);
           setName(next.name);
           setContent(next.content);
+          setSourceLanguage(next.sourceLanguage);
+          setTargetLanguage(next.targetLanguage);
         }
       }
       await onChanged();
@@ -2795,12 +2810,14 @@ function PromptManager({
     }, 650);
   }, [savePromptDraft]);
 
-  const updatePromptDraft = (patch: Partial<{ name: string; content: string }>) => {
+  const updatePromptDraft = (patch: Partial<{ name: string; content: string; sourceLanguage: string; targetLanguage: string }>) => {
     const next = { ...promptDraftRef.current, ...patch };
     promptDraftRef.current = next;
     promptDirtyRef.current = true;
     setName(next.name);
     setContent(next.content);
+    setSourceLanguage(next.sourceLanguage);
+    setTargetLanguage(next.targetLanguage);
     schedulePromptSave();
   };
 
@@ -2824,10 +2841,12 @@ function PromptManager({
     promptSaveVersionRef.current += 1;
     promptDirtyRef.current = false;
     pendingSelectionIdRef.current = null;
-    promptDraftRef.current = { selectedId: prompt.id, name: prompt.name, content: prompt.content };
+    promptDraftRef.current = { selectedId: prompt.id, name: prompt.name, content: prompt.content, sourceLanguage: prompt.sourceLanguage, targetLanguage: prompt.targetLanguage };
     setSelectedId(prompt.id);
     setName(prompt.name);
     setContent(prompt.content);
+    setSourceLanguage(prompt.sourceLanguage);
+    setTargetLanguage(prompt.targetLanguage);
   };
 
   const createPrompt = async () => {
@@ -2849,10 +2868,12 @@ function PromptManager({
       promptSaveVersionRef.current += 1;
       promptDirtyRef.current = false;
       pendingSelectionIdRef.current = next.id;
-      promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content };
+      promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content, sourceLanguage: next.sourceLanguage, targetLanguage: next.targetLanguage };
       setSelectedId(next.id);
       setName(next.name);
       setContent(next.content);
+      setSourceLanguage(next.sourceLanguage);
+      setTargetLanguage(next.targetLanguage);
       await onChanged();
       onToast(`已创建${next.name}`);
     } catch (reason) {
@@ -2926,6 +2947,26 @@ function PromptManager({
         </div>
         <div className="prompt-editor-panel">
           <label>名称<input value={name} onChange={(event) => updatePromptDraft({ name: event.target.value })} disabled={!selectedId || creating} /></label>
+          <div className="prompt-language-fields">
+            <SettingsSelectField
+              label="源语言"
+              id={`prompt-source-language-${selectedId ?? "empty"}`}
+              ariaLabel="提示词源语言"
+              value={sourceLanguage}
+              options={SOURCE_LANGUAGE_OPTIONS.map(([label, value]) => ({ label, value }))}
+              onChange={(value) => updatePromptDraft({ sourceLanguage: value })}
+              disabled={!selectedId || creating}
+            />
+            <SettingsSelectField
+              label="目标语言"
+              id={`prompt-target-language-${selectedId ?? "empty"}`}
+              ariaLabel="提示词目标语言"
+              value={targetLanguage}
+              options={LANGUAGE_OPTIONS.map(([label, value]) => ({ label, value }))}
+              onChange={(value) => updatePromptDraft({ targetLanguage: value })}
+              disabled={!selectedId || creating}
+            />
+          </div>
           <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => updatePromptDraft({ content: event.target.value })} disabled={!selectedId || creating} /></label>
         </div>
       </div>
@@ -3712,6 +3753,7 @@ function SettingsView({
               <span className="settings-switch-track" aria-hidden="true"><span /></span>
             </span>
           </label>
+          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={MIN_CACHE_SIZE_MB} max={MAX_CACHE_SIZE_MB} step={16} value={cacheMaxMb} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${cacheMaxMb} MB`} /><output className="settings-range-value" style={{ left: `${cacheRangePercent}%` }}>{cacheMaxMb} MB</output></span></label>
           <div className="setting-line cache-summary-line">
             <span>
               <strong>当前缓存</strong>
@@ -3721,7 +3763,6 @@ function SettingsView({
               {cacheClearing ? "清空中…" : "清空缓存"}
             </button>
           </div>
-          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={MIN_CACHE_SIZE_MB} max={MAX_CACHE_SIZE_MB} step={16} value={cacheMaxMb} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${cacheMaxMb} MB`} /><output className="settings-range-value" style={{ left: `${cacheRangePercent}%` }}>{cacheMaxMb} MB</output></span></label>
         </div>
 
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>

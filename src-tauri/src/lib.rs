@@ -1841,18 +1841,30 @@ fn update_prompt(
     id: String,
     name: String,
     content: String,
+    source_language: String,
+    target_language: String,
 ) -> Result<Prompt, String> {
     let id = id.trim();
     let name = name.trim();
     let content = content.trim();
-    if id.is_empty() || name.is_empty() {
-        return Err("Prompt ID 和名称不能为空".to_string());
+    let source_language = source_language.trim();
+    let target_language = target_language.trim();
+    if id.is_empty() || name.is_empty() || source_language.is_empty() || target_language.is_empty()
+    {
+        return Err("Prompt ID、名称、源语言和目标语言不能为空".to_string());
     }
     let connection = state
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::update_prompt(&connection, id, name, content)
+    db::update_prompt(
+        &connection,
+        id,
+        name,
+        content,
+        source_language,
+        target_language,
+    )
 }
 
 #[tauri::command]

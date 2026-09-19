@@ -92,6 +92,8 @@ export interface Prompt {
   id: string;
   name: string;
   content: string;
+  sourceLanguage: string;
+  targetLanguage: string;
   version: number;
   isBuiltin: boolean;
 }
@@ -1515,11 +1517,13 @@ export function decodePrompt(value: unknown): Prompt | null {
   const id = stringValue(value.id);
   const name = stringValue(value.name);
   const content = stringValue(value.content);
+  const sourceLanguage = stringValue(value.sourceLanguage) ?? "auto";
+  const targetLanguage = stringValue(value.targetLanguage) ?? "zh-CN";
   const version = value.version;
   if (id === null || name === null || content === null || typeof version !== "number" || !Number.isInteger(version) || version < 1 || typeof value.isBuiltin !== "boolean") {
     return null;
   }
-  return { id, name, content, version, isBuiltin: value.isBuiltin };
+  return { id, name, content, sourceLanguage, targetLanguage, version, isBuiltin: value.isBuiltin };
 }
 
 function nonNegativeInteger(value: unknown): value is number {

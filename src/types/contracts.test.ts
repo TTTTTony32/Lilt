@@ -277,12 +277,16 @@ describe("prompt contract", () => {
       id: "custom-1",
       name: "技术翻译",
       content: "只输出译文",
+      sourceLanguage: "en",
+      targetLanguage: "zh-CN",
       version: 2,
       isBuiltin: false,
     })).toEqual({
       id: "custom-1",
       name: "技术翻译",
       content: "只输出译文",
+      sourceLanguage: "en",
+      targetLanguage: "zh-CN",
       version: 2,
       isBuiltin: false,
     });
@@ -291,6 +295,16 @@ describe("prompt contract", () => {
   it("rejects malformed prompt results", () => {
     expect(decodePrompt({ id: "p", name: "缺正文", version: 1, isBuiltin: true })).toBeNull();
     expect(decodePrompt({ id: "p", name: "错误版本", content: "正文", version: 1.5, isBuiltin: true })).toBeNull();
+  });
+
+  it("fills language defaults for legacy prompt results", () => {
+    expect(decodePrompt({
+      id: "legacy",
+      name: "旧提示词",
+      content: "只输出译文",
+      version: 1,
+      isBuiltin: false,
+    })).toMatchObject({ sourceLanguage: "auto", targetLanguage: "zh-CN" });
   });
 });
 
