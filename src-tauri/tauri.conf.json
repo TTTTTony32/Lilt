@@ -51,7 +51,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgzOEIwQTA5MTRGRDk5M0QKUldROW1mMFVDUXFMZ3c3Nk11V3Qrbm1Mc1B2Q0g3bytkUzRZMVNHbUlYVWpZblpWNk13bjQ4Z1QK",
       "endpoints": [
         "https://github.com/TTTTTony32/Lilt/releases/latest/download/latest.json"
       ],
