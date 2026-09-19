@@ -15,6 +15,7 @@
         "title": "Lilt",
         "width": 1200,
         "height": 820,
+        "center": true,
         "minWidth": 960,
         "minHeight": 680,
         "backgroundColor": "#f5f3ed",
