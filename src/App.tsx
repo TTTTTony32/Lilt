@@ -114,6 +114,7 @@ const LANGUAGE_OPTIONS = [
 ] as const;
 
 const APP_VERSION = packageJson.version;
+const MAX_CACHE_SIZE_MB = 512;
 const GITHUB_URL = "https://github.com/TTTTTony32/Lilt";
 const DEVELOPER_EMAIL = "imtony32@gmail.com";
 
@@ -3682,7 +3683,7 @@ function SettingsView({
               <span className="settings-switch-track" aria-hidden="true"><span /></span>
             </span>
           </label>
-          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={16} max={2048} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB`} /><output className="settings-range-value">{Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB</output></span></label>
+          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={16} max={MAX_CACHE_SIZE_MB} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB`} /><output className="settings-range-value">{Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB</output></span></label>
         </div>
 
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>

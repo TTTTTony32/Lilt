@@ -6,10 +6,11 @@ use crate::contracts::{
     DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT,
     DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED,
     DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
-    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_PDF_PREFLIGHT_PAGE_LIMIT,
-    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_PDF_PREFLIGHT_PAGE_LIMIT,
-    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry,
-    Prompt, ProviderRecord, SelectionMode, ThinkingEffort, parse_selection_window_dimension,
+    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_CACHE_MAX_BYTES,
+    MAX_PDF_PREFLIGHT_PAGE_LIMIT, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_CACHE_MAX_BYTES, MIN_PDF_PREFLIGHT_PAGE_LIMIT, MIN_SELECTION_WINDOW_HEIGHT,
+    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
+    SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
 use crate::glossary::GlossaryImportTerm;
 use chrono::Utc;
@@ -546,7 +547,7 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
     let cache_max_bytes = get_setting(connection, "cache_max_bytes")?
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(DEFAULT_CACHE_MAX_BYTES)
-        .clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+        .clamp(MIN_CACHE_MAX_BYTES, MAX_CACHE_MAX_BYTES);
     let word_ai_cache_enabled = get_setting(connection, "word_ai_cache_enabled")?
         .map(|value| value != "0")
         .unwrap_or(DEFAULT_WORD_AI_CACHE_ENABLED);
@@ -636,7 +637,7 @@ pub fn save_settings(
         connection,
         "cache_max_bytes",
         &cache_max_bytes
-            .clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024)
+            .clamp(MIN_CACHE_MAX_BYTES, MAX_CACHE_MAX_BYTES)
             .to_string(),
     )?;
     set_setting(
@@ -663,7 +664,7 @@ pub fn save_settings(
     prune_history(connection, history_retention.clamp(1, 1000))?;
     prune_cache(
         connection,
-        cache_max_bytes.clamp(16 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+        cache_max_bytes.clamp(MIN_CACHE_MAX_BYTES, MAX_CACHE_MAX_BYTES),
     )
 }
 
