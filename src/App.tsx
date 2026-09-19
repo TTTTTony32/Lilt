@@ -114,6 +114,7 @@ const LANGUAGE_OPTIONS = [
 ] as const;
 
 const APP_VERSION = packageJson.version;
+const MIN_CACHE_SIZE_MB = 16;
 const MAX_CACHE_SIZE_MB = 512;
 const GITHUB_URL = "https://github.com/TTTTTony32/Lilt";
 const DEVELOPER_EMAIL = "imtony32@gmail.com";
@@ -3552,6 +3553,8 @@ function SettingsView({
       ...availableModels.map((model) => ({ value: model.id, label: model.label })),
     ]
     : [];
+  const cacheMaxMb = Math.min(MAX_CACHE_SIZE_MB, Math.max(MIN_CACHE_SIZE_MB, Math.round(settings.cacheMaxBytes / (1024 * 1024))));
+  const cacheRangePercent = ((cacheMaxMb - MIN_CACHE_SIZE_MB) / (MAX_CACHE_SIZE_MB - MIN_CACHE_SIZE_MB)) * 100;
   return (
     <section className="settings-view" aria-labelledby="settings-workspace-title">
       <aside className="settings-sidebar">
@@ -3683,7 +3686,7 @@ function SettingsView({
               <span className="settings-switch-track" aria-hidden="true"><span /></span>
             </span>
           </label>
-          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={16} max={MAX_CACHE_SIZE_MB} step={16} value={Math.round(settings.cacheMaxBytes / (1024 * 1024))} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB`} /><output className="settings-range-value">{Math.round(settings.cacheMaxBytes / (1024 * 1024))} MB</output></span></label>
+          <label className="setting-line slider-line"><span><strong>段落缓存上限</strong></span><span className="settings-range-control"><input className="settings-range-input" type="range" min={MIN_CACHE_SIZE_MB} max={MAX_CACHE_SIZE_MB} step={16} value={cacheMaxMb} onChange={(event) => updateAppSettingsDraft({ cacheMaxBytes: Number(event.target.value) * 1024 * 1024 })} aria-label="段落缓存上限" aria-valuetext={`${cacheMaxMb} MB`} /><output className="settings-range-value" style={{ left: `${cacheRangePercent}%` }}>{cacheMaxMb} MB</output></span></label>
         </div>
 
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>
