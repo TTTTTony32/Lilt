@@ -312,7 +312,7 @@ export default function DictionaryView({
             </div>
           </div>
         ) : (
-          <div className="dictionary-empty-state">{word.trim() ? "输入词形后，结果会显示在这里。" : "还没有最近查询。"}</div>
+          <div className="dictionary-empty-state">{word.trim() ? "输入词形后，结果会显示在这里。" : "还没有最近查询"}</div>
         )
       )}
       {state.status === "ready" && result && (

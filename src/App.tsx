@@ -2643,20 +2643,20 @@ function GlossaryView({ terms, onChanged, onImport, onExport }: { terms: Glossar
       <PageTitle
         eyebrow="GLOSSARY"
         title="术语表"
-        actions={<div className="button-group"><button className="secondary-button small-button" type="button" onClick={onImport}><Upload size={15} />导入术语表</button><button className="secondary-button small-button" type="button" onClick={onExport}><Download size={15} />导出术语表</button></div>}
+        actions={<div className="button-group"><button className="secondary-button small-button" type="button" onClick={onImport}><Download size={15} />导入术语表</button><button className="secondary-button small-button" type="button" onClick={onExport}><Upload size={15} />导出术语表</button></div>}
       />
       <div className="simple-card">
         <div className="form-grid glossary-form">
           <label>原文<input value={source} onChange={(event) => setSource(event.target.value)} /></label>
           <label>译文<input value={target} onChange={(event) => setTarget(event.target.value)} /></label>
-          <label className="wide-field">备注<input value={note} onChange={(event) => setNote(event.target.value)} placeholder="可选" /></label>
+          <label className="wide-field">备注（可选）<input value={note} onChange={(event) => setNote(event.target.value)} /></label>
         </div>
         <div className="form-actions"><span className="error-message">{error}</span><button className="secondary-button" type="button" onClick={() => void addTerm()}>添加术语</button></div>
       </div>
       <div className="list-card bounded-list-card glossary-terms-card">
         <div className="list-card-heading"><strong>已添加术语</strong><span>{terms.length} 条</span></div>
         <div className="bounded-list-card-scroll">
-          {terms.length === 0 ? <div className="empty-list">还没有术语。</div> : (
+          {terms.length === 0 ? <div className="empty-list">还没有术语</div> : (
             <>
               {visibleTerms.map((term) => <GlossaryRow key={term.id} term={term} onChanged={onChanged} />)}
               {visibleTerms.length < terms.length && <button className="list-load-more" type="button" onClick={() => setVisibleCount((current) => Math.min(current + 10, terms.length))}>更多</button>}
@@ -2680,7 +2680,7 @@ function HistoryContent({ history }: { history: HistoryEntry[] }) {
   return (
     <div className="history-dialog-content">
       <div className="list-card history-card">
-        {history.length === 0 ? <div className="empty-list">完成一次段落翻译后，记录会出现在这里。</div> : history.map((item) => <HistoryRow key={item.id} item={item} />)}
+        {history.length === 0 ? <div className="empty-list">完成一次段落翻译后，记录会出现在这里</div> : history.map((item) => <HistoryRow key={item.id} item={item} />)}
       </div>
     </div>
   );
