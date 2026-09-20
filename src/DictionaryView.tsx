@@ -283,6 +283,12 @@ export default function DictionaryView({
       )}
 
       {queryError && <p className="error-message dictionary-message">{queryError}</p>}
+      {querying && !queryError && (
+        <div className="dictionary-empty-state dictionary-querying-state" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={15} />
+          <span>本地未找到，正在请求 AI</span>
+        </div>
+      )}
       {candidates.length > 0 && (
         <div className="dictionary-candidate-card">
           <strong>这个词形对应多个词头，请选择</strong>
@@ -300,13 +306,13 @@ export default function DictionaryView({
           </div>
         </div>
       )}
-      {state.status === "ready" && invalidWord && !queryError && (
-        <div className="dictionary-empty-state dictionary-invalid-state">词汇无效。</div>
+      {state.status === "ready" && invalidWord && !queryError && !querying && (
+        <div className="dictionary-empty-state dictionary-invalid-state">词汇无效</div>
       )}
       {state.status === "ready" && notFound && !invalidWord && !queryError && (
         <div className="dictionary-empty-state">没有找到对应词条。</div>
       )}
-      {state.status === "ready" && !result && !notFound && candidates.length === 0 && !queryError && (
+      {state.status === "ready" && !querying && !result && !notFound && !invalidWord && candidates.length === 0 && !queryError && (
         history.length > 0 ? (
           <div className="dictionary-recent-card">
             <div className="dictionary-recent-heading">
@@ -328,7 +334,7 @@ export default function DictionaryView({
             </div>
           </div>
         ) : (
-          <div className="dictionary-empty-state">{word.trim() ? "输入词形后，结果会显示在这里。" : "还没有最近查询"}</div>
+          <div className="dictionary-empty-state">{word.trim() ? "输入词形后，结果会显示在这里" : "还没有最近查询"}</div>
         )
       )}
       {state.status === "ready" && result && (

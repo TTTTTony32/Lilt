@@ -471,6 +471,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-progress-track { height: 5px; overflow: hidden; border-radius: 5px; background: #e2e5de; }
 .dictionary-progress-track span { height: 100%; display: block; border-radius: inherit; background: #6e8a72; transition: width var(--motion-standard-duration) var(--motion-ease); }
 .dictionary-empty-state { padding: 55px 20px; border: 1px dashed #d9d9d0; border-radius: 10px; color: #a4a69d; background: rgba(251, 250, 247, .55); text-align: center; font-size: 12px; }
+.dictionary-querying-state { min-height: 54px; padding: 17px 20px; display: flex; align-items: center; justify-content: center; gap: 8px; }
 .dictionary-entry { position: relative; z-index: 3; overflow: hidden; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); animation: dictionary-result-in var(--motion-standard-duration) var(--motion-ease) both; }
 @keyframes dictionary-result-in {
   from { opacity: 0; transform: translateY(7px) scale(.992); }

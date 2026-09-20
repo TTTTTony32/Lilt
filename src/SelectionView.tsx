@@ -614,8 +614,8 @@ export default function SelectionView() {
             {dictionaryLoading && <div className="selection-loading"><LoaderCircle className="spin" size={16} />正在查询词典</div>}
             {dictionary?.candidates.length ? <div className="selection-candidates"><span>请选择规范词头</span>{dictionary.candidates.map((candidate) => <button key={candidate.normalizedCanonicalWord} type="button" onClick={() => selection && void lookupWord(selection, selection.sourceText, candidate.canonicalWord)}>{candidate.canonicalWord}</button>)}</div> : null}
             {dictionary?.lookup && <DictionarySummary group={dictionaryGroup} summary={dictionary.lookup.entry.headword_summary} canonical={dictionary.lookup.canonicalWord} source={dictionary.lookup.source} />}
-            {dictionary?.invalidWord && !dictionaryLoading && <p className="selection-muted selection-invalid-word">词汇无效。</p>}
-            {dictionary && !dictionary.invalidWord && !dictionary.lookup && dictionary.candidates.length === 0 && !dictionaryLoading && <p className="selection-muted">词典中未找到这个词。</p>}
+            {dictionary?.invalidWord && !dictionaryLoading && <p className="selection-muted selection-invalid-word">词汇无效</p>}
+            {dictionary && !dictionary.invalidWord && !dictionary.lookup && dictionary.candidates.length === 0 && !dictionaryLoading && <p className="selection-muted">词典中未找到这个词</p>}
             {dictionary?.example && <div className="selection-example"><span>例句</span><p>{dictionary.example.sourceText}</p>{wordExample.status === "failed" && <small>{wordExample.error}</small>}{wordExample.translation && <p className="selection-example-translation">{wordExample.translation}</p>}{wordExample.partOfSpeech && <span className="selection-pos">{wordExample.partOfSpeech}</span>}</div>}
           </section>
         )}
