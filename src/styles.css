@@ -594,7 +594,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .modal-check { margin-top: 21px; display: flex; align-items: center; gap: 8px; color: #70796f; font-size: 12px; }
 .modal-check input { width: 16px; height: 16px; accent-color: #5b775f; }
 .modal-actions { justify-content: flex-end; }
-.release-notice-card { width: min(520px, calc(100vw - 48px)); }
+.release-notice-card { width: min(520px, calc(100vw - 48px)); outline: none; }
 .release-notice-body { margin-top: 19px; color: #70796f; font-size: 12px; line-height: 1.7; }
 .release-notice-body p { margin: 0; color: #59695d; }
 .release-notice-body span { display: block; margin-top: 5px; color: #92978e; font-size: 11px; }
