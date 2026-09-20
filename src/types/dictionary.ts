@@ -80,6 +80,7 @@ export interface DictionaryLookupResult {
   normalizedWord: string;
   canonicalWord: string;
   matchType: "exact" | "form";
+  source: "local" | "ai";
   entry: DictionaryEntry;
 }
 
@@ -106,6 +107,7 @@ export interface DictionaryLookupCommandResult {
   candidates: DictionaryLookupCandidate[];
   example: ParagraphExample | null;
   history: DictionaryHistoryEntry[];
+  invalidWord: boolean;
 }
 
 export interface DictionaryState {
@@ -422,21 +424,24 @@ export function decodeDictionaryEntry(value: unknown): DictionaryEntry | null {
   const etymologies = Array.isArray(value.etymologies) ? value.etymologies.map(etymology) : null;
   const posGroups = Array.isArray(value.pos_groups) ? value.pos_groups.map(posGroup) : null;
   if (
-    schemaVersion === null ||
-    entryId === null ||
-    headword === null ||
-    normalizedHeadword === null ||
+    schemaVersion === null || schemaVersion.trim() === "" ||
+    entryId === null || entryId.trim() === "" ||
+    headword === null || headword.trim() === "" ||
+    normalizedHeadword === null || normalizedHeadword.trim() === "" ||
     headwordLanguage === null ||
+    headwordLanguage.code !== "en" ||
     definitionLanguage === null ||
-    entryType === null ||
+    definitionLanguage.code !== "zh-Hans" ||
+    entryType === null || entryType.trim() === "" ||
     headwordSummary === null ||
     memoryHook === null ||
     studyNotes === null ||
     etymologyNote === undefined ||
     etymologies === null ||
-    etymologies.some((item) => item === null) ||
+    etymologies.some((item) => item === null || item.etymology_id.trim() === "") ||
     posGroups === null ||
-    posGroups.some((item) => item === null)
+    posGroups.length === 0 ||
+    posGroups.some((item) => item === null || item.pos.trim() === "" || item.meanings.length === 0 || item.meanings.some((meaning) => meaning.sense_id.trim() === "" || meaning.learner_explanation.trim() === "" || meaning.examples.some((item) => item.text.trim() === "" || item.translation.trim() === "")))
   ) {
     return null;
   }
@@ -463,15 +468,17 @@ export function decodeDictionaryLookupResult(value: unknown): DictionaryLookupRe
   const normalizedWord = stringValue(value.normalizedWord);
   const canonicalWord = stringValue(value.canonicalWord);
   const matchType = value.matchType;
+  const source = value.source;
   const entry = decodeDictionaryEntry(value.entry);
   return word === null || normalizedWord === null || canonicalWord === null ||
-    (matchType !== "exact" && matchType !== "form") || entry === null
+    (matchType !== "exact" && matchType !== "form") ||
+    (source !== "local" && source !== "ai") || entry === null
     ? null
-    : { word, normalizedWord, canonicalWord, matchType, entry };
+    : { word, normalizedWord, canonicalWord, matchType, source, entry };
 }
 
 export function decodeDictionaryLookupCommandResult(value: unknown): DictionaryLookupCommandResult | null {
-  if (!isRecord(value) || !Array.isArray(value.history) || !Array.isArray(value.candidates)) return null;
+  if (!isRecord(value) || !Array.isArray(value.history) || !Array.isArray(value.candidates) || typeof value.invalidWord !== "boolean") return null;
   const lookup = decodeDictionaryLookupResult(value.lookup);
   const candidates = value.candidates.map(decodeDictionaryLookupCandidate);
   const example = decodeParagraphExample(value.example);
@@ -479,13 +486,16 @@ export function decodeDictionaryLookupCommandResult(value: unknown): DictionaryL
   if (
     history.some((item) => item === null) ||
     candidates.some((item) => item === null) ||
-    (example === null && value.example !== null)
+    (example === null && value.example !== null) ||
+    (lookup === null && value.lookup !== null) ||
+    (value.invalidWord && (lookup !== null || candidates.length > 0 || example !== null))
   ) return null;
   return {
     lookup,
     candidates: candidates as DictionaryLookupCandidate[],
     example,
     history: history as DictionaryHistoryEntry[],
+    invalidWord: value.invalidWord,
   };
 }
 

@@ -76,6 +76,7 @@ export default function SelectionView() {
   const activeSelectionId = useRef<string | null>(null);
   const activeTranslationId = useRef<string | null>(null);
   const activeWordExampleId = useRef<string | null>(null);
+  const dictionaryQuerySequence = useRef(0);
   const selectionScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -297,6 +298,7 @@ export default function SelectionView() {
           word: lookup.word,
           canonicalWord: lookup.canonicalWord,
           targetLanguage: payload.targetLanguage,
+          source: lookup.source,
         },
       });
       applyWordExampleResult(requestId, raw);
@@ -308,6 +310,8 @@ export default function SelectionView() {
   }, [applyWordExampleResult]);
 
   const lookupWord = useCallback(async (payload: SelectionRequestPayload, word: string, canonicalWord?: string) => {
+    const sequence = dictionaryQuerySequence.current + 1;
+    dictionaryQuerySequence.current = sequence;
     const previousWordExampleId = activeWordExampleId.current;
     activeWordExampleId.current = null;
     if (previousWordExampleId) {
@@ -320,7 +324,7 @@ export default function SelectionView() {
       const raw = await invokeCommand<unknown>("query_dictionary", { word, canonicalWord: canonicalWord ?? null });
       const result = decodeDictionaryLookupCommandResult(raw);
       if (!result) throw new Error("词典返回了无法识别的结果");
-      if (activeSelectionId.current !== payload.requestId) return;
+      if (activeSelectionId.current !== payload.requestId || dictionaryQuerySequence.current !== sequence) return;
       setDictionary(result);
       setDictionaryLoading(false);
       setTranslationStatus("completed");
@@ -330,7 +334,7 @@ export default function SelectionView() {
         setWordExample(EMPTY_WORD_EXAMPLE);
       }
     } catch (reason) {
-      if (activeSelectionId.current !== payload.requestId) return;
+      if (activeSelectionId.current !== payload.requestId || dictionaryQuerySequence.current !== sequence) return;
       setDictionaryLoading(false);
       setTranslationStatus("failed");
       setError(describeError(reason, "词典查询失败"));
@@ -609,8 +613,9 @@ export default function SelectionView() {
           <section className="selection-result">
             {dictionaryLoading && <div className="selection-loading"><LoaderCircle className="spin" size={16} />正在查询词典</div>}
             {dictionary?.candidates.length ? <div className="selection-candidates"><span>请选择规范词头</span>{dictionary.candidates.map((candidate) => <button key={candidate.normalizedCanonicalWord} type="button" onClick={() => selection && void lookupWord(selection, selection.sourceText, candidate.canonicalWord)}>{candidate.canonicalWord}</button>)}</div> : null}
-            {dictionary?.lookup && <DictionarySummary group={dictionaryGroup} summary={dictionary.lookup.entry.headword_summary} canonical={dictionary.lookup.canonicalWord} />}
-            {dictionary && !dictionary.lookup && dictionary.candidates.length === 0 && !dictionaryLoading && <p className="selection-muted">词典中未找到这个词。</p>}
+            {dictionary?.lookup && <DictionarySummary group={dictionaryGroup} summary={dictionary.lookup.entry.headword_summary} canonical={dictionary.lookup.canonicalWord} source={dictionary.lookup.source} />}
+            {dictionary?.invalidWord && !dictionaryLoading && <p className="selection-muted selection-invalid-word">词汇无效。</p>}
+            {dictionary && !dictionary.invalidWord && !dictionary.lookup && dictionary.candidates.length === 0 && !dictionaryLoading && <p className="selection-muted">词典中未找到这个词。</p>}
             {dictionary?.example && <div className="selection-example"><span>例句</span><p>{dictionary.example.sourceText}</p>{wordExample.status === "failed" && <small>{wordExample.error}</small>}{wordExample.translation && <p className="selection-example-translation">{wordExample.translation}</p>}{wordExample.partOfSpeech && <span className="selection-pos">{wordExample.partOfSpeech}</span>}</div>}
           </section>
         )}
@@ -630,7 +635,7 @@ export default function SelectionView() {
   );
 }
 
-function DictionarySummary({ group, summary, canonical }: { group: DictionaryPosGroup | undefined; summary: string; canonical: string }) {
+function DictionarySummary({ group, summary, canonical, source }: { group: DictionaryPosGroup | undefined; summary: string; canonical: string; source: "local" | "ai" }) {
   const meaning = group?.meanings[0];
-  return <div className="selection-dictionary"><div className="selection-word-heading"><strong>{canonical}</strong>{group?.pos && <span>{group.pos}</span>}</div><p>{summary}</p>{group?.summary && <p className="selection-muted">{group.summary}</p>}{meaning && <p>{meaning.short_gloss || meaning.learner_explanation}</p>}</div>;
+  return <div className="selection-dictionary"><div className="selection-word-heading"><strong>{canonical}</strong>{group?.pos && <span>{group.pos}</span>}{source === "ai" && <em className="selection-ai-badge">AI 词解</em>}</div><p>{summary}</p>{group?.summary && <p className="selection-muted">{group.summary}</p>}{meaning && <p>{meaning.short_gloss || meaning.learner_explanation}</p>}</div>;
 }

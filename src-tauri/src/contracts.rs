@@ -31,6 +31,7 @@ pub const MAX_SELECTION_WINDOW_HEIGHT: i64 = 900;
 pub const DICTIONARY_HISTORY_LIMIT: i64 = 20;
 pub const DICTIONARY_DISTRIBUTION_SCHEMA_VERSION: &str = "distribution_entry_v5";
 pub const DICTIONARY_SQLITE_SCHEMA_VERSION: &str = "distribution_sqlite_v1";
+pub const AI_DICTIONARY_PROTOCOL_VERSION: &str = "ai-dictionary-v1";
 pub const WORD_EXAMPLE_PROTOCOL_VERSION: &str = "word-example-v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -373,6 +374,14 @@ pub enum DictionaryMatchType {
     Form,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DictionarySource {
+    #[default]
+    Local,
+    Ai,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictionaryLookupResult {
@@ -380,6 +389,7 @@ pub struct DictionaryLookupResult {
     pub normalized_word: String,
     pub canonical_word: String,
     pub match_type: DictionaryMatchType,
+    pub source: DictionarySource,
     pub entry: Value,
 }
 
@@ -405,6 +415,7 @@ pub struct DictionaryLookupCommandResult {
     pub candidates: Vec<DictionaryLookupCandidate>,
     pub example: Option<ParagraphExample>,
     pub history: Vec<DictionaryHistoryEntry>,
+    pub invalid_word: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -533,6 +544,8 @@ pub struct WordExampleRequest {
     pub word: String,
     pub canonical_word: String,
     pub target_language: String,
+    #[serde(default)]
+    pub source: DictionarySource,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -7,6 +7,7 @@ pub enum TranslationMode {
     PdfSegment,
     PdfPreflight,
     WordExample,
+    Dictionary,
 }
 
 impl TranslationMode {
@@ -16,6 +17,7 @@ impl TranslationMode {
             "pdf_segment" => Some(Self::PdfSegment),
             "pdf_preflight" => Some(Self::PdfPreflight),
             "word_example" => Some(Self::WordExample),
+            "dictionary" => Some(Self::Dictionary),
             _ => None,
         }
     }
@@ -26,6 +28,7 @@ impl TranslationMode {
             Self::PdfSegment => "pdf_segment",
             Self::PdfPreflight => "pdf_preflight",
             Self::WordExample => "word_example",
+            Self::Dictionary => "dictionary",
         }
     }
 }
@@ -135,6 +138,14 @@ mod tests {
         assert_eq!(
             TranslationMode::WordExample.provider_operation(),
             "word_example"
+        );
+        assert_eq!(
+            TranslationMode::from_wire_mode("dictionary"),
+            Some(TranslationMode::Dictionary)
+        );
+        assert_eq!(
+            TranslationMode::Dictionary.provider_operation(),
+            "dictionary"
         );
     }
 }

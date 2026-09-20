@@ -63,6 +63,7 @@ const lookup = {
   normalizedWord: "resolve",
   canonicalWord: "resolve",
   matchType: "exact",
+  source: "local",
   entry,
 };
 const historyEntry = {
@@ -78,13 +79,18 @@ describe("dictionary contracts", () => {
     expect(decodeDictionaryLookupResult(lookup)).toEqual(lookup);
   });
 
+  it("decodes an AI lookup with the shared entry structure", () => {
+    expect(decodeDictionaryLookupResult({ ...lookup, source: "ai" })).toEqual({ ...lookup, source: "ai" });
+  });
+
   it("decodes a combined lookup result and latest history", () => {
     expect(decodeDictionaryLookupCommandResult({
       lookup,
       candidates: [],
       example: null,
       history,
-    })).toEqual({ lookup, candidates: [], example: null, history });
+      invalidWord: false,
+    })).toEqual({ lookup, candidates: [], example: null, history, invalidWord: false });
   });
 
   it("rejects missing or malformed lookup and history fields", () => {
@@ -96,12 +102,28 @@ describe("dictionary contracts", () => {
       candidates: [],
       example: null,
       history: {},
+      invalidWord: false,
     })).toBeNull();
     expect(decodeDictionaryLookupCommandResult({
       lookup,
       candidates: [],
       example: null,
       history: [{ ...historyEntry, queryCount: "2" }],
+      invalidWord: false,
+    })).toBeNull();
+    expect(decodeDictionaryLookupCommandResult({
+      lookup: null,
+      candidates: [],
+      example: null,
+      history,
+      invalidWord: true,
+    })).toEqual({ lookup: null, candidates: [], example: null, history, invalidWord: true });
+    expect(decodeDictionaryLookupCommandResult({
+      lookup,
+      candidates: [],
+      example: null,
+      history,
+      invalidWord: true,
     })).toBeNull();
   });
 

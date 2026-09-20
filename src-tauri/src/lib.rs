@@ -20,28 +20,30 @@ mod translation_core;
 mod tray;
 
 use contracts::{
-    AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID, DICTIONARY_HISTORY_LIMIT,
-    DictionaryCommandResult, DictionaryLookupCandidate, DictionaryLookupCommandResult,
-    DictionaryState, GlossaryExportResult, GlossaryImportResult, GlossaryTerm,
-    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
-    PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
-    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
-    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationDelta,
-    TranslationFailed, TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION,
-    WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted, WordExampleFailed,
-    WordExamplePosDelta, WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
+    AI_DICTIONARY_PROTOCOL_VERSION, AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID,
+    DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult, DictionaryLookupCandidate,
+    DictionaryLookupCommandResult, DictionaryMatchType, DictionarySource, DictionaryState,
+    GlossaryExportResult, GlossaryImportResult, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT,
+    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo,
+    ParagraphExample, PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt,
+    ProviderConfig, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
+    SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort, TranslationCancelled,
+    TranslationCommandResult, TranslationCompleted, TranslationDelta, TranslationFailed,
+    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
+    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
 };
 use rusqlite::Connection;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::{Arc, Mutex, Weak},
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 use tokio_util::sync::CancellationToken;
@@ -136,6 +138,7 @@ pub struct AppState {
     pub(crate) dictionary_update: Arc<Mutex<Option<String>>>,
     pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
     pub(crate) dictionary_initialising: Arc<AtomicBool>,
+    pub(crate) ai_dictionary_requests: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
     pub(crate) selection: selection::SelectionService,
     pub(crate) pdf_jobs: Arc<Mutex<HashMap<String, pdf_jobs::PdfJobHandle>>>,
     startup: Arc<StartupRuntime>,
@@ -156,6 +159,7 @@ impl AppState {
             dictionary_update: Arc::new(Mutex::new(None)),
             dictionary_store: Arc::new(Mutex::new(dictionary_store)),
             dictionary_initialising: Arc::new(AtomicBool::new(false)),
+            ai_dictionary_requests: Arc::new(Mutex::new(HashMap::new())),
             selection,
             pdf_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup,
@@ -2003,8 +2007,16 @@ fn reset_close_behavior(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn query_dictionary(
+async fn query_dictionary(
     state: State<'_, AppState>,
+    word: String,
+    canonical_word: Option<String>,
+) -> Result<DictionaryLookupCommandResult, String> {
+    query_dictionary_impl(state.inner().clone(), word, canonical_word).await
+}
+
+async fn query_dictionary_impl(
+    state: AppState,
     word: String,
     canonical_word: Option<String>,
 ) -> Result<DictionaryLookupCommandResult, String> {
@@ -2025,18 +2037,20 @@ fn query_dictionary(
         return Err(error.to_string());
     }
 
-    let update_guard = state
-        .dictionary_update
-        .lock()
-        .map_err(|_| "词典更新状态锁已损坏".to_string())?;
-    if update_guard.is_some() {
-        let error = dictionary::DictionaryError::Updating;
-        diagnostics::error(format!(
-            "command.dictionary.query.failed request_id={request_id} stage=update_guard elapsed_ms={} error_kind={}",
-            started.elapsed().as_millis(),
-            error.kind()
-        ));
-        return Err(error.to_string());
+    {
+        let update_guard = state
+            .dictionary_update
+            .lock()
+            .map_err(|_| "词典更新状态锁已损坏".to_string())?;
+        if update_guard.is_some() {
+            let error = dictionary::DictionaryError::Updating;
+            diagnostics::error(format!(
+                "command.dictionary.query.failed request_id={request_id} stage=update_guard elapsed_ms={} error_kind={}",
+                started.elapsed().as_millis(),
+                error.kind()
+            ));
+            return Err(error.to_string());
+        }
     }
 
     let resolution = {
@@ -2070,10 +2084,14 @@ fn query_dictionary(
         db::list_dictionary_history(&connection, DICTIONARY_HISTORY_LIMIT)
     };
 
-    let (measurement, candidates) = match resolution {
-        dictionary::DictionaryLookupResolution::Found(measurement) => {
-            (Some(measurement), Vec::new())
-        }
+    let (lookup, candidates, sql_elapsed, json_decode_elapsed, cache_hit) = match resolution {
+        dictionary::DictionaryLookupResolution::Found(measurement) => (
+            measurement.result,
+            Vec::new(),
+            measurement.sql_elapsed,
+            measurement.json_decode_elapsed,
+            false,
+        ),
         dictionary::DictionaryLookupResolution::Ambiguous(candidates) => {
             let history = list_history()?;
             diagnostics::info(format!(
@@ -2094,23 +2112,35 @@ fn query_dictionary(
                     .collect(),
                 example: None,
                 history,
+                invalid_word: false,
             });
         }
         dictionary::DictionaryLookupResolution::NotFound => {
-            let history = list_history()?;
-            diagnostics::info(format!(
-                "command.dictionary.query.not_found request_id={request_id} total_ms={}",
-                started.elapsed().as_millis()
-            ));
-            return Ok(DictionaryLookupCommandResult {
-                lookup: None,
-                candidates: Vec::new(),
-                example: None,
-                history,
-            });
+            match query_ai_dictionary(&state, &request_id, &display_word).await? {
+                AiDictionaryLookup::Invalid => {
+                    let history = list_history()?;
+                    diagnostics::info(format!(
+                        "command.dictionary.query.invalid_word request_id={request_id} total_ms={}",
+                        started.elapsed().as_millis()
+                    ));
+                    return Ok(DictionaryLookupCommandResult {
+                        lookup: None,
+                        candidates: Vec::new(),
+                        example: None,
+                        history,
+                        invalid_word: true,
+                    });
+                }
+                AiDictionaryLookup::Found { lookup, cache_hit } => (
+                    lookup,
+                    Vec::new(),
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    cache_hit,
+                ),
+            }
         }
     };
-    let lookup = measurement.expect("dictionary resolution must contain a measurement");
 
     let history_started = Instant::now();
     let (history, example) = {
@@ -2118,15 +2148,11 @@ fn query_dictionary(
             .database
             .lock()
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
-        db::record_dictionary_query(
-            &connection,
-            &lookup.result.normalized_word,
-            &lookup.result.word,
-        )?;
+        db::record_dictionary_query(&connection, &lookup.normalized_word, &lookup.word)?;
         let history = db::list_dictionary_history(&connection, DICTIONARY_HISTORY_LIMIT)?;
         let settings = db::get_settings(&connection)?;
         let example = if settings.paragraph_example_lookup_enabled {
-            db::find_latest_example(&connection, &lookup.result.normalized_word)?.map(|record| {
+            db::find_latest_example(&connection, &lookup.normalized_word)?.map(|record| {
                 ParagraphExample {
                     example_id: record.example_id,
                     source_text: record.source_text,
@@ -2140,18 +2166,628 @@ fn query_dictionary(
     };
     let history_elapsed = history_started.elapsed();
     diagnostics::info(format!(
-        "command.dictionary.query.completed request_id={request_id} connection_source=reused sql_ms={} json_decode_ms={} history_ms={} snapshot_refresh=skipped total_ms={}",
-        lookup.sql_elapsed.as_millis(),
-        lookup.json_decode_elapsed.as_millis(),
+        "command.dictionary.query.completed request_id={request_id} source={:?} cache_hit={cache_hit} sql_ms={} json_decode_ms={} history_ms={} snapshot_refresh=skipped total_ms={}",
+        lookup.source,
+        sql_elapsed.as_millis(),
+        json_decode_elapsed.as_millis(),
         history_elapsed.as_millis(),
         started.elapsed().as_millis()
     ));
     Ok(DictionaryLookupCommandResult {
-        lookup: Some(lookup.result),
+        lookup: Some(lookup),
         candidates,
         example,
         history,
+        invalid_word: false,
     })
+}
+
+const AI_DICTIONARY_SOURCE_LANGUAGE: &str = "en";
+const AI_DICTIONARY_DEFINITION_LANGUAGE: &str = "zh-Hans";
+const AI_DICTIONARY_SYSTEM_PROMPT: &str = r#"你是一名英语词典工具。判断用户输入是否为有效的英语单词、固定搭配或短语，并严格只输出一个 JSON 对象，不要输出 Markdown、代码围栏、解释或其他文字。
+
+有效输入输出：{"valid":true,"entry":{...}}。无效输入输出：{"valid":false}。
+
+当 valid 为 true 时，entry 必须完整符合 distribution_entry_v5 词典条目结构。headword_language 固定为 {"code":"en","name":"English"}，definition_language 固定为 {"code":"zh-Hans","name":"Chinese (Simplified)"}。至少提供一个 pos_groups，每个 pos_group 至少提供一个 meanings；每个 meaning 的 learner_explanation 必须是非空中文释义。所有字段都必须存在，即使没有内容也使用空字符串、空数组或 null。不要添加结构之外的字段。"#;
+
+enum AiDictionaryLookup {
+    Invalid,
+    Found {
+        lookup: contracts::DictionaryLookupResult,
+        cache_hit: bool,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct AiDictionaryCacheKeyInput<'a> {
+    normalized_word: &'a str,
+    source_language: &'a str,
+    definition_language: &'a str,
+    provider_id: &'a str,
+    base_url: &'a str,
+    model_id: &'a str,
+    thinking_effort: &'a str,
+    protocol_version: &'a str,
+}
+
+fn make_ai_dictionary_cache_key(input: &AiDictionaryCacheKeyInput<'_>) -> String {
+    let canonical = format!(
+        "word={}\nsource_language={}\ndefinition_language={}\nprovider={}\nbase_url={}\nmodel={}\nthinking={}\nprotocol={}",
+        input.normalized_word,
+        input.source_language,
+        input.definition_language,
+        input.provider_id,
+        input.base_url,
+        input.model_id,
+        input.thinking_effort,
+        input.protocol_version,
+    );
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{digest:x}")
+}
+
+async fn query_ai_dictionary(
+    state: &AppState,
+    request_id: &str,
+    display_word: &str,
+) -> Result<AiDictionaryLookup, String> {
+    let normalized_word = dictionary::normalize_headword(display_word);
+    if normalized_word.is_empty() {
+        return Err("查询词形不能为空".to_string());
+    }
+
+    let (mut provider, cache_max_bytes) = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        let settings = db::get_settings(&connection)?;
+        let provider = db::get_provider(&connection)?;
+        (provider, settings.cache_max_bytes)
+    };
+    provider.base_url =
+        provider::normalize_base_url(&provider.base_url).map_err(|error| error.to_string())?;
+    let cache_key = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
+        normalized_word: &normalized_word,
+        source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
+        definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
+        provider_id: &provider.id,
+        base_url: &provider.base_url,
+        model_id: &provider.model_id,
+        thinking_effort: provider.thinking_effort.as_str(),
+        protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
+    });
+
+    if let Some(lookup) =
+        load_ai_dictionary_cache(state, &cache_key, display_word, &normalized_word, &provider)?
+    {
+        diagnostics::info(format!(
+            "command.dictionary.ai_cache.hit request_id={request_id}"
+        ));
+        return Ok(AiDictionaryLookup::Found {
+            lookup,
+            cache_hit: true,
+        });
+    }
+
+    let request_lock = {
+        let mut requests = state
+            .ai_dictionary_requests
+            .lock()
+            .map_err(|_| "AI 词典请求锁已损坏".to_string())?;
+        requests.retain(|_, request_lock| request_lock.strong_count() > 0);
+        if let Some(request_lock) = requests.get(&cache_key).and_then(Weak::upgrade) {
+            request_lock
+        } else {
+            let request_lock = Arc::new(tokio::sync::Mutex::new(()));
+            requests.insert(cache_key.clone(), Arc::downgrade(&request_lock));
+            request_lock
+        }
+    };
+    let _request_guard = request_lock.lock().await;
+
+    if let Some(lookup) =
+        load_ai_dictionary_cache(state, &cache_key, display_word, &normalized_word, &provider)?
+    {
+        diagnostics::info(format!(
+            "command.dictionary.ai_cache.hit_after_wait request_id={request_id}"
+        ));
+        return Ok(AiDictionaryLookup::Found {
+            lookup,
+            cache_hit: true,
+        });
+    }
+
+    let api_key = match secrets::load_api_key(&provider.id) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err("尚未配置 API Key，请在设置中保存 Provider".to_string()),
+        Err(error) => return Err(error),
+    };
+    let cancellation = CancellationToken::new();
+    let streamed = TranslationCore::stream(
+        CoreStreamRequest {
+            request_id,
+            base_url: &provider.base_url,
+            api_key: &api_key,
+            model_id: &provider.model_id,
+            system_prompt: AI_DICTIONARY_SYSTEM_PROMPT,
+            user_text: display_word,
+            cancel: &cancellation,
+            mode: TranslationMode::Dictionary,
+            thinking_effort: &provider.thinking_effort,
+        },
+        |_: String| Ok(()),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let parsed = parse_ai_dictionary_protocol(&streamed, &cache_key)?;
+    let entry = match parsed {
+        ParsedAiDictionary::Invalid => return Ok(AiDictionaryLookup::Invalid),
+        ParsedAiDictionary::Valid(entry) => entry,
+    };
+    let canonical_word = entry
+        .get("headword")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "AI 词典条目缺少规范词头".to_string())?
+        .to_string();
+    let entry_json =
+        serde_json::to_string(&entry).map_err(|error| format!("AI 词典条目无法序列化：{error}"))?;
+
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let cache = db::AiDictionaryCacheWrite {
+        cache_key: &cache_key,
+        normalized_word: &normalized_word,
+        lookup_word: display_word,
+        canonical_word: &canonical_word,
+        source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
+        definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
+        entry_json: &entry_json,
+        provider: &provider,
+        protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
+    };
+    db::save_ai_dictionary_cache(&connection, &cache)
+        .and_then(|_| db::prune_cache(&connection, cache_max_bytes))?;
+
+    diagnostics::info(format!(
+        "command.dictionary.ai.generated request_id={request_id}"
+    ));
+    Ok(AiDictionaryLookup::Found {
+        lookup: build_ai_dictionary_lookup(display_word, &normalized_word, entry),
+        cache_hit: false,
+    })
+}
+
+fn load_ai_dictionary_cache(
+    state: &AppState,
+    cache_key: &str,
+    display_word: &str,
+    normalized_word: &str,
+    provider: &contracts::ProviderRecord,
+) -> Result<Option<contracts::DictionaryLookupResult>, String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let Some(record) = db::find_ai_dictionary_cache(&connection, cache_key)? else {
+        return Ok(None);
+    };
+    match decode_ai_dictionary_cache_record(
+        cache_key,
+        display_word,
+        normalized_word,
+        provider,
+        &record,
+    ) {
+        Ok(lookup) => Ok(Some(lookup)),
+        Err(error) => {
+            diagnostics::warn(format!(
+                "command.dictionary.ai_cache.invalid cache_key={cache_key} reason={error}"
+            ));
+            db::delete_ai_dictionary_cache(&connection, cache_key)?;
+            Ok(None)
+        }
+    }
+}
+
+fn decode_ai_dictionary_cache_record(
+    cache_key: &str,
+    display_word: &str,
+    normalized_word: &str,
+    provider: &contracts::ProviderRecord,
+    record: &db::AiDictionaryCacheRecord,
+) -> Result<contracts::DictionaryLookupResult, String> {
+    if record.lookup_word.trim().is_empty()
+        || dictionary::normalize_headword(&record.lookup_word) != normalized_word
+        || record.normalized_word != normalized_word
+        || record.source_language != AI_DICTIONARY_SOURCE_LANGUAGE
+        || record.definition_language != AI_DICTIONARY_DEFINITION_LANGUAGE
+        || record.provider_id != provider.id
+        || record.base_url != provider.base_url
+        || record.model_id != provider.model_id
+        || record.thinking_effort != provider.thinking_effort.as_str()
+        || record.protocol_version != AI_DICTIONARY_PROTOCOL_VERSION
+    {
+        return Err("AI 词典缓存身份不匹配".to_string());
+    }
+    let raw: Value = serde_json::from_str(&record.entry_json)
+        .map_err(|error| format!("AI 词典缓存 JSON 无法解析：{error}"))?;
+    let entry = normalize_ai_dictionary_entry(raw, cache_key)?;
+    let canonical_word = entry
+        .get("headword")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "AI 词典缓存缺少规范词头".to_string())?;
+    if record.canonical_word != canonical_word {
+        return Err("AI 词典缓存规范词头不一致".to_string());
+    }
+    Ok(build_ai_dictionary_lookup(
+        display_word,
+        normalized_word,
+        entry,
+    ))
+}
+
+fn build_ai_dictionary_lookup(
+    display_word: &str,
+    normalized_word: &str,
+    entry: Value,
+) -> contracts::DictionaryLookupResult {
+    let canonical_word = entry
+        .get("headword")
+        .and_then(Value::as_str)
+        .unwrap_or(display_word)
+        .to_string();
+    contracts::DictionaryLookupResult {
+        word: display_word.to_string(),
+        normalized_word: normalized_word.to_string(),
+        canonical_word,
+        match_type: DictionaryMatchType::Exact,
+        source: DictionarySource::Ai,
+        entry,
+    }
+}
+
+enum ParsedAiDictionary {
+    Invalid,
+    Valid(Value),
+}
+
+fn parse_ai_dictionary_protocol(raw: &str, cache_key: &str) -> Result<ParsedAiDictionary, String> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|error| format!("AI 词典协议 JSON 无法解析：{error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "AI 词典协议顶层必须是对象".to_string())?;
+    let valid = object
+        .get("valid")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "AI 词典协议缺少 valid 布尔字段".to_string())?;
+    if !valid {
+        ensure_exact_fields(object, &["valid"], "AI 词典无效协议")?;
+        return Ok(ParsedAiDictionary::Invalid);
+    }
+    ensure_exact_fields(object, &["valid", "entry"], "AI 词典有效协议")?;
+    let entry = object
+        .get("entry")
+        .ok_or_else(|| "AI 词典有效协议缺少 entry".to_string())?
+        .clone();
+    Ok(ParsedAiDictionary::Valid(normalize_ai_dictionary_entry(
+        entry, cache_key,
+    )?))
+}
+
+fn normalize_ai_dictionary_entry(value: Value, cache_key: &str) -> Result<Value, String> {
+    validate_ai_dictionary_entry(&value)?;
+    let mut entry = value;
+    let object = entry
+        .as_object_mut()
+        .ok_or_else(|| "AI 词典 entry 必须是对象".to_string())?;
+    let headword_language_code = object
+        .get("headword_language")
+        .and_then(Value::as_object)
+        .and_then(|language| language.get("code"))
+        .and_then(Value::as_str);
+    let definition_language_code = object
+        .get("definition_language")
+        .and_then(Value::as_object)
+        .and_then(|language| language.get("code"))
+        .and_then(Value::as_str);
+    if headword_language_code != Some(AI_DICTIONARY_SOURCE_LANGUAGE)
+        || definition_language_code != Some(AI_DICTIONARY_DEFINITION_LANGUAGE)
+    {
+        return Err("AI 词典 entry 语言方向不符合固定契约".to_string());
+    }
+    let headword = object
+        .get("headword")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "AI 词典 entry.headword 不能为空".to_string())?
+        .to_string();
+    let normalized_headword = dictionary::normalize_headword(&headword);
+    if normalized_headword.is_empty() {
+        return Err("AI 词典 entry.headword 无法规范化".to_string());
+    }
+    object.insert(
+        "schema_version".to_string(),
+        Value::String(contracts::DICTIONARY_DISTRIBUTION_SCHEMA_VERSION.to_string()),
+    );
+    object.insert(
+        "entry_id".to_string(),
+        Value::String(format!("ai-{cache_key}")),
+    );
+    object.insert("headword".to_string(), Value::String(headword));
+    object.insert(
+        "normalized_headword".to_string(),
+        Value::String(normalized_headword),
+    );
+    object.insert(
+        "headword_language".to_string(),
+        serde_json::json!({"code": "en", "name": "English"}),
+    );
+    object.insert(
+        "definition_language".to_string(),
+        serde_json::json!({"code": "zh-Hans", "name": "Chinese (Simplified)"}),
+    );
+    Ok(entry)
+}
+
+fn ensure_exact_fields(
+    object: &Map<String, Value>,
+    fields: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    if object.len() != fields.len() || fields.iter().any(|field| !object.contains_key(*field)) {
+        return Err(format!("{context}包含缺失或多余字段"));
+    }
+    Ok(())
+}
+
+fn required_string<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    context: &str,
+    allow_empty: bool,
+) -> Result<&'a str, String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{context}.{field} 必须是字符串"))?;
+    if !allow_empty && value.trim().is_empty() {
+        return Err(format!("{context}.{field} 不能为空"));
+    }
+    Ok(value)
+}
+
+fn optional_string(object: &Map<String, Value>, field: &str, context: &str) -> Result<(), String> {
+    match object.get(field) {
+        Some(Value::Null) | Some(Value::String(_)) => Ok(()),
+        _ => Err(format!("{context}.{field} 必须是字符串或 null")),
+    }
+}
+
+fn string_array<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<&'a Vec<Value>, String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context}.{field} 必须是数组"))?;
+    if value.iter().any(|item| !item.is_string()) {
+        return Err(format!("{context}.{field} 必须只包含字符串"));
+    }
+    Ok(value)
+}
+
+fn object_array<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<&'a Vec<Value>, String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context}.{field} 必须是数组"))?;
+    if value.iter().any(|item| !item.is_object()) {
+        return Err(format!("{context}.{field} 必须只包含对象"));
+    }
+    Ok(value)
+}
+
+fn validate_ai_dictionary_entry(value: &Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "AI 词典 entry 必须是对象".to_string())?;
+    ensure_exact_fields(
+        object,
+        &[
+            "schema_version",
+            "entry_id",
+            "headword",
+            "normalized_headword",
+            "headword_language",
+            "definition_language",
+            "entry_type",
+            "headword_summary",
+            "memory_hook",
+            "study_notes",
+            "etymology_note",
+            "etymologies",
+            "pos_groups",
+        ],
+        "AI 词典 entry",
+    )?;
+    required_string(object, "schema_version", "entry", false)?;
+    required_string(object, "entry_id", "entry", false)?;
+    required_string(object, "headword", "entry", false)?;
+    required_string(object, "normalized_headword", "entry", false)?;
+    validate_language(object.get("headword_language"), "entry.headword_language")?;
+    validate_language(
+        object.get("definition_language"),
+        "entry.definition_language",
+    )?;
+    required_string(object, "entry_type", "entry", false)?;
+    required_string(object, "headword_summary", "entry", true)?;
+    required_string(object, "memory_hook", "entry", true)?;
+    string_array(object, "study_notes", "entry")?;
+    optional_string(object, "etymology_note", "entry")?;
+    let etymologies = object_array(object, "etymologies", "entry")?;
+    for (index, item) in etymologies.iter().enumerate() {
+        validate_etymology(item, &format!("entry.etymologies[{index}]"))?;
+    }
+    let groups = object_array(object, "pos_groups", "entry")?;
+    if groups.is_empty() {
+        return Err("AI 词典 entry.pos_groups 不能为空".to_string());
+    }
+    for (index, item) in groups.iter().enumerate() {
+        validate_pos_group(item, &format!("entry.pos_groups[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn validate_language(value: Option<&Value>, context: &str) -> Result<(), String> {
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(object, &["code", "name"], context)?;
+    required_string(object, "code", context, false)?;
+    required_string(object, "name", context, false)?;
+    Ok(())
+}
+
+fn validate_etymology(value: &Value, context: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(object, &["etymology_id", "text", "pos_members"], context)?;
+    required_string(object, "etymology_id", context, false)?;
+    optional_string(object, "text", context)?;
+    string_array(object, "pos_members", context)?;
+    Ok(())
+}
+
+fn validate_pos_group(value: &Value, context: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(
+        object,
+        &[
+            "pos",
+            "etymology_id",
+            "proper_name",
+            "summary",
+            "usage_note",
+            "forms",
+            "pronunciations",
+            "relations",
+            "meanings",
+        ],
+        context,
+    )?;
+    required_string(object, "pos", context, false)?;
+    optional_string(object, "etymology_id", context)?;
+    if object.get("proper_name").and_then(Value::as_bool).is_none() {
+        return Err(format!("{context}.proper_name 必须是布尔值"));
+    }
+    required_string(object, "summary", context, true)?;
+    optional_string(object, "usage_note", context)?;
+    let forms = object_array(object, "forms", context)?;
+    for (index, item) in forms.iter().enumerate() {
+        validate_form(item, &format!("{context}.forms[{index}]"))?;
+    }
+    let pronunciations = object_array(object, "pronunciations", context)?;
+    for (index, item) in pronunciations.iter().enumerate() {
+        validate_pronunciation(item, &format!("{context}.pronunciations[{index}]"))?;
+    }
+    let relations = object_array(object, "relations", context)?;
+    for (index, item) in relations.iter().enumerate() {
+        validate_relation(item, &format!("{context}.relations[{index}]"))?;
+    }
+    let meanings = object_array(object, "meanings", context)?;
+    if meanings.is_empty() {
+        return Err(format!("{context}.meanings 不能为空"));
+    }
+    for (index, item) in meanings.iter().enumerate() {
+        validate_meaning(item, &format!("{context}.meanings[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn validate_form(value: &Value, context: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(object, &["text", "tags", "roman"], context)?;
+    required_string(object, "text", context, false)?;
+    string_array(object, "tags", context)?;
+    optional_string(object, "roman", context)
+}
+
+fn validate_pronunciation(value: &Value, context: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(object, &["ipa", "text", "tags"], context)?;
+    optional_string(object, "ipa", context)?;
+    optional_string(object, "text", context)?;
+    string_array(object, "tags", context)?;
+    Ok(())
+}
+
+fn validate_relation(value: &Value, context: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(object, &["type", "word", "lang_code"], context)?;
+    required_string(object, "type", context, false)?;
+    required_string(object, "word", context, false)?;
+    optional_string(object, "lang_code", context)
+}
+
+fn validate_meaning(value: &Value, context: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} 必须是对象"))?;
+    ensure_exact_fields(
+        object,
+        &[
+            "sense_id",
+            "priority",
+            "short_gloss",
+            "learner_explanation",
+            "usage_note",
+            "labels",
+            "topics",
+            "examples",
+        ],
+        context,
+    )?;
+    required_string(object, "sense_id", context, false)?;
+    let priority = required_string(object, "priority", context, false)?;
+    if !matches!(priority, "core" | "common" | "rare") {
+        return Err(format!("{context}.priority 不是受支持的枚举值"));
+    }
+    optional_string(object, "short_gloss", context)?;
+    required_string(object, "learner_explanation", context, false)?;
+    optional_string(object, "usage_note", context)?;
+    string_array(object, "labels", context)?;
+    string_array(object, "topics", context)?;
+    let examples = object_array(object, "examples", context)?;
+    for (index, item) in examples.iter().enumerate() {
+        let example_context = format!("{context}.examples[{index}]");
+        let example = item
+            .as_object()
+            .ok_or_else(|| format!("{example_context} 必须是对象"))?;
+        ensure_exact_fields(example, &["text", "translation"], &example_context)?;
+        required_string(example, "text", &example_context, false)?;
+        required_string(example, "translation", &example_context, false)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2214,6 +2850,7 @@ async fn generate_word_example_impl(
         &word,
         &canonical_word,
         &target_language,
+        request.source,
     ) {
         Ok(value) => value,
         Err(error) => {
@@ -2436,18 +3073,47 @@ fn prepare_word_example(
     word: &str,
     canonical_word: &str,
     target_language: &str,
+    source: DictionarySource,
 ) -> Result<PreparedWordExample, String> {
-    let normalized_word = word.to_lowercase();
+    let normalized_word = dictionary::normalize_headword(word);
     let (settings, provider, prompt, glossary_terms, glossary_version, example) = {
         let connection = state
             .database
             .lock()
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
         let settings = db::get_settings(&connection)?;
-        let provider = db::get_provider(&connection)?;
+        let mut provider = db::get_provider(&connection)?;
+        provider.base_url =
+            provider::normalize_base_url(&provider.base_url).map_err(|error| error.to_string())?;
         let prompt = db::get_prompt(&connection, &provider.prompt_id)?;
         let glossary_terms = db::list_glossary_terms(&connection)?;
         let glossary_version = db::glossary_version(&connection)?;
+        if source == DictionarySource::Ai {
+            let cache_key = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
+                normalized_word: &normalized_word,
+                source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
+                definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
+                provider_id: &provider.id,
+                base_url: &provider.base_url,
+                model_id: &provider.model_id,
+                thinking_effort: provider.thinking_effort.as_str(),
+                protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
+            });
+            let record = db::find_ai_dictionary_cache(&connection, &cache_key)?
+                .ok_or_else(|| "AI 词典缓存已经失效，请重新查询词典".to_string())?;
+            let cached_lookup = decode_ai_dictionary_cache_record(
+                &cache_key,
+                word,
+                &normalized_word,
+                &provider,
+                &record,
+            )?;
+            if dictionary::normalize_headword(&cached_lookup.canonical_word)
+                != dictionary::normalize_headword(canonical_word)
+            {
+                return Err("AI 词典缓存规范词头与例句请求不匹配".to_string());
+            }
+        }
         let example = db::find_example_by_id_for_word(&connection, example_id, &normalized_word)?
             .ok_or_else(|| "例句索引已经失效，请重新查询词典".to_string())?;
         (
@@ -2459,7 +3125,7 @@ fn prepare_word_example(
             example,
         )
     };
-    {
+    if source == DictionarySource::Local {
         let mut store = state
             .dictionary_store
             .lock()
@@ -2474,7 +3140,7 @@ fn prepare_word_example(
             .map_err(|error| error.to_string())?;
         let resolved_canonical = match resolution {
             dictionary::DictionaryLookupResolution::Found(measurement) => {
-                measurement.result.canonical_word.to_lowercase()
+                dictionary::normalize_headword(&measurement.result.canonical_word)
             }
             dictionary::DictionaryLookupResolution::Ambiguous(_) => {
                 return Err("规范词头选择不明确，请重新查询词典".to_string());
@@ -2483,7 +3149,7 @@ fn prepare_word_example(
                 return Err("查询词形已经不再存在，请重新查询词典".to_string());
             }
         };
-        if resolved_canonical != canonical_word.to_lowercase() {
+        if resolved_canonical != dictionary::normalize_headword(canonical_word) {
             return Err("规范词头与查询词形不匹配".to_string());
         }
     }
@@ -2866,10 +3532,13 @@ fn emit_word_failed(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CacheKeyInput, PdfPromptContext, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
+        AI_DICTIONARY_DEFINITION_LANGUAGE, AI_DICTIONARY_PROTOCOL_VERSION,
+        AI_DICTIONARY_SOURCE_LANGUAGE, AiDictionaryCacheKeyInput, AppState, CacheKeyInput,
+        ParsedAiDictionary, PdfPromptContext, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
         WordAiCacheKeyInput, WordExampleDelta, WordExampleProtocolParser, build_system_prompt,
-        cancel_request, make_cache_key, make_learning_cache_key, make_pdf_cache_key,
-        make_word_ai_cache_key, unregister_request,
+        cancel_request, make_ai_dictionary_cache_key, make_cache_key, make_learning_cache_key,
+        make_pdf_cache_key, make_word_ai_cache_key, parse_ai_dictionary_protocol,
+        unregister_request,
     };
     use crate::contracts::GlossaryTerm;
     use crate::translation_core::TranslationMode;
@@ -2988,6 +3657,132 @@ mod tests {
         assert_ne!(first, changed_source);
         assert_ne!(first, changed_target);
         assert!(!first.contains("secret"));
+    }
+
+    fn ai_dictionary_entry_fixture() -> serde_json::Value {
+        json!({
+            "schema_version": "distribution_entry_v5",
+            "entry_id": "model-entry-id",
+            "headword": " Serendipity ",
+            "normalized_headword": "model-normalized",
+            "headword_language": { "code": "en", "name": "English" },
+            "definition_language": { "code": "zh-Hans", "name": "Chinese (Simplified)" },
+            "entry_type": "word",
+            "headword_summary": "",
+            "memory_hook": "",
+            "study_notes": [],
+            "etymology_note": null,
+            "etymologies": [],
+            "pos_groups": [{
+                "pos": "noun",
+                "etymology_id": null,
+                "proper_name": false,
+                "summary": "",
+                "usage_note": null,
+                "forms": [],
+                "pronunciations": [],
+                "relations": [],
+                "meanings": [{
+                    "sense_id": "1",
+                    "priority": "common",
+                    "short_gloss": "机缘巧合",
+                    "learner_explanation": "意外发现美好事物的能力或现象",
+                    "usage_note": null,
+                    "labels": [],
+                    "topics": [],
+                    "examples": [{
+                        "text": "It was a happy accident.",
+                        "translation": "这是一次幸运的偶然。"
+                    }]
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn ai_dictionary_cache_key_isolated_by_provider_context_without_api_key() {
+        let input = AiDictionaryCacheKeyInput {
+            normalized_word: "serendipity",
+            source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
+            definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
+            provider_id: "provider-a",
+            base_url: "https://example.com/v1",
+            model_id: "model-a",
+            thinking_effort: "none",
+            protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
+        };
+        let first = make_ai_dictionary_cache_key(&input);
+        let changed_model = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
+            model_id: "model-b",
+            ..input
+        });
+        let changed_thinking = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
+            thinking_effort: "high",
+            ..input
+        });
+        assert_ne!(first, changed_model);
+        assert_ne!(first, changed_thinking);
+        assert!(!first.contains("api-key"));
+    }
+
+    #[test]
+    fn ai_dictionary_protocol_normalizes_identity_fields() {
+        let parsed = parse_ai_dictionary_protocol(
+            &json!({ "valid": true, "entry": ai_dictionary_entry_fixture() }).to_string(),
+            "cache-key",
+        )
+        .expect("valid AI dictionary protocol should parse");
+        let ParsedAiDictionary::Valid(entry) = parsed else {
+            panic!("valid protocol should return an entry");
+        };
+        assert_eq!(entry["schema_version"], "distribution_entry_v5");
+        assert_eq!(entry["entry_id"], "ai-cache-key");
+        assert_eq!(entry["headword"], "Serendipity");
+        assert_eq!(entry["normalized_headword"], "serendipity");
+        assert_eq!(entry["headword_language"]["code"], "en");
+        assert_eq!(entry["definition_language"]["code"], "zh-Hans");
+    }
+
+    #[test]
+    fn ai_dictionary_protocol_rejects_invalid_shapes_and_accepts_explicit_invalid_word() {
+        assert!(matches!(
+            parse_ai_dictionary_protocol(r#"{"valid":false}"#, "cache-key"),
+            Ok(ParsedAiDictionary::Invalid)
+        ));
+        assert!(
+            parse_ai_dictionary_protocol(r#"{"valid":false,"entry":null}"#, "cache-key").is_err()
+        );
+        assert!(parse_ai_dictionary_protocol("普通文本", "cache-key").is_err());
+
+        let mut missing_meanings = ai_dictionary_entry_fixture();
+        missing_meanings["pos_groups"][0]["meanings"] = json!([]);
+        assert!(
+            parse_ai_dictionary_protocol(
+                &json!({ "valid": true, "entry": missing_meanings }).to_string(),
+                "cache-key"
+            )
+            .is_err()
+        );
+
+        let mut extra_field = ai_dictionary_entry_fixture();
+        extra_field["extra"] = json!(true);
+        assert!(
+            parse_ai_dictionary_protocol(
+                &json!({ "valid": true, "entry": extra_field }).to_string(),
+                "cache-key"
+            )
+            .is_err()
+        );
+
+        let mut wrong_language = ai_dictionary_entry_fixture();
+        wrong_language["definition_language"]["code"] = json!("ja");
+        assert!(
+            parse_ai_dictionary_protocol(
+                &json!({ "valid": true, "entry": wrong_language }).to_string(),
+                "cache-key"
+            )
+            .is_err()
+        );
     }
 
     #[test]

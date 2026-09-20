@@ -1579,6 +1579,7 @@ function App() {
           word: request.word,
           canonicalWord: request.canonicalWord,
           targetLanguage: request.targetLanguage,
+          source: request.source,
         },
       });
       const result = decodeWordExampleCommandResult(rawResult);

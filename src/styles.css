@@ -479,6 +479,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-entry-header { padding: 25px 25px 21px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e7e5de; }
 .dictionary-entry-title-row { display: flex; align-items: center; gap: 9px; }
 .dictionary-entry-header h2 { margin: 0; color: #394b3e; font-family: Georgia, "Songti SC", serif; font-size: 28px; font-weight: 500; }
+.dictionary-ai-badge { padding: 3px 6px; border: 1px solid #c8d9c6; border-radius: 4px; color: #5f7b63; background: #edf4eb; font-size: 10px; white-space: nowrap; }
+.dictionary-invalid-state { color: #8c8172; }
 .dictionary-favorite-button { color: #9ba79a; }
 .dictionary-favorite-button.is-active { color: #6f8d74; background: #edf3ea; }
 .dictionary-entry-header p { max-width: 680px; margin: 9px 0 0; color: #70796f; font-size: 13px; line-height: 1.7; }
@@ -716,6 +718,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .selection-word-heading { display: flex; align-items: baseline; gap: 9px; }
 .selection-word-heading strong { color: #394b3e; font-family: Georgia, "Songti SC", serif; font-size: 20px; font-weight: 500; }
 .selection-word-heading span { color: #8b958b; font-size: 10px; }
+.selection-ai-badge { color: #5f7b63 !important; }
+.selection-invalid-word { color: #8c8172 !important; }
 .selection-dictionary > p { margin: 6px 0 0; color: #657267; font-size: 12px; line-height: 1.6; }
 .selection-muted { color: #9a9e96 !important; font-size: 11px !important; }
 .selection-candidates { display: grid; gap: 7px; color: #7d857c; font-size: 11px; }

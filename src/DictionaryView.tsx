@@ -53,6 +53,7 @@ export interface WordExampleRequestInput {
   word: string;
   canonicalWord: string;
   targetLanguage: string;
+  source: "local" | "ai";
 }
 
 export interface DictionaryOpenRequest {
@@ -106,10 +107,12 @@ export default function DictionaryView({
   const [example, setExample] = useState<ParagraphExample | null>(null);
   const [candidates, setCandidates] = useState<DictionaryLookupCandidate[]>([]);
   const [notFound, setNotFound] = useState(false);
+  const [invalidWord, setInvalidWord] = useState(false);
   const [querying, setQuerying] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [savingFavorite, setSavingFavorite] = useState(false);
   const lastOpenRequestId = useRef<string | null>(null);
+  const querySequence = useRef(0);
   const downloadPromptShownRef = useRef(false);
   const updating = state.status === "updating" || progress !== null;
 
@@ -126,18 +129,23 @@ export default function DictionaryView({
   }, [onResourceDownloadPrompt, onUpdate, snapshotReady, state.status, updating]);
 
   const query = useCallback(async (candidate: string, selectedCanonicalWord?: string) => {
+    const sequence = querySequence.current + 1;
+    querySequence.current = sequence;
     const trimmed = candidate.trim();
     if (!trimmed) {
+      setQuerying(false);
       setQueryError("请输入要查询的词形。");
       return;
     }
     if (state.status !== "ready") {
+      setQuerying(false);
       setQueryError(state.error ?? "词典尚未安装，请先下载词典。");
       return;
     }
     setQuerying(true);
     setQueryError(null);
     setNotFound(false);
+    setInvalidWord(false);
     setCandidates([]);
     setResult(null);
     setLookupMeta(null);
@@ -149,13 +157,15 @@ export default function DictionaryView({
         canonicalWord: selectedCanonicalWord ?? null,
       });
       const decoded = decodeDictionaryLookupCommandResult(rawResult);
+      if (sequence !== querySequence.current) return;
       if (!decoded) {
         setQueryError("词典命令返回了无法识别的结果。");
         return;
       }
       setWord(decoded.lookup?.word ?? trimmed);
       setCandidates(decoded.candidates);
-      setNotFound(decoded.lookup === null && decoded.candidates.length === 0);
+      setInvalidWord(decoded.invalidWord);
+      setNotFound(!decoded.invalidWord && decoded.lookup === null && decoded.candidates.length === 0);
       setResult(decoded.lookup?.entry ?? null);
       setLookupMeta(decoded.lookup);
       setExample(decoded.example);
@@ -165,19 +175,22 @@ export default function DictionaryView({
           word: decoded.lookup.word,
           canonicalWord: decoded.lookup.canonicalWord,
           targetLanguage,
+          source: decoded.lookup.source,
         });
       }
       onHistoryChanged(decoded.history);
     } catch (reason) {
+      if (sequence !== querySequence.current) return;
       setResult(null);
       setLookupMeta(null);
       setExample(null);
       setCandidates([]);
       setNotFound(false);
+      setInvalidWord(false);
       onWordExampleRequested(null);
       setQueryError(describeError(reason, "词典查询失败"));
     } finally {
-      setQuerying(false);
+      if (sequence === querySequence.current) setQuerying(false);
     }
   }, [onHistoryChanged, onWordExampleRequested, state.error, state.status, targetLanguage]);
 
@@ -287,7 +300,10 @@ export default function DictionaryView({
           </div>
         </div>
       )}
-      {state.status === "ready" && notFound && !queryError && (
+      {state.status === "ready" && invalidWord && !queryError && (
+        <div className="dictionary-empty-state dictionary-invalid-state">词汇无效。</div>
+      )}
+      {state.status === "ready" && notFound && !invalidWord && !queryError && (
         <div className="dictionary-empty-state">没有找到对应词条。</div>
       )}
       {state.status === "ready" && !result && !notFound && candidates.length === 0 && !queryError && (
@@ -393,6 +409,7 @@ function DictionaryEntryView({
         <div>
           <div className="dictionary-entry-title-row">
             <h2>{entry.headword}</h2>
+            {lookup?.source === "ai" && <span className="dictionary-ai-badge">AI 词解</span>}
             <button
               className={`icon-button dictionary-favorite-button ${isFavorite ? "is-active" : ""}`}
               type="button"

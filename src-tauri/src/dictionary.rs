@@ -2,8 +2,8 @@ use crate::AppState;
 use crate::contracts::{
     DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
     DictionaryCommandResult, DictionaryDownloadProgress, DictionaryExtractProgress,
-    DictionaryLookupResult, DictionaryMatchType, DictionaryState, DictionaryStatus,
-    DictionaryUpdateCompleted, DictionaryUpdateFailed, DictionaryUpdateStarted,
+    DictionaryLookupResult, DictionaryMatchType, DictionarySource, DictionaryState,
+    DictionaryStatus, DictionaryUpdateCompleted, DictionaryUpdateFailed, DictionaryUpdateStarted,
     DictionaryVerifyProgress,
 };
 use crate::db::{self, DictionaryInstallationRecord};
@@ -395,6 +395,7 @@ impl DictionaryStore {
                     normalized_word,
                     canonical_word,
                     match_type,
+                    source: DictionarySource::Local,
                     entry,
                 },
                 sql_elapsed,
