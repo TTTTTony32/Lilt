@@ -125,7 +125,7 @@ export default function DictionaryView({
     onResourceDownloadPrompt({
       resource: "dictionary",
       title: "准备离线词典",
-      description: "词典数据保存在本地，首次使用需要单独下载。",
+      description: "词典数据保存在本地，首次使用需要单独下载",
       startLabel: "下载词典",
       onStart: () => { void onUpdate(); },
     });

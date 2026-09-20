@@ -639,7 +639,7 @@ export default function PdfView({
     onResourceDownloadPrompt({
       resource: "pdf-engine",
       title: "准备 PDF Engine",
-      description: "PDF 全文翻译依赖本地 PDF Engine，首次使用需要准备运行环境。",
+      description: "PDF 全文翻译依赖本地 PDF Engine，首次使用需要准备运行环境",
       startLabel: "前往关于",
       failedLabel: "前往关于",
       onStart: onOpenPdfEngineSettings,

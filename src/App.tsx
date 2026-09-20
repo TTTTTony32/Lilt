@@ -2025,12 +2025,12 @@ function DataTransferDialog({
       if (mode === "personalExport") {
         const rawResult = await invokeCommand<unknown>("export_personal_dictionary", { filePath });
         const result = decodePersonalDictionaryExportResult(rawResult);
-        if (!result) throw new Error("导出命令返回了无法识别的结果。");
+        if (!result) throw new Error("导出命令返回了无法识别的结果");
         setExportResult(result);
       } else if (mode === "glossaryExport") {
         const rawResult = await invokeCommand<unknown>("export_glossary", { filePath });
         const result = decodeGlossaryExportResult(rawResult);
-        if (!result) throw new Error("导出命令返回了无法识别的结果。");
+        if (!result) throw new Error("导出命令返回了无法识别的结果");
         setGlossaryExportResult(result);
       }
       setStatus("success");
@@ -2064,7 +2064,7 @@ function DataTransferDialog({
       setStatus("processing");
       const rawPreview = await invokeCommand<unknown>("preview_glossary", { filePath });
       const preview = decodeGlossaryImportPreview(rawPreview);
-      if (!preview) throw new Error("解析命令返回了无法识别的结果。");
+      if (!preview) throw new Error("解析命令返回了无法识别的结果");
       setImportPreview(preview);
       setStatus("preview");
     } catch (reason) {
@@ -2080,7 +2080,7 @@ function DataTransferDialog({
     try {
       const rawResult = await invokeCommand<unknown>("import_glossary", { filePath: selectedFilePath });
       const result = decodeGlossaryImportResult(rawResult);
-      if (!result) throw new Error("导入命令返回了无法识别的结果。");
+      if (!result) throw new Error("导入命令返回了无法识别的结果");
       setImportResult(result);
       onImported();
       setStatus("success");
@@ -2121,10 +2121,10 @@ function DataTransferDialog({
 
   const title = mode === "personalExport" ? "导出个人词典" : mode === "glossaryExport" ? "导出术语表" : "导入术语表";
   const description = mode === "personalExport"
-    ? "将当前个人词典按列表顺序保存为 UTF-8 TXT。"
+    ? "将当前个人词典按列表顺序保存为 UTF-8 TXT"
     : mode === "glossaryExport"
-      ? "将原文和译文保存为 UTF-8 CSV，不包含备注。"
-      : "读取 UTF-8 CSV，导入原文和译文，已有备注不会改变。";
+      ? "将原文和译文保存为 UTF-8 CSV，不包含备注"
+      : "读取 UTF-8 CSV，导入原文和译文，已有备注不会改变";
   const retryable = status === "cancelled" || status === "error";
   const selectedFileName = selectedFilePath?.split(/[\\/]/).pop() ?? selectedFilePath;
 
@@ -2149,26 +2149,26 @@ function DataTransferDialog({
         <div className="data-transfer-body" aria-live="polite">
           {status === "intro" && mode === "glossaryImport" && (
             <div className="data-transfer-intro">
-              <p>请选择 UTF-8 编码的 CSV 文件，文件需要包含原文和译文两列。</p>
+              <p>请选择 UTF-8 编码的 CSV 文件，文件需要包含原文和译文两列</p>
               <pre>原文,译文{`\n`}Large Language Model,大语言模型</pre>
               <button className="primary-button" type="button" onClick={() => void chooseGlossaryFile()}><Download size={15} />选择 CSV 文件</button>
             </div>
           )}
           {status === "selecting" && <p className="data-transfer-status"><LoaderCircle className="spin" size={16} />正在等待选择文件</p>}
           {status === "processing" && <p className="data-transfer-status"><LoaderCircle className="spin" size={16} />{mode === "glossaryImport" ? "正在解析或导入术语表" : "正在写入文件"}</p>}
-          {status === "empty" && <p className="data-transfer-status">{mode === "personalExport" ? "个人词典为空，没有可导出的内容。" : "术语表为空，没有可导出的内容。"}</p>}
-          {status === "cancelled" && <p className="data-transfer-status">未选择文件，操作已取消。</p>}
+          {status === "empty" && <p className="data-transfer-status">{mode === "personalExport" ? "个人词典为空，没有可导出的内容" : "术语表为空，没有可导出的内容"}</p>}
+          {status === "cancelled" && <p className="data-transfer-status">未选择文件，操作已取消</p>}
           {status === "preview" && mode === "glossaryImport" && importPreview && (
             <div className="data-transfer-result data-transfer-preview">
-              <p className="notice-message">解析完成：{importPreview.terms.length} 条术语，跳过 {importPreview.skippedRows.length} 行。</p>
+              <p className="notice-message">解析完成：{importPreview.terms.length} 条术语，跳过 {importPreview.skippedRows.length} 行</p>
               {selectedFileName && <span>文件：{selectedFileName}</span>}
               {importPreview.terms.length > 0 && (
                 <div className="data-transfer-preview-list">
                   <strong>待导入术语</strong>
                   <ul>
-                    {importPreview.terms.slice(0, 50).map((term, index) => <li key={`${term.source}-${index}`}><span>{term.source}</span><span>→</span><span>{term.target}</span></li>)}
+                    {importPreview.terms.slice(0, 100).map((term, index) => <li key={`${term.source}-${index}`}><span>{term.source}</span><span>→</span><span>{term.target}</span></li>)}
                   </ul>
-                  {importPreview.terms.length > 50 && <small>仅显示前 50 条</small>}
+                  {importPreview.terms.length > 100 && <small>仅显示前 100 行</small>}
                 </div>
               )}
               {importPreview.skippedRows.length > 0 && (
@@ -2183,20 +2183,20 @@ function DataTransferDialog({
           )}
           {status === "success" && mode === "personalExport" && exportResult && (
             <div className="data-transfer-result">
-              <p className="notice-message">已导出 {exportResult.entryCount} 条个人词条。</p>
+              <p className="notice-message">已导出 {exportResult.entryCount} 条个人词条</p>
               <span>文件：{exportResult.fileName}</span>
             </div>
           )}
           {status === "success" && mode === "glossaryExport" && glossaryExportResult && (
             <div className="data-transfer-result">
-              <p className="notice-message">已导出 {glossaryExportResult.entryCount} 条术语。</p>
+              <p className="notice-message">已导出 {glossaryExportResult.entryCount} 条术语</p>
               <span>文件：{glossaryExportResult.fileName}</span>
             </div>
           )}
           {status === "success" && mode === "glossaryImport" && importResult && (
             <div className="data-transfer-result">
-              <p className="notice-message">术语表导入完成，共处理 {importResult.addedCount + importResult.updatedCount} 条不同原文。</p>
-              <span>新增 {importResult.addedCount} 条，更新 {importResult.updatedCount} 条，跳过 {importResult.skippedCount} 行。</span>
+              <p className="notice-message">术语表导入完成，共处理 {importResult.addedCount + importResult.updatedCount} 条不同原文</p>
+              <span>新增 {importResult.addedCount} 条，更新 {importResult.updatedCount} 条，跳过 {importResult.skippedCount} 行</span>
               {importResult.skippedRows.length > 0 && (
                 <div className="data-transfer-skipped">
                   <strong>异常行</strong>
@@ -2267,7 +2267,7 @@ function CloseBehaviorDialog({
       }}
     >
       <div className="modal-card" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="close-dialog-title" tabIndex={-1}>
-        <div className="modal-heading"><div><strong id="close-dialog-title">关闭 Lilt</strong><span>选择本次关闭窗口的处理方式。</span></div><button className="icon-button" type="button" onClick={onResolved} aria-label="取消"><X size={17} /></button></div>
+        <div className="modal-heading"><div><strong id="close-dialog-title">关闭 Lilt</strong><span>选择本次关闭窗口的处理方式</span></div><button className="icon-button" type="button" onClick={onResolved} aria-label="取消"><X size={17} /></button></div>
         <label className="modal-check"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住我的选择</label>
         {error && <p className="error-message settings-message">{error}</p>}
         <div className="form-actions modal-actions"><button className="secondary-button" type="button" onClick={() => void resolve("tray")}>缩小到托盘</button><button className="primary-button" type="button" onClick={() => void resolve("exit")}>退出程序</button></div>
@@ -2333,14 +2333,14 @@ function ReleaseNoticeDialog({
         <div className="modal-heading">
           <div>
             <strong id="release-notice-title">发现新版本</strong>
-            <span>GitHub Release 已发布新的稳定版本。</span>
+            <span>GitHub Release 已发布新的稳定版本</span>
           </div>
           <button className="icon-button" type="button" onClick={onRequestClose} disabled={isBusy} aria-label="关闭" title="关闭"><X size={17} /></button>
         </div>
         <div className="release-notice-body">
-          <p>当前版本 v{currentVersion}，最新版本 {release.tagName}。</p>
-          <span>官方更新器会下载并安装 Windows x64 版本，完成后自动重启应用。</span>
-          <div className="release-notice-notes">{release.notes ?? "此次版本未提供 Release 说明。"}</div>
+          <p>当前版本 v{currentVersion}，最新版本 {release.tagName}</p>
+          <span>官方更新器会下载并安装 Windows x64 版本，完成后自动重启应用</span>
+          <div className="release-notice-notes">{release.notes ?? "此次版本未提供 Release 说明"}</div>
           {updateStatus === "downloading" && (
             <div className="release-notice-progress" aria-live="polite">
               <div className="release-notice-progress-label">
@@ -2360,7 +2360,7 @@ function ReleaseNoticeDialog({
             </div>
           )}
           {updateStatus === "installing" && (
-            <p className="release-notice-status" aria-live="polite"><LoaderCircle className="spin" size={14} />正在安装更新，应用即将重启。</p>
+            <p className="release-notice-status" aria-live="polite"><LoaderCircle className="spin" size={14} />正在安装更新，应用即将重启</p>
           )}
           {updateStatus === "failed" && updateError && <p className="error-message release-notice-error">{updateError}</p>}
         </div>

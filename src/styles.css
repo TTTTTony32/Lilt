@@ -635,8 +635,9 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .data-transfer-intro p { margin: 0; }
 .data-transfer-intro pre { margin: 0; padding: 10px 12px; overflow-x: auto; border: 1px solid #e8e7df; border-radius: 7px; background: #f4f3ed; color: #657064; font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .data-transfer-intro .primary-button { justify-self: start; }
-.data-transfer-preview { max-height: min(430px, calc(100vh - 250px)); overflow-y: auto; scrollbar-width: thin; }
-.data-transfer-preview-list { margin-top: 14px; padding-top: 11px; border-top: 1px solid #eceae3; }
+.data-transfer-preview { max-height: min(430px, calc(100vh - 250px)); overflow-y: auto; scrollbar-width: none; }
+.data-transfer-preview::-webkit-scrollbar, .data-transfer-preview-list::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.data-transfer-preview-list { max-height: min(300px, 42vh); margin-top: 14px; padding: 11px 12px; overflow-y: auto; border: 1px solid #e3e4dc; border-radius: 8px; background: #f7f7f2; scrollbar-width: none; }
 .data-transfer-preview-list strong { color: #70796f; font-size: 11px; }
 .data-transfer-preview-list ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; color: #657064; font-size: 11px; }
 .data-transfer-preview-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: baseline; }

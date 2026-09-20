@@ -24,10 +24,10 @@ export interface ResourceDownloadDialogProps {
 }
 
 function statusDescription(status: ResourceDownloadDialogStatus): string {
-  if (status === "running") return "资源准备正在后台执行，关闭提示不会中断任务。";
-  if (status === "completed") return "资源已经准备完成，当前功能可以继续使用。";
-  if (status === "failed") return "资源准备失败，可以重试；页面原有入口仍然可用。";
-  return "当前功能依赖本地资源，首次使用前需要完成准备。";
+  if (status === "running") return "资源准备正在后台执行，关闭提示不会中断任务";
+  if (status === "completed") return "资源已经准备完成，当前功能可以继续使用";
+  if (status === "failed") return "资源准备失败，可以重试；页面原有入口仍然可用";
+  return "当前功能依赖本地资源，首次使用前需要完成准备";
 }
 
 export function ResourceDownloadDialog({
@@ -116,7 +116,7 @@ export function ResourceDownloadDialog({
 
         <div className="form-actions modal-actions">
           {canStart && <button className="primary-button" type="button" onClick={onStart}><Download size={15} />{status === "failed" ? failedLabel ?? "重试" : startLabel}</button>}
-          {running && <span className="resource-download-running-hint">可以关闭窗口，任务会继续。</span>}
+          {running && <span className="resource-download-running-hint">可以关闭窗口，任务会继续</span>}
           <button className="secondary-button" type="button" onClick={onRequestClose}>{status === "completed" ? "完成" : "关闭"}</button>
         </div>
       </div>
