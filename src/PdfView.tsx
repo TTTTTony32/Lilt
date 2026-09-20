@@ -796,7 +796,7 @@ export default function PdfView({
             <div className="pdf-drop-zone" aria-live="polite">
               <div className="pdf-drop-icon" aria-hidden="true"><FileType2 size={25} strokeWidth={1.6} /></div>
               <strong>{dragging ? "松开以导入 PDF" : "拖放 PDF 文件到这里"}</strong>
-              <p>当前支持单个 PDF 文件，也可以使用文件选择器导入。</p>
+              <p>当前支持单个 PDF 文件，也可以使用文件选择器导入</p>
               <button className="secondary-button" type="button" onClick={() => void chooseFile()}>
                 <Upload size={15} />
                 选择 PDF 文件

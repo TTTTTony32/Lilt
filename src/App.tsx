@@ -1853,6 +1853,7 @@ function App() {
                   onOpen={openPersonalWord}
                   onRemove={(entry) => { void removePersonalWord(entry); }}
                   onExport={() => openDataTransfer("personalExport")}
+                  onBack={() => setTab("dictionary")}
                 />
               )}
               {tab === "glossary" && (
