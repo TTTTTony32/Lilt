@@ -89,6 +89,17 @@ export interface DictionaryLookupCandidate {
   normalizedCanonicalWord: string;
 }
 
+export interface DictionaryProperNounInsight {
+  name: string;
+  description: string;
+}
+
+export interface DictionaryInvalidInsight {
+  possibleSpellings: DictionaryLookupCandidate[];
+  properNoun: DictionaryProperNounInsight | null;
+  note: string;
+}
+
 export interface ParagraphExample {
   exampleId: number;
   sourceText: string;
@@ -108,6 +119,7 @@ export interface DictionaryLookupCommandResult {
   example: ParagraphExample | null;
   history: DictionaryHistoryEntry[];
   invalidWord: boolean;
+  invalidInsight: DictionaryInvalidInsight | null;
 }
 
 export interface DictionaryState {
@@ -478,16 +490,19 @@ export function decodeDictionaryLookupResult(value: unknown): DictionaryLookupRe
 }
 
 export function decodeDictionaryLookupCommandResult(value: unknown): DictionaryLookupCommandResult | null {
-  if (!isRecord(value) || !Array.isArray(value.history) || !Array.isArray(value.candidates) || typeof value.invalidWord !== "boolean") return null;
+  if (!isRecord(value) || !Array.isArray(value.history) || !Array.isArray(value.candidates) || typeof value.invalidWord !== "boolean" || !("invalidInsight" in value)) return null;
   const lookup = decodeDictionaryLookupResult(value.lookup);
   const candidates = value.candidates.map(decodeDictionaryLookupCandidate);
   const example = decodeParagraphExample(value.example);
   const history = value.history.map(decodeDictionaryHistoryEntry);
+  const invalidInsight = decodeDictionaryInvalidInsight(value.invalidInsight);
   if (
     history.some((item) => item === null) ||
     candidates.some((item) => item === null) ||
     (example === null && value.example !== null) ||
     (lookup === null && value.lookup !== null) ||
+    (invalidInsight === null && value.invalidInsight !== null) ||
+    (!value.invalidWord && invalidInsight !== null) ||
     (value.invalidWord && (lookup !== null || candidates.length > 0 || example !== null))
   ) return null;
   return {
@@ -496,6 +511,7 @@ export function decodeDictionaryLookupCommandResult(value: unknown): DictionaryL
     example,
     history: history as DictionaryHistoryEntry[],
     invalidWord: value.invalidWord,
+    invalidInsight,
   };
 }
 
@@ -506,6 +522,33 @@ function decodeDictionaryLookupCandidate(value: unknown): DictionaryLookupCandid
   return canonicalWord === null || normalizedCanonicalWord === null
     ? null
     : { canonicalWord, normalizedCanonicalWord };
+}
+
+function decodeDictionaryInvalidInsight(value: unknown): DictionaryInvalidInsight | null {
+  if (value === null) return null;
+  if (!isRecord(value) || !Array.isArray(value.possibleSpellings)) return null;
+  const possibleSpellings = value.possibleSpellings.map(decodeDictionaryLookupCandidate);
+  const properNoun = decodeDictionaryProperNounInsight(value.properNoun);
+  const note = stringValue(value.note);
+  return possibleSpellings.some((item) => item === null) ||
+    (properNoun === null && value.properNoun !== null) ||
+    note === null
+    ? null
+    : {
+      possibleSpellings: possibleSpellings as DictionaryLookupCandidate[],
+      properNoun,
+      note,
+    };
+}
+
+function decodeDictionaryProperNounInsight(value: unknown): DictionaryProperNounInsight | null {
+  if (value === null) return null;
+  if (!isRecord(value)) return null;
+  const name = stringValue(value.name);
+  const description = stringValue(value.description);
+  return name === null || description === null || name.trim() === "" || description.trim() === ""
+    ? null
+    : { name, description };
 }
 
 function decodeParagraphExample(value: unknown): ParagraphExample | null {

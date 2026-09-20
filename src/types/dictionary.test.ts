@@ -90,7 +90,8 @@ describe("dictionary contracts", () => {
       example: null,
       history,
       invalidWord: false,
-    })).toEqual({ lookup, candidates: [], example: null, history, invalidWord: false });
+      invalidInsight: null,
+    })).toEqual({ lookup, candidates: [], example: null, history, invalidWord: false, invalidInsight: null });
   });
 
   it("rejects missing or malformed lookup and history fields", () => {
@@ -103,6 +104,7 @@ describe("dictionary contracts", () => {
       example: null,
       history: {},
       invalidWord: false,
+      invalidInsight: null,
     })).toBeNull();
     expect(decodeDictionaryLookupCommandResult({
       lookup,
@@ -110,14 +112,21 @@ describe("dictionary contracts", () => {
       example: null,
       history: [{ ...historyEntry, queryCount: "2" }],
       invalidWord: false,
+      invalidInsight: null,
     })).toBeNull();
+    const invalidInsight = {
+      possibleSpellings: [{ canonicalWord: "tauri", normalizedCanonicalWord: "tauri" }],
+      properNoun: { name: "Tauri", description: "跨平台应用框架" },
+      note: "可能是项目名称",
+    };
     expect(decodeDictionaryLookupCommandResult({
       lookup: null,
       candidates: [],
       example: null,
       history,
       invalidWord: true,
-    })).toEqual({ lookup: null, candidates: [], example: null, history, invalidWord: true });
+      invalidInsight,
+    })).toEqual({ lookup: null, candidates: [], example: null, history, invalidWord: true, invalidInsight });
     expect(decodeDictionaryLookupCommandResult({
       lookup,
       candidates: [],

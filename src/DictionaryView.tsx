@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Bookmark, Download, LoaderCircle, Search } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { invokeCommand } from "./lib/tauri";
+import DictionaryInvalidInsight from "./components/DictionaryInvalidInsight";
 import type { ResourceDownloadPromptRequest } from "./lib/download-activity";
 import {
   decodeDictionaryLookupCommandResult,
@@ -16,6 +17,7 @@ import {
   type DictionaryPosGroup,
   type DictionaryState,
   type DictionaryLookupCandidate,
+  type DictionaryInvalidInsight as DictionaryInvalidInsightData,
   type ParagraphExample,
 } from "./types/dictionary";
 import type { PersonalDictionaryEntry, WordExampleState } from "./types/contracts";
@@ -108,6 +110,7 @@ export default function DictionaryView({
   const [candidates, setCandidates] = useState<DictionaryLookupCandidate[]>([]);
   const [notFound, setNotFound] = useState(false);
   const [invalidWord, setInvalidWord] = useState(false);
+  const [invalidInsight, setInvalidInsight] = useState<DictionaryInvalidInsightData | null>(null);
   const [querying, setQuerying] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [savingFavorite, setSavingFavorite] = useState(false);
@@ -146,6 +149,7 @@ export default function DictionaryView({
     setQueryError(null);
     setNotFound(false);
     setInvalidWord(false);
+    setInvalidInsight(null);
     setCandidates([]);
     setResult(null);
     setLookupMeta(null);
@@ -165,6 +169,7 @@ export default function DictionaryView({
       setWord(decoded.lookup?.word ?? trimmed);
       setCandidates(decoded.candidates);
       setInvalidWord(decoded.invalidWord);
+      setInvalidInsight(decoded.invalidInsight);
       setNotFound(!decoded.invalidWord && decoded.lookup === null && decoded.candidates.length === 0);
       setResult(decoded.lookup?.entry ?? null);
       setLookupMeta(decoded.lookup);
@@ -187,6 +192,7 @@ export default function DictionaryView({
       setCandidates([]);
       setNotFound(false);
       setInvalidWord(false);
+      setInvalidInsight(null);
       onWordExampleRequested(null);
       setQueryError(describeError(reason, "词典查询失败"));
     } finally {
@@ -307,7 +313,16 @@ export default function DictionaryView({
         </div>
       )}
       {state.status === "ready" && invalidWord && !queryError && !querying && (
-        <div className="dictionary-empty-state dictionary-invalid-state">词汇无效</div>
+        <div className="dictionary-empty-state dictionary-invalid-state">
+          <div>词汇无效</div>
+          <DictionaryInvalidInsight
+            insight={invalidInsight}
+            onSuggestion={(candidate) => {
+              setWord(candidate.canonicalWord);
+              void query(candidate.canonicalWord);
+            }}
+          />
+        </div>
       )}
       {state.status === "ready" && notFound && !invalidWord && !queryError && (
         <div className="dictionary-empty-state">没有找到对应词条。</div>

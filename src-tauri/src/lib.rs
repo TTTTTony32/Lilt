@@ -21,15 +21,16 @@ mod tray;
 
 use contracts::{
     AI_DICTIONARY_PROTOCOL_VERSION, AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID,
-    DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult, DictionaryLookupCandidate,
-    DictionaryLookupCommandResult, DictionaryMatchType, DictionarySource, DictionaryState,
-    GlossaryExportResult, GlossaryImportResult, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT,
-    MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo,
-    ParagraphExample, PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt,
-    ProviderConfig, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
-    SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationDelta, TranslationFailed,
-    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult, DictionaryInvalidInsight,
+    DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryMatchType,
+    DictionaryProperNounInsight, DictionarySource, DictionaryState, GlossaryExportResult,
+    GlossaryImportResult, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample,
+    PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode,
+    SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
+    SelectionTriggerNotice, ThinkingEffort, TranslationCancelled, TranslationCommandResult,
+    TranslationCompleted, TranslationDelta, TranslationFailed, TranslationRequest,
+    TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
     WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
     WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
@@ -2113,11 +2114,12 @@ async fn query_dictionary_impl(
                 example: None,
                 history,
                 invalid_word: false,
+                invalid_insight: None,
             });
         }
         dictionary::DictionaryLookupResolution::NotFound => {
             match query_ai_dictionary(&state, &request_id, &display_word).await? {
-                AiDictionaryLookup::Invalid => {
+                AiDictionaryLookup::Invalid { insight } => {
                     let history = list_history()?;
                     diagnostics::info(format!(
                         "command.dictionary.query.invalid_word request_id={request_id} total_ms={}",
@@ -2129,6 +2131,7 @@ async fn query_dictionary_impl(
                         example: None,
                         history,
                         invalid_word: true,
+                        invalid_insight: Some(insight),
                     });
                 }
                 AiDictionaryLookup::Found { lookup, cache_hit } => (
@@ -2179,6 +2182,7 @@ async fn query_dictionary_impl(
         example,
         history,
         invalid_word: false,
+        invalid_insight: None,
     })
 }
 
@@ -2186,12 +2190,20 @@ const AI_DICTIONARY_SOURCE_LANGUAGE: &str = "en";
 const AI_DICTIONARY_DEFINITION_LANGUAGE: &str = "zh-Hans";
 const AI_DICTIONARY_SYSTEM_PROMPT: &str = r#"你是一名英语词典工具。判断用户输入是否为有效的英语单词、固定搭配或短语，并严格只输出一个 JSON 对象，不要输出 Markdown、代码围栏、解释或其他文字。
 
-有效输入输出：{"valid":true,"entry":{...}}。无效输入输出：{"valid":false}。
+有效输入输出：{"valid":true,"entry":{...}}。
+无效输入输出：{"valid":false,"insight":{"possible_spellings":[],"proper_noun":null,"note":""}}。
+
+当输入不是有效英语词条时，仍然要给出有限的辅助判断：
+- possible_spellings：最多 5 个最可能的英文拼写修正，按可能性排序；没有可靠候选时返回空数组。候选必须是可以继续查询的词形，不要返回解释或原输入。
+- proper_noun：如果输入可能是非英文词汇、产品名、项目名、框架名、人名、地名或其他专有名词，返回 {"name":"...","description":"用简体中文简要说明它是什么"}；无法确认时返回 null。不要把普通乱码或任意未知字符串强行判断为专有名词。
+- note：用简体中文给出一句简短的判断，无法补充时返回空字符串。
 
 当 valid 为 true 时，entry 必须完整符合 distribution_entry_v5 词典条目结构。headword_language 固定为 {"code":"en","name":"English"}，definition_language 固定为 {"code":"zh-Hans","name":"Chinese (Simplified)"}。至少提供一个 pos_groups，每个 pos_group 至少提供一个 meanings；每个 meaning 的 learner_explanation 必须是非空中文释义。所有字段都必须存在，即使没有内容也使用空字符串、空数组或 null。不要添加结构之外的字段。"#;
 
 enum AiDictionaryLookup {
-    Invalid,
+    Invalid {
+        insight: DictionaryInvalidInsight,
+    },
     Found {
         lookup: contracts::DictionaryLookupResult,
         cache_hit: bool,
@@ -2322,7 +2334,9 @@ async fn query_ai_dictionary(
     .map_err(|error| error.to_string())?;
     let parsed = parse_ai_dictionary_protocol(&streamed, &cache_key)?;
     let entry = match parsed {
-        ParsedAiDictionary::Invalid => return Ok(AiDictionaryLookup::Invalid),
+        ParsedAiDictionary::Invalid { insight } => {
+            return Ok(AiDictionaryLookup::Invalid { insight });
+        }
         ParsedAiDictionary::Valid(entry) => entry,
     };
     let canonical_word = entry
@@ -2450,7 +2464,7 @@ fn build_ai_dictionary_lookup(
 }
 
 enum ParsedAiDictionary {
-    Invalid,
+    Invalid { insight: DictionaryInvalidInsight },
     Valid(Value),
 }
 
@@ -2465,8 +2479,21 @@ fn parse_ai_dictionary_protocol(raw: &str, cache_key: &str) -> Result<ParsedAiDi
         .and_then(Value::as_bool)
         .ok_or_else(|| "AI 词典协议缺少 valid 布尔字段".to_string())?;
     if !valid {
-        ensure_exact_fields(object, &["valid"], "AI 词典无效协议")?;
-        return Ok(ParsedAiDictionary::Invalid);
+        let insight = if object.len() == 1 && object.contains_key("valid") {
+            DictionaryInvalidInsight {
+                possible_spellings: Vec::new(),
+                proper_noun: None,
+                note: String::new(),
+            }
+        } else {
+            ensure_exact_fields(object, &["valid", "insight"], "AI 词典无效协议")?;
+            parse_dictionary_invalid_insight(
+                object
+                    .get("insight")
+                    .ok_or_else(|| "AI 词典无效协议缺少 insight".to_string())?,
+            )?
+        };
+        return Ok(ParsedAiDictionary::Invalid { insight });
     }
     ensure_exact_fields(object, &["valid", "entry"], "AI 词典有效协议")?;
     let entry = object
@@ -2476,6 +2503,78 @@ fn parse_ai_dictionary_protocol(raw: &str, cache_key: &str) -> Result<ParsedAiDi
     Ok(ParsedAiDictionary::Valid(normalize_ai_dictionary_entry(
         entry, cache_key,
     )?))
+}
+
+fn parse_dictionary_invalid_insight(value: &Value) -> Result<DictionaryInvalidInsight, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "AI 词典无效协议的 insight 必须是对象".to_string())?;
+    ensure_exact_fields(
+        object,
+        &["possible_spellings", "proper_noun", "note"],
+        "AI 词典无效协议的 insight",
+    )?;
+    let possible_spellings =
+        string_array(object, "possible_spellings", "AI 词典无效协议的 insight")?;
+    if possible_spellings.len() > 5 {
+        return Err("AI 词典无效协议的 insight.possible_spellings 不能超过 5 项".to_string());
+    }
+    let mut suggestions = Vec::with_capacity(possible_spellings.len());
+    for value in possible_spellings {
+        let canonical_word = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "AI 词典无效协议的拼写候选不能为空".to_string())?;
+        let normalized_canonical_word = dictionary::normalize_headword(canonical_word);
+        if normalized_canonical_word.is_empty() {
+            return Err("AI 词典无效协议的拼写候选无法规范化".to_string());
+        }
+        if suggestions
+            .iter()
+            .any(|candidate: &DictionaryLookupCandidate| {
+                candidate.normalized_canonical_word == normalized_canonical_word
+            })
+        {
+            continue;
+        }
+        suggestions.push(DictionaryLookupCandidate {
+            canonical_word: canonical_word.to_string(),
+            normalized_canonical_word,
+        });
+    }
+    let proper_noun = match object.get("proper_noun") {
+        Some(Value::Null) => None,
+        Some(Value::Object(proper_noun)) => {
+            ensure_exact_fields(
+                proper_noun,
+                &["name", "description"],
+                "AI 词典无效协议的 proper_noun",
+            )?;
+            Some(DictionaryProperNounInsight {
+                name: required_string(proper_noun, "name", "AI 词典无效协议的 proper_noun", false)?
+                    .trim()
+                    .to_string(),
+                description: required_string(
+                    proper_noun,
+                    "description",
+                    "AI 词典无效协议的 proper_noun",
+                    false,
+                )
+                .map(str::trim)
+                .map(str::to_string)?,
+            })
+        }
+        _ => return Err("AI 词典无效协议的 proper_noun 必须是对象或 null".to_string()),
+    };
+    let note = required_string(object, "note", "AI 词典无效协议的 insight", true)?
+        .trim()
+        .to_string();
+    Ok(DictionaryInvalidInsight {
+        possible_spellings: suggestions,
+        proper_noun,
+        note,
+    })
 }
 
 fn normalize_ai_dictionary_entry(value: Value, cache_key: &str) -> Result<Value, String> {
@@ -3747,10 +3846,28 @@ mod tests {
     fn ai_dictionary_protocol_rejects_invalid_shapes_and_accepts_explicit_invalid_word() {
         assert!(matches!(
             parse_ai_dictionary_protocol(r#"{"valid":false}"#, "cache-key"),
-            Ok(ParsedAiDictionary::Invalid)
+            Ok(ParsedAiDictionary::Invalid { .. })
         ));
+        let parsed = parse_ai_dictionary_protocol(
+            r#"{"valid":false,"insight":{"possible_spellings":["tauri"],"proper_noun":{"name":"Tauri","description":"跨平台应用框架"},"note":"可能是项目名称"}}"#,
+            "cache-key",
+        )
+        .expect("invalid word insight should parse");
+        let ParsedAiDictionary::Invalid { insight } = parsed else {
+            panic!("invalid protocol should return an insight");
+        };
+        assert_eq!(insight.possible_spellings[0].canonical_word, "tauri");
+        assert_eq!(insight.proper_noun.as_ref().unwrap().name, "Tauri");
+        assert_eq!(insight.note, "可能是项目名称");
         assert!(
             parse_ai_dictionary_protocol(r#"{"valid":false,"entry":null}"#, "cache-key").is_err()
+        );
+        assert!(
+            parse_ai_dictionary_protocol(
+                r#"{"valid":false,"insight":{"possible_spellings":[],"proper_noun":null}}"#,
+                "cache-key"
+            )
+            .is_err()
         );
         assert!(parse_ai_dictionary_protocol("普通文本", "cache-key").is_err());
 

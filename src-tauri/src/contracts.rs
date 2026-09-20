@@ -402,6 +402,21 @@ pub struct DictionaryLookupCandidate {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictionaryProperNounInsight {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryInvalidInsight {
+    pub possible_spellings: Vec<DictionaryLookupCandidate>,
+    pub proper_noun: Option<DictionaryProperNounInsight>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParagraphExample {
     pub example_id: i64,
     pub source_text: String,
@@ -416,6 +431,7 @@ pub struct DictionaryLookupCommandResult {
     pub example: Option<ParagraphExample>,
     pub history: Vec<DictionaryHistoryEntry>,
     pub invalid_word: bool,
+    pub invalid_insight: Option<DictionaryInvalidInsight>,
 }
 
 #[derive(Debug, Clone, Serialize)]
