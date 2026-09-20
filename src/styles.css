@@ -631,6 +631,18 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .data-transfer-status { min-height: 42px; margin: 0; display: flex; align-items: center; gap: 8px; }
 .data-transfer-result > p { margin: 0; }
 .data-transfer-result > span { display: block; margin-top: 6px; color: #8a9188; font-size: 11px; }
+.data-transfer-intro { display: grid; gap: 13px; }
+.data-transfer-intro p { margin: 0; }
+.data-transfer-intro pre { margin: 0; padding: 10px 12px; overflow-x: auto; border: 1px solid #e8e7df; border-radius: 7px; background: #f4f3ed; color: #657064; font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.data-transfer-intro .primary-button { justify-self: start; }
+.data-transfer-preview { max-height: min(430px, calc(100vh - 250px)); overflow-y: auto; scrollbar-width: thin; }
+.data-transfer-preview-list { margin-top: 14px; padding-top: 11px; border-top: 1px solid #eceae3; }
+.data-transfer-preview-list strong { color: #70796f; font-size: 11px; }
+.data-transfer-preview-list ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; color: #657064; font-size: 11px; }
+.data-transfer-preview-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.data-transfer-preview-list li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.data-transfer-preview-list li span:last-child { color: #4e6654; }
+.data-transfer-preview-list small { display: block; margin-top: 8px; color: #92978e; font-size: 10px; }
 .data-transfer-skipped { max-height: 150px; margin-top: 13px; padding-top: 11px; overflow-y: auto; border-top: 1px solid #eceae3; }
 .data-transfer-skipped strong { color: #70796f; font-size: 11px; }
 .data-transfer-skipped ul { margin: 7px 0 0; padding-left: 18px; color: #a25e53; font-size: 11px; }

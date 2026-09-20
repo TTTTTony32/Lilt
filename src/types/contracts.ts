@@ -127,6 +127,16 @@ export interface GlossaryImportSkippedRow {
   reason: string;
 }
 
+export interface GlossaryImportPreviewTerm {
+  source: string;
+  target: string;
+}
+
+export interface GlossaryImportPreview {
+  terms: GlossaryImportPreviewTerm[];
+  skippedRows: GlossaryImportSkippedRow[];
+}
+
 export interface GlossaryImportResult {
   addedCount: number;
   updatedCount: number;
@@ -1570,6 +1580,26 @@ export function decodeGlossaryImportResult(value: unknown): GlossaryImportResult
     skippedCount: value.skippedCount,
     skippedRows,
   };
+}
+
+export function decodeGlossaryImportPreview(value: unknown): GlossaryImportPreview | null {
+  if (!isRecord(value) || !Array.isArray(value.terms) || !Array.isArray(value.skippedRows)) return null;
+  const terms: GlossaryImportPreviewTerm[] = [];
+  for (const term of value.terms) {
+    if (!isRecord(term)) return null;
+    const source = stringValue(term.source);
+    const target = stringValue(term.target);
+    if (source === null || source.trim().length === 0 || target === null || target.trim().length === 0) return null;
+    terms.push({ source, target });
+  }
+  const skippedRows: GlossaryImportSkippedRow[] = [];
+  for (const row of value.skippedRows) {
+    if (!isRecord(row) || !nonNegativeInteger(row.line) || row.line < 1) return null;
+    const reason = stringValue(row.reason);
+    if (reason === null || reason.trim().length === 0) return null;
+    skippedRows.push({ line: row.line, reason });
+  }
+  return { terms, skippedRows };
 }
 
 export const DEFAULT_SNAPSHOT: AppSnapshot = {

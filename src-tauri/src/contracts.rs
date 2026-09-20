@@ -288,6 +288,20 @@ pub struct GlossaryImportSkippedRow {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct GlossaryImportPreviewTerm {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlossaryImportPreview {
+    pub terms: Vec<GlossaryImportPreviewTerm>,
+    pub skipped_rows: Vec<GlossaryImportSkippedRow>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct GlossaryImportResult {
     pub added_count: usize,
     pub updated_count: usize,

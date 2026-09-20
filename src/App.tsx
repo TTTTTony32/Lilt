@@ -39,6 +39,7 @@ import {
   type AppTab,
   type CloseBehavior,
   type GlossaryExportResult,
+  type GlossaryImportPreview,
   type GlossaryImportResult,
   type GlossaryTerm,
   type HistoryEntry,
@@ -64,6 +65,7 @@ import {
   decodeWordExampleEvent,
   decodePrompt,
   decodeGlossaryExportResult,
+  decodeGlossaryImportPreview,
   decodeGlossaryImportResult,
   decodePersonalDictionaryExportResult,
   decodePdfEngineEvent,
@@ -278,7 +280,7 @@ function PageTransition({ activeKey, children }: { activeKey: string; children: 
 }
 
 type DataTransferMode = "personalExport" | "glossaryExport" | "glossaryImport";
-type DataTransferStatus = "selecting" | "processing" | "success" | "empty" | "cancelled" | "error";
+type DataTransferStatus = "intro" | "selecting" | "processing" | "preview" | "success" | "empty" | "cancelled" | "error";
 type ToastKind = "error" | "notice";
 type ReleaseUpdateStatus = "ready" | "downloading" | "installing" | "failed";
 type AppToast = { message: string; kind: ToastKind };
@@ -1976,11 +1978,13 @@ function DataTransferDialog({
   onRequestClose: () => void;
   onClosed: () => void;
 }) {
-  const [status, setStatus] = useState<DataTransferStatus>("selecting");
+  const [status, setStatus] = useState<DataTransferStatus>(mode === "glossaryImport" ? "intro" : "selecting");
   const [error, setError] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<PersonalDictionaryExportResult | null>(null);
   const [glossaryExportResult, setGlossaryExportResult] = useState<GlossaryExportResult | null>(null);
+  const [importPreview, setImportPreview] = useState<GlossaryImportPreview | null>(null);
   const [importResult, setImportResult] = useState<GlossaryImportResult | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const startedRef = useRef(false);
   const busy = status === "selecting" || status === "processing";
@@ -1989,7 +1993,13 @@ function DataTransferDialog({
     setError(null);
     setExportResult(null);
     setGlossaryExportResult(null);
+    setImportPreview(null);
     setImportResult(null);
+    setSelectedFilePath(null);
+    if (mode === "glossaryImport") {
+      setStatus("intro");
+      return;
+    }
     if (mode === "personalExport" && entryCount === 0) {
       setStatus("empty");
       return;
@@ -2001,16 +2011,10 @@ function DataTransferDialog({
 
     setStatus("selecting");
     try {
-      const selected = mode === "glossaryImport"
-        ? await open({
-          directory: false,
-          multiple: false,
-          filters: [{ name: "CSV 文件", extensions: ["csv"] }],
-        })
-        : await save({
-          defaultPath: mode === "personalExport" ? "lilt-personal-dictionary.txt" : "lilt-glossary.csv",
-          filters: [{ name: mode === "personalExport" ? "TXT 文件" : "CSV 文件", extensions: [mode === "personalExport" ? "txt" : "csv"] }],
-        });
+      const selected = await save({
+        defaultPath: mode === "personalExport" ? "lilt-personal-dictionary.txt" : "lilt-glossary.csv",
+        filters: [{ name: mode === "personalExport" ? "TXT 文件" : "CSV 文件", extensions: [mode === "personalExport" ? "txt" : "csv"] }],
+      });
       const filePath = Array.isArray(selected) ? selected[0] : selected;
       if (!filePath) {
         setStatus("cancelled");
@@ -2028,22 +2032,63 @@ function DataTransferDialog({
         const result = decodeGlossaryExportResult(rawResult);
         if (!result) throw new Error("导出命令返回了无法识别的结果。");
         setGlossaryExportResult(result);
-      } else {
-        const rawResult = await invokeCommand<unknown>("import_glossary", { filePath });
-        const result = decodeGlossaryImportResult(rawResult);
-        if (!result) throw new Error("导入命令返回了无法识别的结果。");
-        setImportResult(result);
-        onImported();
       }
       setStatus("success");
     } catch (reason) {
       setError(describeError(
         reason,
-        mode === "personalExport" ? "个人词典导出失败" : mode === "glossaryImport" ? "术语表导入失败" : "术语表导出失败",
+        mode === "personalExport" ? "个人词典导出失败" : "术语表导出失败",
       ));
       setStatus("error");
     }
-  }, [entryCount, glossaryEntryCount, mode, onImported]);
+  }, [entryCount, glossaryEntryCount, mode]);
+
+  const chooseGlossaryFile = useCallback(async () => {
+    setError(null);
+    setImportPreview(null);
+    setImportResult(null);
+    setStatus("selecting");
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "CSV 文件", extensions: ["csv"] }],
+      });
+      const filePath = Array.isArray(selected) ? selected[0] : selected;
+      if (!filePath) {
+        setStatus("cancelled");
+        return;
+      }
+
+      setSelectedFilePath(filePath);
+      setStatus("processing");
+      const rawPreview = await invokeCommand<unknown>("preview_glossary", { filePath });
+      const preview = decodeGlossaryImportPreview(rawPreview);
+      if (!preview) throw new Error("解析命令返回了无法识别的结果。");
+      setImportPreview(preview);
+      setStatus("preview");
+    } catch (reason) {
+      setError(describeError(reason, "术语表解析失败"));
+      setStatus("error");
+    }
+  }, []);
+
+  const confirmGlossaryImport = useCallback(async () => {
+    if (!selectedFilePath) return;
+    setError(null);
+    setStatus("processing");
+    try {
+      const rawResult = await invokeCommand<unknown>("import_glossary", { filePath: selectedFilePath });
+      const result = decodeGlossaryImportResult(rawResult);
+      if (!result) throw new Error("导入命令返回了无法识别的结果。");
+      setImportResult(result);
+      onImported();
+      setStatus("success");
+    } catch (reason) {
+      setError(describeError(reason, "术语表导入失败"));
+      setStatus("error");
+    }
+  }, [onImported, selectedFilePath]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -2054,10 +2099,14 @@ function DataTransferDialog({
     startedRef.current = true;
     const frame = window.requestAnimationFrame(() => {
       dialogRef.current?.focus();
-      void startTransfer();
+      if (mode === "glossaryImport") {
+        setStatus("intro");
+      } else {
+        void startTransfer();
+      }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [isOpen, startTransfer]);
+  }, [isOpen, mode, startTransfer]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -2077,6 +2126,7 @@ function DataTransferDialog({
       ? "将原文和译文保存为 UTF-8 CSV，不包含备注。"
       : "读取 UTF-8 CSV，导入原文和译文，已有备注不会改变。";
   const retryable = status === "cancelled" || status === "error";
+  const selectedFileName = selectedFilePath?.split(/[\\/]/).pop() ?? selectedFilePath;
 
   return (
     <AnimatedOverlay
@@ -2097,10 +2147,40 @@ function DataTransferDialog({
         </div>
 
         <div className="data-transfer-body" aria-live="polite">
+          {status === "intro" && mode === "glossaryImport" && (
+            <div className="data-transfer-intro">
+              <p>请选择 UTF-8 编码的 CSV 文件，文件需要包含原文和译文两列。</p>
+              <pre>原文,译文{`\n`}Large Language Model,大语言模型</pre>
+              <button className="primary-button" type="button" onClick={() => void chooseGlossaryFile()}><Download size={15} />选择 CSV 文件</button>
+            </div>
+          )}
           {status === "selecting" && <p className="data-transfer-status"><LoaderCircle className="spin" size={16} />正在等待选择文件</p>}
-          {status === "processing" && <p className="data-transfer-status"><LoaderCircle className="spin" size={16} />{mode === "glossaryImport" ? "正在读取并导入术语" : "正在写入文件"}</p>}
+          {status === "processing" && <p className="data-transfer-status"><LoaderCircle className="spin" size={16} />{mode === "glossaryImport" ? "正在解析或导入术语表" : "正在写入文件"}</p>}
           {status === "empty" && <p className="data-transfer-status">{mode === "personalExport" ? "个人词典为空，没有可导出的内容。" : "术语表为空，没有可导出的内容。"}</p>}
           {status === "cancelled" && <p className="data-transfer-status">未选择文件，操作已取消。</p>}
+          {status === "preview" && mode === "glossaryImport" && importPreview && (
+            <div className="data-transfer-result data-transfer-preview">
+              <p className="notice-message">解析完成：{importPreview.terms.length} 条术语，跳过 {importPreview.skippedRows.length} 行。</p>
+              {selectedFileName && <span>文件：{selectedFileName}</span>}
+              {importPreview.terms.length > 0 && (
+                <div className="data-transfer-preview-list">
+                  <strong>待导入术语</strong>
+                  <ul>
+                    {importPreview.terms.slice(0, 50).map((term, index) => <li key={`${term.source}-${index}`}><span>{term.source}</span><span>→</span><span>{term.target}</span></li>)}
+                  </ul>
+                  {importPreview.terms.length > 50 && <small>仅显示前 50 条</small>}
+                </div>
+              )}
+              {importPreview.skippedRows.length > 0 && (
+                <div className="data-transfer-skipped">
+                  <strong>异常行</strong>
+                  <ul>
+                    {importPreview.skippedRows.map((row) => <li key={`${row.line}-${row.reason}`}>第 {row.line} 行：{row.reason}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
           {status === "success" && mode === "personalExport" && exportResult && (
             <div className="data-transfer-result">
               <p className="notice-message">已导出 {exportResult.entryCount} 条个人词条。</p>
@@ -2131,8 +2211,9 @@ function DataTransferDialog({
         </div>
 
         <div className="form-actions modal-actions">
-          {retryable && <button className="secondary-button" type="button" onClick={() => void startTransfer()}><Download size={15} />重新选择</button>}
-          <button className="primary-button" type="button" onClick={onRequestClose} disabled={busy}>关闭</button>
+          {retryable && <button className="secondary-button" type="button" onClick={() => void (mode === "glossaryImport" ? chooseGlossaryFile() : startTransfer())}><Download size={15} />重新选择</button>}
+          {status === "preview" && mode === "glossaryImport" && <button className="primary-button" type="button" onClick={() => void confirmGlossaryImport()}>确认导入</button>}
+          <button className={status === "intro" && mode === "glossaryImport" ? "secondary-button" : "primary-button"} type="button" onClick={onRequestClose} disabled={busy}>关闭</button>
         </div>
       </div>
     </AnimatedOverlay>

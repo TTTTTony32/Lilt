@@ -10,6 +10,7 @@ import {
   decodePrompt,
   decodePersonalDictionaryExportResult,
   decodeGlossaryExportResult,
+  decodeGlossaryImportPreview,
   decodeGlossaryImportResult,
   decodeDocumentContext,
   decodePdfJobEvent,
@@ -348,6 +349,20 @@ describe("dictionary and glossary transfer contracts", () => {
       updatedCount: 1,
       skippedCount: 2,
       skippedRows: [{ line: 4, reason: "译文不能为空" }],
+    })).toBeNull();
+  });
+
+  it("decodes glossary import previews", () => {
+    expect(decodeGlossaryImportPreview({
+      terms: [{ source: "LLM", target: "大语言模型" }],
+      skippedRows: [{ line: 3, reason: "需要原文和译文两个字段" }],
+    })).toEqual({
+      terms: [{ source: "LLM", target: "大语言模型" }],
+      skippedRows: [{ line: 3, reason: "需要原文和译文两个字段" }],
+    });
+    expect(decodeGlossaryImportPreview({
+      terms: [{ source: "", target: "译文" }],
+      skippedRows: [],
     })).toBeNull();
   });
 });

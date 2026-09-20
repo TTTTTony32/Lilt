@@ -24,15 +24,15 @@ use contracts::{
     DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult, DictionaryInvalidInsight,
     DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryMatchType,
     DictionaryProperNounInsight, DictionarySource, DictionaryState, GlossaryExportResult,
-    GlossaryImportResult, GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
-    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample,
-    PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode,
-    SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
-    SelectionTriggerNotice, ThinkingEffort, TranslationCancelled, TranslationCommandResult,
-    TranslationCompleted, TranslationDelta, TranslationFailed, TranslationRequest,
-    TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
-    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
-    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
+    GlossaryImportPreview, GlossaryImportPreviewTerm, GlossaryImportResult, GlossaryTerm,
+    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
+    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
+    PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
+    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
+    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationDelta,
+    TranslationFailed, TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION,
+    WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted, WordExampleFailed,
+    WordExamplePosDelta, WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
 };
 use rusqlite::Connection;
@@ -329,6 +329,7 @@ pub fn run() {
             cancel_translation,
             upsert_glossary_term,
             delete_glossary_term,
+            preview_glossary,
             import_glossary,
             export_glossary,
             create_prompt,
@@ -1769,11 +1770,7 @@ fn delete_glossary_term(state: State<'_, AppState>, id: String) -> Result<(), St
     db::delete_glossary_term(&connection, &id)
 }
 
-#[tauri::command]
-fn import_glossary(
-    state: State<'_, AppState>,
-    file_path: String,
-) -> Result<GlossaryImportResult, String> {
+fn read_glossary_file(file_path: &str) -> Result<glossary::ParsedGlossaryImport, String> {
     let path = file_path.trim();
     if path.is_empty() {
         return Err("术语表文件路径不能为空".to_string());
@@ -1781,7 +1778,31 @@ fn import_glossary(
     let bytes = fs::read(path).map_err(|error| format!("读取术语表文件失败：{error}"))?;
     let content =
         String::from_utf8(bytes).map_err(|_| "术语表文件必须使用 UTF-8 编码".to_string())?;
-    let parsed = glossary::parse_csv(&content);
+    Ok(glossary::parse_csv(&content))
+}
+
+#[tauri::command]
+fn preview_glossary(file_path: String) -> Result<GlossaryImportPreview, String> {
+    let parsed = read_glossary_file(&file_path)?;
+    Ok(GlossaryImportPreview {
+        terms: parsed
+            .terms
+            .into_iter()
+            .map(|term| GlossaryImportPreviewTerm {
+                source: term.source,
+                target: term.target,
+            })
+            .collect(),
+        skipped_rows: parsed.skipped_rows,
+    })
+}
+
+#[tauri::command]
+fn import_glossary(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<GlossaryImportResult, String> {
+    let parsed = read_glossary_file(&file_path)?;
     let counts = {
         let connection = state
             .database
