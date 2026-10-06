@@ -2219,7 +2219,9 @@ const AI_DICTIONARY_SYSTEM_PROMPT: &str = r#"你是一名英语词典工具。�
 - proper_noun：如果输入可能是非英文词汇、产品名、项目名、框架名、人名、地名或其他专有名词，返回 {"name":"...","description":"用简体中文简要说明它是什么"}；无法确认时返回 null。不要把普通乱码或任意未知字符串强行判断为专有名词。
 - note：用简体中文给出一句简短的判断，无法补充时返回空字符串。
 
-当 valid 为 true 时，entry 必须完整符合 distribution_entry_v5 词典条目结构。headword_language 固定为 {"code":"en","name":"English"}，definition_language 固定为 {"code":"zh-Hans","name":"Chinese (Simplified)"}。至少提供一个 pos_groups，每个 pos_group 至少提供一个 meanings；每个 meaning 的 learner_explanation 必须是非空中文释义。所有字段都必须存在，即使没有内容也使用空字符串、空数组或 null。不要添加结构之外的字段。"#;
+当 valid 为 true 时，entry 至少包含 headword 和非空 pos_groups 数组。每个 pos_group 至少包含 pos 和非空 meanings 数组；每个 meaning 至少包含非空的中文 learner_explanation。示例结构：
+{"valid":true,"entry":{"headword":"serendipity","entry_type":"word","headword_summary":"意外发现美好事物","pos_groups":[{"pos":"noun","meanings":[{"short_gloss":"机缘巧合","learner_explanation":"在没有刻意寻找时意外发现美好事物的能力","examples":[{"text":"A happy discovery was pure serendipity.","translation":"这次美好的发现纯属机缘巧合。"}]}]}]}}
+可按需补充 memory_hook、study_notes、etymology_note、etymologies，以及词性组内的 summary、usage_note、forms、pronunciations、relations，释义内的 priority、labels、topics。不要添加无关字段；没有可靠依据时省略可选字段。"#;
 
 enum AiDictionaryLookup {
     Invalid {
@@ -2599,8 +2601,9 @@ fn parse_dictionary_invalid_insight(value: &Value) -> Result<DictionaryInvalidIn
 }
 
 fn normalize_ai_dictionary_entry(value: Value, cache_key: &str) -> Result<Value, String> {
-    validate_ai_dictionary_entry(&value)?;
     let mut entry = value;
+    complete_ai_dictionary_entry(&mut entry)?;
+    validate_ai_dictionary_entry(&entry)?;
     let object = entry
         .as_object_mut()
         .ok_or_else(|| "AI 词典 entry 必须是对象".to_string())?;
@@ -2654,13 +2657,203 @@ fn normalize_ai_dictionary_entry(value: Value, cache_key: &str) -> Result<Value,
     Ok(entry)
 }
 
+fn complete_ai_dictionary_entry(entry: &mut Value) -> Result<(), String> {
+    let object = entry
+        .as_object_mut()
+        .ok_or_else(|| "AI 词典 entry 必须是对象".to_string())?;
+    retain_fields(
+        object,
+        &[
+            "schema_version",
+            "entry_id",
+            "headword",
+            "normalized_headword",
+            "headword_language",
+            "definition_language",
+            "entry_type",
+            "headword_summary",
+            "memory_hook",
+            "study_notes",
+            "etymology_note",
+            "etymologies",
+            "pos_groups",
+        ],
+    );
+    let headword = required_string(object, "headword", "entry", false)?
+        .trim()
+        .to_string();
+    let entry_type = if headword.split_whitespace().count() > 1 {
+        "phrase"
+    } else {
+        "word"
+    };
+    object.insert(
+        "schema_version".to_string(),
+        Value::String(contracts::DICTIONARY_DISTRIBUTION_SCHEMA_VERSION.to_string()),
+    );
+    object.insert(
+        "entry_id".to_string(),
+        Value::String("ai-generated".to_string()),
+    );
+    object.insert(
+        "normalized_headword".to_string(),
+        Value::String(dictionary::normalize_headword(&headword)),
+    );
+    object.insert(
+        "headword_language".to_string(),
+        serde_json::json!({"code": "en", "name": "English"}),
+    );
+    object.insert(
+        "definition_language".to_string(),
+        serde_json::json!({"code": "zh-Hans", "name": "Chinese (Simplified)"}),
+    );
+    insert_default(object, "entry_type", Value::String(entry_type.to_string()));
+    insert_default(object, "headword_summary", Value::String(String::new()));
+    insert_default(object, "memory_hook", Value::String(String::new()));
+    insert_default(object, "study_notes", serde_json::json!([]));
+    insert_default(object, "etymology_note", Value::Null);
+    insert_default(object, "etymologies", serde_json::json!([]));
+
+    if let Some(etymologies) = object.get_mut("etymologies").and_then(Value::as_array_mut) {
+        for etymology in etymologies {
+            if let Some(fields) = etymology.as_object_mut() {
+                retain_fields(fields, &["etymology_id", "text", "pos_members"]);
+                insert_default(fields, "text", Value::Null);
+                insert_default(fields, "pos_members", serde_json::json!([]));
+            }
+        }
+    }
+    if let Some(groups) = object.get_mut("pos_groups").and_then(Value::as_array_mut) {
+        for group in groups {
+            if let Some(fields) = group.as_object_mut() {
+                retain_fields(
+                    fields,
+                    &[
+                        "pos",
+                        "etymology_id",
+                        "proper_name",
+                        "summary",
+                        "usage_note",
+                        "forms",
+                        "pronunciations",
+                        "relations",
+                        "meanings",
+                    ],
+                );
+                insert_default(fields, "etymology_id", Value::Null);
+                insert_default(fields, "proper_name", Value::Bool(false));
+                insert_default(fields, "summary", Value::String(String::new()));
+                insert_default(fields, "usage_note", Value::Null);
+                insert_default(fields, "forms", serde_json::json!([]));
+                insert_default(fields, "pronunciations", serde_json::json!([]));
+                insert_default(fields, "relations", serde_json::json!([]));
+                if let Some(forms) = fields.get_mut("forms").and_then(Value::as_array_mut) {
+                    for form in forms {
+                        if let Some(values) = form.as_object_mut() {
+                            retain_fields(values, &["text", "tags", "roman"]);
+                            insert_default(values, "tags", serde_json::json!([]));
+                            insert_default(values, "roman", Value::Null);
+                        }
+                    }
+                }
+                if let Some(pronunciations) = fields
+                    .get_mut("pronunciations")
+                    .and_then(Value::as_array_mut)
+                {
+                    for pronunciation in pronunciations {
+                        if let Some(values) = pronunciation.as_object_mut() {
+                            retain_fields(values, &["ipa", "text", "tags"]);
+                            insert_default(values, "ipa", Value::Null);
+                            insert_default(values, "text", Value::Null);
+                            insert_default(values, "tags", serde_json::json!([]));
+                        }
+                    }
+                }
+                if let Some(relations) = fields.get_mut("relations").and_then(Value::as_array_mut) {
+                    for relation in relations {
+                        if let Some(values) = relation.as_object_mut() {
+                            retain_fields(values, &["type", "word", "lang_code"]);
+                            insert_default(values, "lang_code", Value::Null);
+                        }
+                    }
+                }
+                if let Some(meanings) = fields.get_mut("meanings").and_then(Value::as_array_mut) {
+                    for (index, meaning) in meanings.iter_mut().enumerate() {
+                        if let Some(values) = meaning.as_object_mut() {
+                            retain_fields(
+                                values,
+                                &[
+                                    "sense_id",
+                                    "priority",
+                                    "short_gloss",
+                                    "learner_explanation",
+                                    "usage_note",
+                                    "labels",
+                                    "topics",
+                                    "examples",
+                                ],
+                            );
+                            insert_default(
+                                values,
+                                "sense_id",
+                                Value::String((index + 1).to_string()),
+                            );
+                            insert_default(values, "priority", Value::String("common".to_string()));
+                            insert_default(values, "short_gloss", Value::Null);
+                            insert_default(values, "usage_note", Value::Null);
+                            insert_default(values, "labels", serde_json::json!([]));
+                            insert_default(values, "topics", serde_json::json!([]));
+                            insert_default(values, "examples", serde_json::json!([]));
+                            if let Some(examples) =
+                                values.get_mut("examples").and_then(Value::as_array_mut)
+                            {
+                                for example in examples {
+                                    if let Some(example_fields) = example.as_object_mut() {
+                                        retain_fields(example_fields, &["text", "translation"]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_default(object: &mut Map<String, Value>, field: &str, value: Value) {
+    object.entry(field.to_string()).or_insert(value);
+}
+
+fn retain_fields(object: &mut Map<String, Value>, fields: &[&str]) {
+    object.retain(|field, _| fields.contains(&field.as_str()));
+}
+
 fn ensure_exact_fields(
     object: &Map<String, Value>,
     fields: &[&str],
     context: &str,
 ) -> Result<(), String> {
-    if object.len() != fields.len() || fields.iter().any(|field| !object.contains_key(*field)) {
-        return Err(format!("{context}包含缺失或多余字段"));
+    let missing: Vec<&str> = fields
+        .iter()
+        .copied()
+        .filter(|field| !object.contains_key(*field))
+        .collect();
+    let extra: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|field| !fields.contains(field))
+        .collect();
+    if !missing.is_empty() || !extra.is_empty() {
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("缺少字段：{}", missing.join("、")));
+        }
+        if !extra.is_empty() {
+            details.push(format!("多余字段：{}", extra.join("、")));
+        }
+        return Err(format!("{context}{}", details.join("；")));
     }
     Ok(())
 }
@@ -3864,6 +4057,40 @@ mod tests {
     }
 
     #[test]
+    fn ai_dictionary_protocol_completes_sparse_model_output() {
+        let parsed = parse_ai_dictionary_protocol(
+            &json!({
+                "valid": true,
+                "entry": {
+                    "headword": "serendipity",
+                    "unexpected": "ignored",
+                    "pos_groups": [{
+                        "pos": "noun",
+                        "meanings": [{
+                            "learner_explanation": "意外发现美好事物的能力",
+                            "examples": [{"text": "It was serendipity.", "translation": "这纯属机缘巧合。"}]
+                        }]
+                    }]
+                }
+            }).to_string(),
+            "cache-key",
+        )
+        .expect("sparse model output should be completed");
+        let ParsedAiDictionary::Valid(entry) = parsed else {
+            panic!("valid protocol should return an entry");
+        };
+        assert_eq!(entry["entry_id"], "ai-cache-key");
+        assert_eq!(entry["pos_groups"][0]["forms"], json!([]));
+        assert_eq!(entry["pos_groups"][0]["meanings"][0]["sense_id"], "1");
+        assert_eq!(entry["pos_groups"][0]["meanings"][0]["priority"], "common");
+        assert!(entry.get("unexpected").is_none());
+
+        let cached = super::normalize_ai_dictionary_entry(entry.clone(), "cache-key")
+            .expect("normalized entry should survive cache reload");
+        assert_eq!(cached, entry);
+    }
+
+    #[test]
     fn ai_dictionary_protocol_rejects_invalid_shapes_and_accepts_explicit_invalid_word() {
         assert!(matches!(
             parse_ai_dictionary_protocol(r#"{"valid":false}"#, "cache-key"),
@@ -3902,11 +4129,13 @@ mod tests {
             .is_err()
         );
 
-        let mut extra_field = ai_dictionary_entry_fixture();
-        extra_field["extra"] = json!(true);
+        let missing_explanation = json!({
+            "headword": "serendipity",
+            "pos_groups": [{"pos": "noun", "meanings": [{"short_gloss": "机缘巧合"}]}]
+        });
         assert!(
             parse_ai_dictionary_protocol(
-                &json!({ "valid": true, "entry": extra_field }).to_string(),
+                &json!({ "valid": true, "entry": missing_explanation }).to_string(),
                 "cache-key"
             )
             .is_err()
@@ -3914,13 +4143,15 @@ mod tests {
 
         let mut wrong_language = ai_dictionary_entry_fixture();
         wrong_language["definition_language"]["code"] = json!("ja");
-        assert!(
-            parse_ai_dictionary_protocol(
-                &json!({ "valid": true, "entry": wrong_language }).to_string(),
-                "cache-key"
-            )
-            .is_err()
-        );
+        let parsed = parse_ai_dictionary_protocol(
+            &json!({ "valid": true, "entry": wrong_language }).to_string(),
+            "cache-key",
+        )
+        .expect("language identity is owned by the application");
+        let ParsedAiDictionary::Valid(entry) = parsed else {
+            panic!("valid protocol should return an entry");
+        };
+        assert_eq!(entry["definition_language"]["code"], "zh-Hans");
     }
 
     #[test]
