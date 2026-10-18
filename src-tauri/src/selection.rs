@@ -27,8 +27,8 @@ const SELECTION_UNAVAILABLE_EVENT: &str = "selection_unavailable";
 const SELECTION_STATUS_EVENT: &str = "selection_status_changed";
 const SELECTION_OPEN_MAIN_EVENT: &str = "selection_open_main";
 const SELECTION_TTL: Duration = Duration::from_secs(120);
-const AUTOMATIC_DEBOUNCE: Duration = Duration::from_millis(500);
-const MOUSE_RELEASE_DELAY: Duration = Duration::from_millis(140);
+const AUTOMATIC_DEBOUNCE: Duration = Duration::from_millis(60);
+const MOUSE_RELEASE_DELAY: Duration = Duration::from_millis(60);
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_millis(900);
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SHORTCUT_RELEASE_TIMEOUT: Duration = Duration::from_millis(700);
@@ -1192,11 +1192,6 @@ fn worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: SelectionServic
 
 #[cfg(windows)]
 fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: SelectionService) {
-    use uiautomation::{
-        UIAutomation,
-        events::{CustomEventHandlerFn, UIEventHandler, UIEventType},
-        types::TreeScope,
-    };
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON;
 
     // Provider calls can block this worker. Observe physical mouse presses on a
@@ -1269,43 +1264,29 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
         }
     });
 
-    let automation = match UIAutomation::new() {
+    let automation = match engine::create_automation() {
         Ok(value) => Some(value),
         Err(error) => {
             service.set_uia_status(false, Some(format!("UI Automation 初始化失败：{error}")));
             None
         }
     };
-    let root = automation
-        .as_ref()
-        .and_then(|value| match value.get_root_element() {
-            Ok(root) => Some(root),
-            Err(error) => {
-                service.set_uia_status(false, Some(format!("UI Automation 根元素不可用：{error}")));
-                None
-            }
-        });
-    let walker = automation
-        .as_ref()
-        .and_then(|value| value.create_tree_walker().ok());
     service.set_uia_status(
-        root.is_some() && walker.is_some(),
-        if root.is_some() && walker.is_some() {
+        automation.is_some(),
+        if automation.is_some() {
             None
         } else {
             Some("UI Automation 当前不可用，将继续尝试 MSAA 和剪贴板读取".to_string())
         },
     );
 
-    let capturing = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut handler: Option<UIEventHandler> = None;
     let mut automatic = false;
-    let mut shortcut_capture_generation = None;
     let mut prepared: Option<PreparedSelection> = None;
     let mut pending_prepared: Option<(PreparedSelection, Instant)> = None;
     let mut pending_mouse_release: Option<MouseSelectionRelease> = None;
     let mut mouse_operation: Option<MouseSelectionOperation> = None;
     let mut left_button_down = false;
+    let mut previous_click: Option<(Instant, (i32, i32), isize)> = None;
 
     loop {
         let now = Instant::now();
@@ -1316,9 +1297,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 && !key_is_down(VK_LBUTTON.0 as i32)
                 && !keyboard_selection_state().1
             {
-                capturing.store(true, std::sync::atomic::Ordering::Release);
                 let result = read_prepared_selection(&value, false, automation.as_ref(), &service);
-                capturing.store(false, std::sync::atomic::Ordering::Release);
                 if let Ok(candidate) = result {
                     if service.owns_generation(value.generation) {
                         let mut value = value;
@@ -1377,11 +1356,26 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                     };
                     if same_source_window(&operation.context, &release_context)
                         && point_in_root_window(release_context.root_window, x, y)
-                        && is_real_drag(
+                    {
+                        let dragged = is_real_drag(
                             operation.context.press_point,
                             release_context.release_point,
-                        )
-                    {
+                        );
+                        let double_clicked = previous_click.as_ref().is_some_and(
+                            |(at, (previous_x, previous_y), root)| {
+                                *root == release_context.root_window
+                                    && now.duration_since(*at)
+                                        <= Duration::from_millis(unsafe {
+                                            windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime()
+                                        } as u64)
+                                    && (x - previous_x).abs() <= 6
+                                    && (y - previous_y).abs() <= 6
+                            },
+                        );
+                        previous_click = Some((now, (x, y), release_context.root_window));
+                        if !dragged && !double_clicked {
+                            continue;
+                        }
                         let anchor = SelectionAnchor {
                             x,
                             y,
@@ -1426,7 +1420,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
             pending_mouse_release = None;
         }
 
-        match receiver.recv_timeout(Duration::from_millis(40)) {
+        match receiver.recv_timeout(Duration::from_millis(8)) {
             Ok(WorkerCommand::SetAutomatic(enabled)) => {
                 monitoring.store(enabled, std::sync::atomic::Ordering::Release);
                 if enabled == automatic {
@@ -1438,98 +1432,11 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 pending_mouse_release = None;
                 mouse_operation = None;
                 left_button_down = false;
-                if enabled {
-                    if let (Some(automation), Some(root), Some(_walker)) =
-                        (automation.as_ref(), root.as_ref(), walker.as_ref())
-                    {
-                        let service_for_event = service.clone();
-                        let capture_for_event = capturing.clone();
-
-                        let callback: Box<CustomEventHandlerFn> =
-                            Box::new(move |sender, _event| {
-                                if capture_for_event.load(std::sync::atomic::Ordering::Acquire) {
-                                    return Ok(());
-                                }
-                                if sender.get_process_id().ok() == Some(std::process::id()) {
-                                    return Ok(());
-                                }
-                                let Some((x, y)) = cursor_position() else {
-                                    return Ok(());
-                                };
-                                let generation = service_for_event.current_generation();
-                                let sender_process_id = sender.get_process_id().ok();
-                                let anchor = SelectionAnchor {
-                                    x,
-                                    y,
-                                    width: 0,
-                                    height: 0,
-                                };
-                                let context = source_context_at_point(
-                                    generation,
-                                    x,
-                                    y,
-                                    None,
-                                    Some((x, y)),
-                                    Instant::now(),
-                                )
-                                .filter(|context| Some(context.process_id) == sender_process_id)
-                                .or_else(|| {
-                                    source_context_from_element(sender, generation, Some(&anchor))
-                                })
-                                .or_else(|| {
-                                    foreground_source_context(generation, Some(&anchor)).filter(
-                                        |context| Some(context.process_id) == sender_process_id,
-                                    )
-                                });
-                                let Some(context) = context else {
-                                    return Ok(());
-                                };
-                                if Some(context.process_id) != sender_process_id
-                                    || !element_matches_source_context(sender, &context)
-                                {
-                                    return Ok(());
-                                }
-                                service_for_event.enqueue_prepared(PreparedSelection {
-                                    trigger_id: Uuid::new_v4().to_string(),
-                                    generation,
-                                    trigger: SelectionTrigger::Automatic,
-                                    anchor: Some(anchor),
-                                    source_context: Some(context),
-                                    source_text: None,
-                                });
-                                Ok(())
-                            });
-                        let event_handler = UIEventHandler::from(callback);
-                        match automation.add_automation_event_handler(
-                            UIEventType::Text_TextSelectionChanged,
-                            root,
-                            TreeScope::Subtree,
-                            None,
-                            &event_handler,
-                        ) {
-                            Ok(()) => {
-                                handler = Some(event_handler);
-                                service.set_uia_status(true, None);
-                            }
-                            Err(error) => service
-                                .set_uia_status(false, Some(format!("自动选区监听失败：{error}"))),
-                        }
-                    }
-                    automatic = true;
-                } else {
-                    if let Some(event_handler) = handler.take() {
-                        if let (Some(automation), Some(root)) = (automation.as_ref(), root.as_ref())
-                        {
-                            let _ = automation.remove_automation_event_handler(
-                                UIEventType::Text_TextSelectionChanged,
-                                root,
-                                &event_handler,
-                            );
-                        }
-                    }
-                    automatic = false;
-                    service.set_uia_status(root.is_some() && walker.is_some(), None);
-                }
+                // Global subtree subscriptions make browsers maintain their entire
+                // accessibility tree and can re-enter a provider from its callback.
+                // Mouse and keyboard gestures already schedule selection capture.
+                automatic = enabled;
+                previous_click = None;
             }
             Ok(WorkerCommand::ReadFocused { trigger_id }) => {
                 if !service.owns_current_trigger(&trigger_id) {
@@ -1551,11 +1458,8 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                     source_context,
                     source_text: None,
                 };
-                capturing.store(true, std::sync::atomic::Ordering::Release);
                 let candidate_result =
                     read_prepared_selection(&value, true, automation.as_ref(), &service);
-                capturing.store(false, std::sync::atomic::Ordering::Release);
-                shortcut_capture_generation = Some(generation);
                 match candidate_result {
                     Ok(candidate)
                         if service.owns_generation(generation)
@@ -1573,9 +1477,7 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
                 }
             }
             Ok(WorkerCommand::Prepared(value))
-                if value.trigger == SelectionTrigger::Automatic
-                    && automatic
-                    && shortcut_capture_generation != Some(value.generation) =>
+                if value.trigger == SelectionTrigger::Automatic && automatic =>
             {
                 accept_automatic_prepared(&service, value, &mut pending_prepared, &mut prepared);
             }
@@ -1636,15 +1538,6 @@ fn windows_worker_loop(receiver: mpsc::Receiver<WorkerCommand>, service: Selecti
             Ok(WorkerCommand::Prepared(_)) => {}
         }
     }
-    if let Some(event_handler) = handler {
-        if let (Some(automation), Some(root)) = (automation.as_ref(), root.as_ref()) {
-            let _ = automation.remove_automation_event_handler(
-                UIEventType::Text_TextSelectionChanged,
-                root,
-                &event_handler,
-            );
-        }
-    }
     stopped.store(true, std::sync::atomic::Ordering::Release);
     let _ = monitor.join();
 }
@@ -1658,8 +1551,9 @@ fn observe_mouse_button(service: &SelectionService, state: &Mutex<bool>) -> bool
     let pressed = key_is_down(VK_LBUTTON.0 as i32);
     if pressed
         && !*down
-        && foreground_source_context(service.current_generation(), None)
-            .is_some_and(|context| context.process_id != std::process::id())
+        && cursor_position()
+            .and_then(|(x, y)| window_identity_at_point(x, y))
+            .is_some_and(|(process_id, _)| process_id != std::process::id())
     {
         service.invalidate_for_new_selection();
     }
@@ -1764,6 +1658,12 @@ fn read_prepared_selection(
                 text
             }
             engine::Outcome::Object => return Err(no_selection_failure()),
+            engine::Outcome::TimedOut => {
+                return Err(SelectionCaptureFailure::new(
+                    "selection_read_timeout",
+                    "文本选区读取超时",
+                ));
+            }
             engine::Outcome::Empty => {
                 if !service.owns_generation(prepared.generation) {
                     return Err(no_selection_failure());
@@ -1859,29 +1759,6 @@ fn source_context_at_point(
 }
 
 #[cfg(windows)]
-fn source_context_from_element(
-    element: &uiautomation::UIElement,
-    generation: u64,
-    anchor: Option<&SelectionAnchor>,
-) -> Option<SelectionSourceContext> {
-    let native: isize = element.get_native_window_handle().ok()?.into();
-    let root_window = root_window_from_raw(native)?;
-    let process_id = process_id_from_root(root_window)?;
-    if process_id == std::process::id() {
-        return None;
-    }
-    let point = anchor.map(|value| (value.x, value.y));
-    Some(SelectionSourceContext {
-        generation,
-        process_id,
-        root_window,
-        press_point: None,
-        release_point: point,
-        started_at: Instant::now(),
-    })
-}
-
-#[cfg(windows)]
 fn foreground_source_context(
     generation: u64,
     anchor: Option<&SelectionAnchor>,
@@ -1916,26 +1793,6 @@ fn process_id_from_root(root_window: isize) -> Option<u32> {
     let mut process_id = 0;
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
     (thread_id != 0 && process_id != 0).then_some(process_id)
-}
-
-#[cfg(windows)]
-fn element_matches_source_context(
-    element: &uiautomation::UIElement,
-    context: &SelectionSourceContext,
-) -> bool {
-    if element.get_process_id().ok() != Some(context.process_id) {
-        return false;
-    }
-    let Ok(native) = element.get_native_window_handle() else {
-        return true;
-    };
-    let native: isize = native.into();
-    if native == 0 {
-        return true;
-    }
-    root_window_from_raw(native)
-        .map(|root_window| root_window == context.root_window)
-        .unwrap_or(false)
 }
 
 #[cfg(windows)]
