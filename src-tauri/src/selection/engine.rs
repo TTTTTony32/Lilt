@@ -12,8 +12,8 @@ use windows::{
         },
         UI::Accessibility::{
             AccessibleObjectFromWindow, CUIAutomation8, IAccessible, IUIAutomation, IUIAutomation2,
-            IUIAutomationLegacyIAccessiblePattern, IUIAutomationTextPattern,
-            UIA_E_TIMEOUT, UIA_LegacyIAccessiblePatternId, UIA_TextPatternId,
+            IUIAutomationLegacyIAccessiblePattern, IUIAutomationTextPattern, UIA_E_TIMEOUT,
+            UIA_LegacyIAccessiblePatternId, UIA_TextPatternId,
         },
     },
     core::Interface,
