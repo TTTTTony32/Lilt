@@ -117,10 +117,14 @@ Engine 资源发生变化时使用新的 `rN` 标签，例如 `lilt-pdf-engine-b
 
 - [ZMGID/kivio](https://github.com/ZMGID/kivio)
 
+- [0xfullex/selection-hook](https://github.com/0xfullex/selection-hook)：Windows 选区捕获实现参考与代码来源
+
 - [PDFMathTranslate-next/PDFMathTranslate-next](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next)
 
 ## 许可证
 
 Lilt 软件本体采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPLv3）授权。
+
+Windows 选区捕获引擎包含改编自 [0xfullex/selection-hook](https://github.com/0xfullex/selection-hook) 的代码，版权归 0xfullex 所有（© 2025），采用 MIT 许可证。完整版权声明及许可文本见 [selection-hook-MIT.txt](src-tauri/licenses/selection-hook-MIT.txt)；桌面安装包也会附带该文件。
 
 随软件分发的词典数据来自 [ahpxex/open-dictionary](https://github.com/ahpxex/open-dictionary)，采用与 [Creative Commons Attribution-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-sa/4.0/)（CC BY-SA 4.0）兼容的许可。词典数据的署名和相同方式共享要求以数据来源的具体许可声明为准。
