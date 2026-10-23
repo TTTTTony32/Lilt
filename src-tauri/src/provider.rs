@@ -19,12 +19,14 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum ProviderError {
     #[error("Provider 地址无效：{0}")]
     InvalidConfig(String),
-    #[error("Provider 认证失败，请检查 API Key")]
-    Authentication,
-    #[error("Provider 请求受到限流，请稍后重试")]
-    RateLimited,
+    #[error("Provider 认证失败，请检查 API Key\n{0}")]
+    Authentication(String),
+    #[error("Provider 请求受到限流，请稍后重试\n{0}")]
+    RateLimited(String),
     #[error("Provider 暂时不可用：{0}")]
     Server(String),
+    #[error("Provider 请求失败：{0}")]
+    Http(String),
     #[error("Provider 网络请求失败：{0}")]
     Network(String),
     #[error("Provider 请求超时：{0}")]
@@ -40,6 +42,21 @@ pub enum ProviderError {
 impl ProviderError {
     fn retryable(&self) -> bool {
         matches!(self, Self::Network(_) | Self::Server(_) | Self::Protocol(_))
+    }
+
+    pub fn safe_summary(&self) -> &'static str {
+        match self {
+            Self::InvalidConfig(_) => "invalid_config",
+            Self::Authentication(_) => "authentication",
+            Self::RateLimited(_) => "rate_limited",
+            Self::Server(_) => "server",
+            Self::Http(_) => "http",
+            Self::Network(_) => "network",
+            Self::Timeout(_) => "timeout",
+            Self::Protocol(_) => "protocol",
+            Self::Cancelled => "cancelled",
+            Self::Event(_) => "event",
+        }
     }
 }
 
@@ -87,7 +104,7 @@ pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo
         response.status(),
         started_at.elapsed().as_millis()
     ));
-    ensure_success(&response)?;
+    let response = ensure_success(response).await?;
     let payload: Value = response
         .json()
         .await
@@ -183,15 +200,20 @@ where
             }
             Err(error) if !started && attempt == 0 && error.retryable() => {
                 diagnostics::warn(format!(
-                    "provider.{}.retry request_id={} reason={error}",
-                    request.operation, request.request_id
+                    "provider.{}.retry request_id={} reason={}",
+                    request.operation,
+                    request.request_id,
+                    error.safe_summary()
                 ));
                 attempt += 1;
             }
             Err(error) => {
                 diagnostics::error(format!(
-                    "provider.{}.failed request_id={} started={} reason={error}",
-                    request.operation, request.request_id, started
+                    "provider.{}.failed request_id={} started={} reason={}",
+                    request.operation,
+                    request.request_id,
+                    started,
+                    error.safe_summary()
                 ));
                 return Err(error);
             }
@@ -225,7 +247,7 @@ async fn stream_once(
         request.request_id,
         response.status()
     ));
-    ensure_success(&response)?;
+    let response = ensure_success(response).await?;
 
     let mut stream = response.bytes_stream();
     let mut line_buffer = Vec::new();
@@ -721,13 +743,27 @@ pub fn normalize_base_url(base_url: &str) -> Result<String, ProviderError> {
     Ok(trimmed.to_string())
 }
 
-fn ensure_success(response: &reqwest::Response) -> Result<(), ProviderError> {
-    match response.status() {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(ProviderError::Authentication),
-        StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited),
-        status if status.is_server_error() => Err(ProviderError::Server(status.to_string())),
-        status if !status.is_success() => Err(ProviderError::Protocol(format!("HTTP {status}"))),
-        _ => Ok(()),
+async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, ProviderError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("无法读取 Provider 错误正文：{error}"));
+    let detail = if body.trim().is_empty() {
+        format!("HTTP {status}\nProvider 未返回错误正文")
+    } else {
+        format!("HTTP {status}\n{body}")
+    };
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            Err(ProviderError::Authentication(detail))
+        }
+        StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited(detail)),
+        status if status.is_server_error() => Err(ProviderError::Server(detail)),
+        _ => Err(ProviderError::Http(detail)),
     }
 }
 
@@ -819,6 +855,32 @@ mod tests {
             .unwrap();
         server.join().unwrap();
         assert_eq!(models[0].id, "mock-model");
+    }
+
+    #[tokio::test]
+    async fn returns_provider_http_error_body_for_display() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"error":{"message":"model is unavailable"}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let error = super::fetch_models(&format!("http://{address}/v1"), "test-key")
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("HTTP 400 Bad Request"));
+        assert!(message.contains("model is unavailable"));
     }
 
     #[tokio::test]

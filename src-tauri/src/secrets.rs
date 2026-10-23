@@ -1,5 +1,10 @@
 const SERVICE_NAME: &str = "com.lilt.app";
 
+#[cfg(any(windows, test))]
+fn is_missing_credential(error: &keyring::Error) -> bool {
+    matches!(error, keyring::Error::NoEntry)
+}
+
 pub fn save_api_key(provider_id: &str, api_key: Option<&str>) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -11,8 +16,7 @@ pub fn save_api_key(provider_id: &str, api_key: Option<&str>) -> Result<(), Stri
                 .set_password(value)
                 .map_err(|error| format!("保存 API Key 失败：{error}")),
             None => entry.delete_credential().or_else(|error| {
-                let message = error.to_string().to_lowercase();
-                if message.contains("no entry") || message.contains("not found") {
+                if is_missing_credential(&error) {
                     Ok(())
                 } else {
                     Err(format!("删除 API Key 失败：{error}"))
@@ -36,8 +40,7 @@ pub fn load_api_key(provider_id: &str) -> Result<Option<String>, String> {
         match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(error) => {
-                let message = error.to_string().to_lowercase();
-                if message.contains("no entry") || message.contains("not found") {
+                if is_missing_credential(&error) {
                     Ok(None)
                 } else {
                     Err(format!("读取 API Key 失败：{error}"))
@@ -49,5 +52,19 @@ pub fn load_api_key(provider_id: &str) -> Result<Option<String>, String> {
     {
         let _ = provider_id;
         Err("API Key 安全存储目前只支持 Windows 凭据管理器".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_credential;
+
+    #[test]
+    fn missing_credential_uses_keyring_error_variant() {
+        assert!(is_missing_credential(&keyring::Error::NoEntry));
+        assert!(!is_missing_credential(&keyring::Error::TooLong(
+            "user".to_string(),
+            1
+        )));
     }
 }

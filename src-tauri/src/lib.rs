@@ -310,6 +310,7 @@ pub fn run() {
             get_app_snapshot,
             save_provider_config,
             fetch_models,
+            test_provider,
             set_active_provider,
             create_provider,
             rename_provider,
@@ -801,7 +802,10 @@ async fn fetch_models(
     let models = provider::fetch_models(&base_url, &api_key)
         .await
         .map_err(|error| {
-            diagnostics::error(format!("command.fetch_models.failed reason={error}"));
+            diagnostics::error(format!(
+                "command.fetch_models.failed reason={}",
+                error.safe_summary()
+            ));
             error.to_string()
         })?;
     let connection = state
@@ -819,6 +823,73 @@ async fn fetch_models(
         models.len()
     ));
     Ok(models)
+}
+
+#[tauri::command]
+async fn test_provider(state: State<'_, AppState>, provider_id: String) -> Result<String, String> {
+    let provider_id = provider_id.trim().to_string();
+    let provider_config = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::get_provider_by_id(&connection, &provider_id)?
+    };
+    let base_url = provider::normalize_base_url(&provider_config.base_url)
+        .map_err(|error| error.to_string())?;
+    let model_id = provider_config.model_id.trim();
+    if model_id.is_empty() {
+        return Err("Model ID 不能为空".to_string());
+    }
+    let api_key = match secrets::load_api_key(&provider_config.id) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err("尚未配置 API Key".to_string()),
+        Err(error) => return Err(error),
+    };
+
+    let request_id = Uuid::new_v4().to_string();
+    diagnostics::info(format!(
+        "command.test_provider.start request_id={} provider_id={} origin={} model={} protocol={}",
+        request_id,
+        provider_config.id,
+        provider::safe_endpoint_origin(&base_url),
+        model_id,
+        provider_config.api_protocol.as_str()
+    ));
+    let cancellation = CancellationToken::new();
+    let result = provider::stream_chat_completion_with_usage(
+        provider::ChatStreamRequest {
+            request_id: &request_id,
+            base_url: &base_url,
+            api_key: &api_key,
+            model_id,
+            system_prompt: "你正在进行模型连接测试。请仅回复 OK。",
+            user_text: "请仅回复 OK。",
+            cancel: &cancellation,
+            operation: "provider_test",
+            thinking_effort: &provider_config.thinking_effort,
+            api_protocol: provider_config.api_protocol,
+        },
+        |_| Ok(()),
+    )
+    .await
+    .map_err(|error| {
+        diagnostics::error(format!(
+            "command.test_provider.failed request_id={} reason={}",
+            request_id,
+            error.safe_summary()
+        ));
+        error.to_string()
+    })?;
+    if result.content.trim().is_empty() {
+        return Err("模型测试没有收到回复".to_string());
+    }
+    diagnostics::info(format!(
+        "command.test_provider.completed request_id={} output_chars={}",
+        request_id,
+        result.content.chars().count()
+    ));
+    Ok(result.content)
 }
 
 #[tauri::command]
@@ -1294,8 +1365,9 @@ async fn translate_impl(
         }
         Err(error) => {
             diagnostics::error(format!(
-                "command.translate.provider_failed request_id={} reason={error}",
-                request_id
+                "command.translate.provider_failed request_id={} reason={}",
+                request_id,
+                error.safe_summary()
             ));
             return emit_failed(&app, &request_id, &error.to_string());
         }

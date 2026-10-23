@@ -955,7 +955,9 @@ pub fn list_providers(connection: &Connection) -> Result<Vec<ProviderRecord>, St
     let mut statement = connection
         .prepare(
             "SELECT id, name, base_url, model_id, prompt_id, thinking_effort, api_protocol, is_builtin
-             FROM providers ORDER BY is_builtin DESC, name COLLATE NOCASE",
+             FROM providers
+             ORDER BY CASE id WHEN 'openai' THEN 0 WHEN 'deepseek' THEN 1 ELSE 2 END,
+                      name COLLATE NOCASE",
         )
         .map_err(|error| format!("读取 Provider 列表失败：{error}"))?;
     let rows = statement
@@ -2483,6 +2485,16 @@ mod tests {
         assert_eq!(provider.model_id, "reasoning-model");
         assert_eq!(provider.thinking_effort, ThinkingEffort::High);
         assert_eq!(provider.prompt_id, DEFAULT_PROMPT_ID);
+    }
+
+    #[test]
+    fn provider_list_places_openai_before_deepseek() {
+        let connection = test_connection();
+
+        let providers = list_providers(&connection).expect("providers should be readable");
+
+        assert_eq!(providers[0].id, "openai");
+        assert_eq!(providers[1].id, "deepseek");
     }
 
     #[test]

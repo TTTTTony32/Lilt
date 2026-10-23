@@ -3,9 +3,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import { ArrowLeft, Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Pencil, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
+import openaiLogo from "./assets/openai.svg";
+import deepseekLogo from "./assets/deepseek.svg";
 import { describeError } from "./lib/errors";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
@@ -3066,6 +3068,16 @@ function PromptManager({
   );
 }
 
+function ProviderLogo({ providerId }: { providerId: string }) {
+  if (providerId === "openai") {
+    return <span className="provider-logo provider-logo-openai" aria-hidden="true"><img src={openaiLogo} alt="" /></span>;
+  }
+  if (providerId === "deepseek") {
+    return <span className="provider-logo provider-logo-deepseek" aria-hidden="true"><img src={deepseekLogo} alt="" /></span>;
+  }
+  return <span className="provider-logo provider-logo-custom" aria-hidden="true"><Database size={17} strokeWidth={1.9} /></span>;
+}
+
 interface SettingsSelectOption {
   value: string;
   label: string;
@@ -3355,12 +3367,32 @@ function SettingsView({
   const [providerSwitching, setProviderSwitching] = useState(false);
   const [providerId, setProviderId] = useState(snapshot.provider.id);
   const [providerName, setProviderName] = useState(snapshot.provider.name);
+  const [providerNameEdit, setProviderNameEdit] = useState(snapshot.provider.name);
+  const [providerNameEditing, setProviderNameEditing] = useState(false);
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
   const [apiProtocol, setApiProtocol] = useState<ApiProtocol>(snapshot.provider.apiProtocol);
   const [availableModels, setAvailableModels] = useState<ModelInfo[] | null>(null);
+  const [modelInputEdited, setModelInputEdited] = useState(false);
+  const [showAllModelSuggestions, setShowAllModelSuggestions] = useState(false);
+  const [modelSuggestionsOpen, setModelSuggestionsOpen] = useState(false);
+  const [activeModelSuggestionIndex, setActiveModelSuggestionIndex] = useState(-1);
+  const modelFieldRef = useRef<HTMLDivElement | null>(null);
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const filteredModelOptions = useMemo(() => {
+    if (showAllModelSuggestions || !modelInputEdited) return availableModels ?? [];
+    const query = modelId.trim().toLocaleLowerCase();
+    return (availableModels ?? []).filter((model) => (
+      !query
+      || model.id.toLocaleLowerCase().includes(query)
+      || model.label.toLocaleLowerCase().includes(query)
+    ));
+  }, [availableModels, modelId, modelInputEdited, showAllModelSuggestions]);
+  const modelSuggestionsVisible = modelSuggestionsOpen && filteredModelOptions.length > 0;
   const [apiKey, setApiKey] = useState("");
+  const [providerTestPending, setProviderTestPending] = useState(false);
+  const [providerTestResult, setProviderTestResult] = useState<{ providerId: string; kind: "success" | "error"; message: string } | null>(null);
   const [settings, setSettings] = useState<AppSettings>(snapshot.settings);
   const [selectionMode, setSelectionMode] = useState(snapshot.settings.selectionMode);
   const [selectionShortcut, setSelectionShortcut] = useState(snapshot.settings.selectionShortcut);
@@ -3375,6 +3407,26 @@ function SettingsView({
   const savingRef = useRef(false);
   const savePromiseRef = useRef<Promise<void> | null>(null);
   const disposedRef = useRef(false);
+
+  useEffect(() => {
+    if (!modelSuggestionsOpen) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && modelFieldRef.current?.contains(event.target)) return;
+      setShowAllModelSuggestions(false);
+      setModelSuggestionsOpen(false);
+      setActiveModelSuggestionIndex(-1);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [modelSuggestionsOpen]);
+
+  useEffect(() => {
+    if (!modelSuggestionsVisible || activeModelSuggestionIndex < 0) return;
+    modelFieldRef.current
+      ?.querySelector<HTMLElement>(`#settings-provider-model-option-${activeModelSuggestionIndex}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeModelSuggestionIndex, modelSuggestionsVisible]);
+
   const saveDraft = useCallback(async (draft: SettingsDraft, version: number) => {
     if (savingRef.current) return savePromiseRef.current ?? Promise.resolve();
     savingRef.current = true;
@@ -3463,6 +3515,7 @@ function SettingsView({
   }, [scheduleSave]);
 
   const updateProviderDraft = useCallback((patch: Partial<Pick<SettingsDraft, "providerName" | "baseUrl" | "modelId" | "thinkingEffort" | "apiProtocol" | "apiKey">>) => {
+    setProviderTestResult(null);
     updateDraft((current) => ({ ...current, ...patch }));
   }, [updateDraft]);
 
@@ -3499,12 +3552,18 @@ function SettingsView({
     settingsDraftRef.current = nextDraft;
     setProviderId(next.provider.id);
     setProviderName(next.provider.name);
+    setProviderNameEdit(next.provider.name);
+    setProviderNameEditing(false);
     setBaseUrl(next.provider.baseUrl);
     setModelId(next.provider.modelId);
     setThinkingEffort(next.provider.thinkingEffort ?? "none");
     setApiProtocol(next.provider.apiProtocol);
     setApiKey("");
     setAvailableModels(next.models.length > 0 ? next.models : null);
+    setModelInputEdited(false);
+    setShowAllModelSuggestions(false);
+    setModelSuggestionsOpen(false);
+    setActiveModelSuggestionIndex(-1);
     setSettings(nextDraft.settings);
     setSelectionMode(nextDraft.selectionMode);
     setSelectionShortcut(nextDraft.selectionShortcut);
@@ -3513,6 +3572,7 @@ function SettingsView({
 
   const switchProvider = useCallback(async (nextProviderId: string) => {
     if (nextProviderId === settingsDraftRef.current.providerId || providerSwitching) return;
+    setProviderTestResult(null);
     setProviderSwitching(true);
     try {
       await flushPendingSave();
@@ -3528,6 +3588,7 @@ function SettingsView({
 
   const createProvider = useCallback(async () => {
     if (providerSwitching) return;
+    setProviderTestResult(null);
     setProviderSwitching(true);
     try {
       await flushPendingSave();
@@ -3541,13 +3602,15 @@ function SettingsView({
     }
   }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching]);
 
-  const deleteProvider = useCallback(async () => {
-    if (providerSwitching || snapshot.provider.isBuiltin) return;
-    if (!window.confirm("删除当前自定义供应商？其配置和模型列表将被移除")) return;
+  const deleteProvider = useCallback(async (targetProviderId: string) => {
+    const targetProvider = snapshot.providers.find((provider) => provider.id === targetProviderId);
+    if (providerSwitching || !targetProvider || targetProvider.isBuiltin) return;
+    if (!window.confirm(`删除自定义供应商「${targetProvider.name}」？其配置和模型列表将被移除`)) return;
+    setProviderTestResult(null);
     setProviderSwitching(true);
     try {
       await flushPendingSave();
-      await invokeCommand("delete_provider", { providerId });
+      await invokeCommand("delete_provider", { providerId: targetProviderId });
       const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
       applyProviderSnapshot(next);
     } catch (reason) {
@@ -3555,7 +3618,7 @@ function SettingsView({
     } finally {
       setProviderSwitching(false);
     }
-  }, [applyProviderSnapshot, flushPendingSave, onToast, providerId, providerSwitching, snapshot.provider.isBuiltin]);
+  }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching, snapshot.providers]);
 
   const updateAppSettingsDraft = useCallback((patch: Partial<AppSettings>) => {
     updateDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
@@ -3791,15 +3854,56 @@ function SettingsView({
         apiKey: apiKey.trim() || null,
       });
       if (requestedProviderId !== settingsDraftRef.current.providerId) return;
-      setAvailableModels(models.length > 0 ? models : null);
-      if (models.length > 0 && !models.some((model) => model.id === modelId)) {
-        updateProviderDraft({ modelId: models[0]?.id ?? modelId });
-      }
+      const hasModels = models.length > 0;
+      setAvailableModels(hasModels ? models : null);
+      setShowAllModelSuggestions(false);
+      setModelSuggestionsOpen(false);
+      setActiveModelSuggestionIndex(-1);
       onToast(`模型列表已更新，共 ${models.length} 个模型`);
     } catch (reason) {
       if (requestedProviderId !== settingsDraftRef.current.providerId) return;
       setAvailableModels(null);
+      setShowAllModelSuggestions(false);
+      setModelSuggestionsOpen(false);
+      setActiveModelSuggestionIndex(-1);
       onToast(describeError(reason, "模型列表读取失败，可手动填写 Model ID"), "error");
+    }
+  };
+
+  const testProvider = async () => {
+    if (providerSwitching || providerTestPending) return;
+    const requestedProviderId = settingsDraftRef.current.providerId;
+    setProviderTestPending(true);
+    setProviderTestResult(null);
+    try {
+      await flushPendingSave();
+      if (requestedProviderId !== settingsDraftRef.current.providerId) return;
+      const current = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      const savedProvider = current.providers.find((provider) => provider.id === requestedProviderId);
+      const draft = settingsDraftRef.current;
+      const normalizedDraftBaseUrl = draft.baseUrl.trim().replace(/\/+$/, "");
+      if (draft.apiKey.trim()) throw new Error("当前 API Key 尚未保存，请稍后重试");
+      if (
+        current.provider.id !== requestedProviderId
+        || !savedProvider
+        || savedProvider.name !== draft.providerName.trim()
+        || savedProvider.baseUrl !== normalizedDraftBaseUrl
+        || savedProvider.modelId !== draft.modelId.trim()
+        || savedProvider.apiProtocol !== draft.apiProtocol
+        || savedProvider.thinkingEffort !== draft.thinkingEffort
+      ) {
+        throw new Error("当前供应商配置尚未保存，请稍后重试");
+      }
+      const reply = await invokeCommand<string>("test_provider", { providerId: requestedProviderId });
+      if (requestedProviderId === settingsDraftRef.current.providerId) {
+        setProviderTestResult({ providerId: requestedProviderId, kind: "success", message: reply });
+      }
+    } catch (reason) {
+      if (requestedProviderId === settingsDraftRef.current.providerId) {
+        setProviderTestResult({ providerId: requestedProviderId, kind: "error", message: describeError(reason, "模型测试失败") });
+      }
+    } finally {
+      setProviderTestPending(false);
     }
   };
 
@@ -3822,12 +3926,7 @@ function SettingsView({
     }
   };
 
-  const modelOptions = availableModels
-    ? [
-      ...(!availableModels.some((model) => model.id === modelId) ? [{ value: modelId, label: `当前：${modelId}` }] : []),
-      ...availableModels.map((model) => ({ value: model.id, label: model.label })),
-    ]
-    : [];
+  const selectedProvider = snapshot.providers.find((provider) => provider.id === providerId) ?? snapshot.provider;
   const cacheMaxMb = Math.min(MAX_CACHE_SIZE_MB, Math.max(MIN_CACHE_SIZE_MB, Math.round(settings.cacheMaxBytes / (1024 * 1024))));
   const cacheRangePercent = ((cacheMaxMb - MIN_CACHE_SIZE_MB) / (MAX_CACHE_SIZE_MB - MIN_CACHE_SIZE_MB)) * 100;
   return (
@@ -3860,28 +3959,207 @@ function SettingsView({
         <div className="settings-content-scroll" ref={settingsScrollRef} inert={providerSwitching}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
           <div className="card-heading"><div><strong>LLM 提供商</strong></div></div>
-          <div className="form-grid">
-            <SettingsSelectField
-              label="供应商"
-              id="settings-provider-id"
-              ariaLabel="当前供应商"
-              value={providerId}
-              options={snapshot.providers.map((provider) => ({ value: provider.id, label: provider.name }))}
-              onChange={(value) => void switchProvider(value)}
-              disabled={providerSwitching}
-            />
-            <div className="settings-provider-actions">
-              <button className="secondary-button" type="button" onClick={() => void createProvider()} disabled={providerSwitching}>新增供应商</button>
-              <button className="secondary-button" type="button" onClick={() => void deleteProvider()} disabled={providerSwitching || snapshot.provider.isBuiltin}>删除自定义供应商</button>
+          <div className="provider-manager-grid">
+            <div className="provider-list" role="group" aria-label="供应商列表">
+              {snapshot.providers.map((provider) => (
+                <div className={`prompt-list-item provider-list-item ${provider.id === providerId ? "is-active" : ""}`} key={provider.id}>
+                  <button className="prompt-list-select provider-list-select" type="button" onClick={() => void switchProvider(provider.id)} aria-pressed={provider.id === providerId}>
+                    <ProviderLogo providerId={provider.id} />
+                    <span><strong>{provider.id === providerId ? providerName : provider.name}</strong><small>{provider.isBuiltin ? "内置供应商" : "自定义供应商"}</small></span>
+                  </button>
+                  {!provider.isBuiltin && (
+                    <button className="icon-button danger-icon-button provider-delete-button" type="button" onClick={() => void deleteProvider(provider.id)} disabled={providerTestPending} title={`删除${provider.name}`} aria-label={`删除${provider.name}`}>
+                      <Trash2 size={14} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button className="prompt-list-item prompt-list-create provider-list-create" type="button" onClick={() => void createProvider()}>
+                <span><strong>新增供应商</strong><small>创建自定义配置</small></span>
+                <em aria-hidden="true">＋</em>
+              </button>
             </div>
-            <label className="wide-field">供应商名称<input value={providerName} onChange={(event) => updateProviderDraft({ providerName: event.target.value })} disabled={snapshot.provider.isBuiltin || providerSwitching} /></label>
-            <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" disabled={providerSwitching} /></label>
-            {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} disabled={providerSwitching} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" disabled={providerSwitching} /></label>}
-            <SettingsSelectField label="API 协议" id="settings-api-protocol" ariaLabel="API 协议" value={apiProtocol} options={[{ value: "chat_completions", label: "Chat Completions" }, { value: "responses", label: "Responses" }]} onChange={(value) => updateProviderDraft({ apiProtocol: value as ApiProtocol })} disabled={providerSwitching} />
-            <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => updateProviderDraft({ thinkingEffort: value as ThinkingEffort })} disabled={providerSwitching} />
-            <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => updateProviderDraft({ apiKey: event.target.value })} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" disabled={providerSwitching} /></label>
+            <div className="provider-editor-panel">
+              <div className="provider-editor-heading">
+                <div className="provider-name-heading">
+                  {selectedProvider.isBuiltin ? (
+                    <strong>{providerName}</strong>
+                  ) : providerNameEditing ? (
+                    <input
+                      className="provider-name-inline-input"
+                      aria-label="供应商名称"
+                      autoFocus
+                      value={providerNameEdit}
+                      onChange={(event) => setProviderNameEdit(event.target.value)}
+                      onBlur={(event) => {
+                        if (event.currentTarget.dataset.cancelRename === "true") {
+                          delete event.currentTarget.dataset.cancelRename;
+                          setProviderNameEditing(false);
+                          return;
+                        }
+                        updateProviderDraft({ providerName: providerNameEdit.trim() || selectedProvider.name });
+                        setProviderNameEditing(false);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          event.currentTarget.blur();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.currentTarget.dataset.cancelRename = "true";
+                          setProviderNameEdit(providerName);
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <button
+                      className="provider-name-edit-trigger"
+                      type="button"
+                      title="点击更改供应商名称"
+                      aria-label={`重命名供应商${providerName}`}
+                      onClick={() => {
+                        setProviderNameEdit(providerName);
+                        setProviderNameEditing(true);
+                      }}
+                    >
+                      <strong>{providerName}</strong>
+                      <Pencil size={13} strokeWidth={1.8} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+                <span>{selectedProvider.isBuiltin ? "内置供应商" : "自定义供应商"}</span>
+              </div>
+              <div className="form-grid">
+                <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" disabled={providerTestPending} /></label>
+                <div className="provider-control-row">
+                  <SettingsSelectField label="API 协议" id="settings-api-protocol" ariaLabel="API 协议" value={apiProtocol} options={[{ value: "chat_completions", label: "Chat Completions" }, { value: "responses", label: "Responses" }]} onChange={(value) => updateProviderDraft({ apiProtocol: value as ApiProtocol })} disabled={providerTestPending} />
+                  <div className="settings-select-field provider-model-field" ref={modelFieldRef}>
+                    <label className="settings-select-label" htmlFor="settings-provider-model-id">Model ID</label>
+                    <div className="provider-model-input-wrap">
+                      <input
+                        className="provider-model-input"
+                        id="settings-provider-model-id"
+                        ref={modelInputRef}
+                        value={modelId}
+                        onChange={(event) => {
+                          updateProviderDraft({ modelId: event.target.value });
+                          setModelInputEdited(true);
+                          setShowAllModelSuggestions(false);
+                          setModelSuggestionsOpen((availableModels?.length ?? 0) > 0);
+                          setActiveModelSuggestionIndex(-1);
+                        }}
+                        onBlur={() => {
+                          setShowAllModelSuggestions(false);
+                          setModelSuggestionsOpen(false);
+                          setActiveModelSuggestionIndex(-1);
+                        }}
+                        onKeyDown={(event) => {
+                          const isArrowNavigation = event.key === "ArrowDown" || event.key === "ArrowUp";
+                          if (isArrowNavigation && (availableModels?.length ?? 0) > 0 && (!modelInputEdited || filteredModelOptions.length > 0)) {
+                            event.preventDefault();
+                            const direction = event.key === "ArrowDown" ? 1 : -1;
+                            const suggestions = filteredModelOptions;
+                            const canNavigateVisibleSuggestions = modelSuggestionsVisible && suggestions.length > 0;
+                            setModelSuggestionsOpen(true);
+                            setActiveModelSuggestionIndex((current) => (
+                              !canNavigateVisibleSuggestions || current < 0
+                                ? (direction > 0 ? 0 : suggestions.length - 1)
+                                : (current + direction + suggestions.length) % suggestions.length
+                            ));
+                            if (!modelInputEdited) setShowAllModelSuggestions(true);
+                          } else if (event.key === "Enter" && modelSuggestionsVisible && activeModelSuggestionIndex >= 0) {
+                            const selectedModel = filteredModelOptions[activeModelSuggestionIndex];
+                            if (!selectedModel) return;
+                            event.preventDefault();
+                            updateProviderDraft({ modelId: selectedModel.id });
+                            setModelInputEdited(false);
+                            setShowAllModelSuggestions(false);
+                            setModelSuggestionsOpen(false);
+                            setActiveModelSuggestionIndex(-1);
+                          } else if (event.key === "Escape" && modelSuggestionsOpen) {
+                            event.preventDefault();
+                            setShowAllModelSuggestions(false);
+                            setModelSuggestionsOpen(false);
+                            setActiveModelSuggestionIndex(-1);
+                          }
+                        }}
+                        placeholder="gpt-4o-mini"
+                        role="combobox"
+                        aria-autocomplete="list"
+                        aria-haspopup="listbox"
+                        aria-expanded={modelSuggestionsVisible}
+                        aria-controls="settings-provider-model-options"
+                        aria-activedescendant={modelSuggestionsVisible && activeModelSuggestionIndex >= 0 ? `settings-provider-model-option-${activeModelSuggestionIndex}` : undefined}
+                        disabled={providerTestPending}
+                      />
+                      {availableModels && availableModels.length > 0 && (
+                        <button
+                          className="provider-model-toggle"
+                          type="button"
+                          aria-label={showAllModelSuggestions && modelSuggestionsVisible ? "收起模型列表" : "显示全部模型"}
+                          aria-haspopup="listbox"
+                          aria-expanded={modelSuggestionsVisible}
+                          aria-controls="settings-provider-model-options"
+                          onPointerDown={(event) => event.preventDefault()}
+                          onClick={() => {
+                            const expandAll = !(modelSuggestionsOpen && showAllModelSuggestions);
+                            setShowAllModelSuggestions(expandAll);
+                            setModelSuggestionsOpen(expandAll);
+                            setActiveModelSuggestionIndex(-1);
+                            if (expandAll) modelInputRef.current?.focus();
+                          }}
+                          disabled={providerTestPending}
+                        >
+                          <ChevronDown size={14} strokeWidth={1.8} aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="settings-select-menu provider-model-menu" id="settings-provider-model-options" role="listbox" aria-label="Model ID 建议" hidden={!modelSuggestionsVisible}>
+                      {filteredModelOptions.map((model, index) => {
+                        const selected = model.id === modelId;
+                        const highlighted = index === activeModelSuggestionIndex;
+                        return (
+                          <div
+                            className={`settings-select-option ${selected ? "is-selected" : ""} ${highlighted ? "is-highlighted" : ""}`}
+                            id={`settings-provider-model-option-${index}`}
+                            key={model.id}
+                            role="option"
+                            aria-selected={selected}
+                            onPointerDown={(event) => event.preventDefault()}
+                            onMouseEnter={() => setActiveModelSuggestionIndex(index)}
+                            onClick={() => {
+                              updateProviderDraft({ modelId: model.id });
+                              setModelInputEdited(false);
+                              setShowAllModelSuggestions(false);
+                              setModelSuggestionsOpen(false);
+                              setActiveModelSuggestionIndex(-1);
+                              modelInputRef.current?.focus();
+                            }}
+                          >
+                            <span>{model.label}</span>
+                            {selected && <Check size={14} strokeWidth={2} aria-hidden="true" />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => updateProviderDraft({ thinkingEffort: value as ThinkingEffort })} disabled={providerTestPending} />
+                </div>
+                <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => updateProviderDraft({ apiKey: event.target.value })} placeholder={selectedProvider.hasApiKey ? "••••••••" : ""} autoComplete="off" disabled={providerTestPending} /></label>
+              </div>
+              <div className="form-actions settings-actions provider-form-actions">
+                <button className="secondary-button" type="button" onClick={() => void fetchModels()} disabled={providerTestPending}>读取模型</button>
+                <button className="primary-button" type="button" onClick={() => void testProvider()} disabled={providerTestPending}>{providerTestPending ? "测试中…" : "测试模型"}</button>
+              </div>
+              {providerTestResult?.providerId === providerId && (
+                <div className={`provider-test-result is-${providerTestResult.kind}`} role={providerTestResult.kind === "error" ? "alert" : "status"}>
+                  <strong>{providerTestResult.kind === "error" ? "模型测试失败" : "模型测试成功"}</strong>
+                  <pre>{providerTestResult.message}</pre>
+                </div>
+              )}
+            </div>
           </div>
-          <div className="form-actions settings-actions"><button className="secondary-button" type="button" onClick={() => void fetchModels()} disabled={providerSwitching}>读取模型</button></div>
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>

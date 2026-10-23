@@ -289,7 +289,6 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 }
 .form-actions { min-height: 38px; margin-top: 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .settings-actions { justify-content: flex-end; }
-.settings-provider-actions { display: flex; align-items: end; gap: 8px; min-width: 0; }
 .button-group { display: flex; gap: 8px; }
 .muted-text { color: #a1a39a; font-size: 11px; }
 .list-card-heading { margin-bottom: 9px; padding-bottom: 14px; border-bottom: 1px solid #eceae3; }
@@ -586,6 +585,48 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .settings-section .prompt-list-item.is-default { border-color: #a9bda9; background: #f0f5ed; box-shadow: 0 0 0 1px rgba(112, 143, 116, .12); }
 .settings-section .prompt-list-item.is-default.is-active { border-color: #91ad94; background: #e7f0e5; box-shadow: 0 0 0 1px rgba(91, 123, 96, .16); }
 .settings-section .prompt-list-item.prompt-list-create { border-style: dashed; background: transparent; }
+.provider-manager-grid { min-width: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 18px; }
+.provider-list { min-width: 0; display: grid; align-content: start; gap: 8px; }
+.provider-list-item { min-width: 0; }
+.provider-list-select { justify-content: flex-start; gap: 10px; text-align: left; }
+.provider-logo { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; border-radius: 9px; }
+.provider-logo-openai { color: #3d6d51; background: #e3efe4; }
+.provider-logo-deepseek { color: #426d9b; background: #e5edf7; }
+.provider-logo-custom { color: #737d79; background: #e9ebe6; }
+.provider-logo img { width: 20px; height: 20px; display: block; object-fit: contain; }
+.provider-list-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-delete-button { width: 28px; min-height: 28px; flex: 0 0 auto; padding: 0; }
+.provider-list-create { width: 100%; }
+.provider-editor-panel { min-width: 0; display: grid; align-content: start; gap: 16px; }
+.provider-control-row { min-width: 0; grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.provider-control-row > * { min-width: 0; }
+.provider-editor-panel .settings-select-field { min-height: 56px; display: grid; grid-template-rows: 13px 36px; align-content: start; gap: 7px; }
+.provider-editor-panel .settings-select-field > .settings-select-label { display: block; margin: 0; line-height: 13px; }
+.provider-model-input-wrap { position: relative; min-width: 0; height: 36px; }
+.provider-model-input-wrap > .provider-model-input { height: 36px; min-height: 36px; margin: 0; padding-right: 36px; }
+.provider-model-toggle { position: absolute; top: 1px; right: 1px; width: 32px; height: 34px; min-height: 34px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 4px; color: #89988b; background: transparent; }
+.provider-model-toggle:hover:not(:disabled) { color: #58745d; background: #f0f5ed; }
+.provider-model-toggle svg { transition: transform var(--motion-fast-duration) var(--motion-ease); }
+.provider-model-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.provider-editor-panel .settings-select-control { width: 100%; height: 36px; min-height: 36px; margin: 0; }
+.provider-model-field { position: relative; z-index: 0; }
+.provider-model-field:focus-within { z-index: 13; }
+.provider-model-menu .settings-select-option { cursor: pointer; }
+.provider-name-heading { min-width: 0; flex: 1 1 auto; display: flex; align-items: center; }
+.provider-name-heading > strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.provider-name-edit-trigger { min-width: 0; padding: 0; display: inline-flex; align-items: center; gap: 6px; border: 0; color: inherit; background: transparent; text-align: left; }
+.provider-name-edit-trigger strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.provider-name-edit-trigger svg { flex: 0 0 auto; color: #89988b; transform: translateY(1px); }
+.provider-name-edit-trigger:hover svg, .provider-name-edit-trigger:focus-visible svg { color: #58745d; }
+.provider-name-inline-input { width: min(320px, 100%); height: 30px; min-height: 30px; padding: 0 7px; font-size: 13px; font-weight: 600; }
+.provider-editor-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #4e5e51; }
+.provider-editor-heading span { flex: 0 0 auto; color: #969d94; font-size: 10px; }
+.provider-form-actions { margin-top: 0; }
+.provider-test-result { min-width: 0; padding: 12px; border: 1px solid #d6e2d3; border-radius: 7px; color: #4b6354; background: #f1f6ef; }
+.provider-test-result.is-error { border-color: #ead4cf; color: #925e55; background: #fbf3f1; }
+.provider-test-result strong { display: block; margin-bottom: 7px; font-size: 11px; }
+.provider-test-result pre { max-height: 220px; margin: 0; overflow: auto; color: #59665b; font: inherit; font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.provider-test-result.is-error pre { color: #86584f; }
 .personal-dictionary-open { min-width: 0; padding: 0; display: flex; align-items: center; gap: 9px; border: 0; color: #667166; background: transparent; text-align: left; }
 .personal-dictionary-open:hover { color: #38513f; }
 .personal-dictionary-open > span { min-width: 0; }
@@ -908,6 +949,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .setting-line { min-width: 0; }
 .setting-line > span { min-width: 0; }
 .prompt-manager-grid { grid-template-columns: minmax(160px, .7fr) minmax(0, 1.3fr); }
+.provider-manager-grid { grid-template-columns: minmax(160px, .7fr) minmax(0, 1.3fr); }
 
 .modal-card,
 .settings-resource-card,
@@ -938,6 +980,10 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
   .pdf-task-panel-topbar { grid-template-columns: auto minmax(0, 1fr); }
   .pdf-task-panel-progress { grid-column: 1 / -1; grid-row: 2; }
   .pdf-task-panel-topbar-actions { grid-column: 2; grid-row: 1; justify-content: flex-end; }
+}
+
+@media (max-width: 1080px) {
+  .provider-manager-grid { grid-template-columns: 1fr; }
 }
 
 /* Let primary page surfaces keep expanding with a taller main window. */
