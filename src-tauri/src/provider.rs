@@ -252,9 +252,7 @@ async fn stream_once(
     let mut stream = response.bytes_stream();
     let mut line_buffer = Vec::new();
     let mut pending_event = PendingSseEvent::default();
-    let mut translated = String::new();
-    let mut token_usage = None;
-    let mut response_completed = false;
+    let mut stream_state = SseStreamState::default();
     loop {
         let chunk = tokio::select! {
             _ = request.cancel.cancelled() => return Err(ProviderError::Cancelled),
@@ -271,9 +269,7 @@ async fn stream_once(
                     &mut pending_event,
                     request,
                     started,
-                    &mut translated,
-                    &mut token_usage,
-                    &mut response_completed,
+                    &mut stream_state,
                     on_delta,
                     on_activity,
                 )?;
@@ -289,9 +285,7 @@ async fn stream_once(
             &mut pending_event,
             request,
             started,
-            &mut translated,
-            &mut token_usage,
-            &mut response_completed,
+            &mut stream_state,
             on_delta,
             on_activity,
         )?;
@@ -301,24 +295,22 @@ async fn stream_once(
             &mut pending_event,
             request,
             started,
-            &mut translated,
-            &mut token_usage,
-            &mut response_completed,
+            &mut stream_state,
             on_delta,
             on_activity,
         )?;
     }
-    if request.api_protocol == ApiProtocol::Responses && !response_completed {
+    if request.api_protocol == ApiProtocol::Responses && !stream_state.response_completed {
         return Err(ProviderError::Protocol(
             "Responses 流在 response.completed 前结束".to_string(),
         ));
     }
-    if translated.is_empty() {
+    if stream_state.translated.is_empty() {
         return Err(ProviderError::Protocol("流式响应没有返回译文".to_string()));
     }
     Ok(ProviderStreamResult {
-        content: translated,
-        token_usage,
+        content: stream_state.translated,
+        token_usage: stream_state.token_usage,
     })
 }
 
@@ -353,14 +345,19 @@ struct PendingSseEvent {
     data: Vec<String>,
 }
 
+#[derive(Default)]
+struct SseStreamState {
+    translated: String,
+    token_usage: Option<crate::pdf_protocol::TokenUsage>,
+    response_completed: bool,
+}
+
 fn consume_sse_line(
     bytes: &[u8],
     pending: &mut PendingSseEvent,
     request: &ChatStreamRequest<'_>,
     started: &mut bool,
-    translated: &mut String,
-    token_usage: &mut Option<crate::pdf_protocol::TokenUsage>,
-    response_completed: &mut bool,
+    stream_state: &mut SseStreamState,
     on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
     on_activity: &mut impl FnMut(ProviderStreamActivity),
 ) -> Result<(), ProviderError> {
@@ -372,9 +369,7 @@ fn consume_sse_line(
             pending,
             request,
             started,
-            translated,
-            token_usage,
-            response_completed,
+            stream_state,
             on_delta,
             on_activity,
         );
@@ -396,9 +391,7 @@ fn dispatch_sse_event(
     pending: &mut PendingSseEvent,
     request: &ChatStreamRequest<'_>,
     started: &mut bool,
-    translated: &mut String,
-    token_usage: &mut Option<crate::pdf_protocol::TokenUsage>,
-    response_completed: &mut bool,
+    stream_state: &mut SseStreamState,
     on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
     on_activity: &mut impl FnMut(ProviderStreamActivity),
 ) -> Result<(), ProviderError> {
@@ -411,7 +404,7 @@ fn dispatch_sse_event(
     if request.api_protocol == ApiProtocol::ChatCompletions {
         let parsed = parse_sse_details(&format!("data: {data}"))?;
         if let Some(usage) = parsed.token_usage {
-            *token_usage = Some(usage);
+            stream_state.token_usage = Some(usage);
         }
         for activity in parsed.activities {
             *started = true;
@@ -420,13 +413,13 @@ fn dispatch_sse_event(
         if let Some(content) = parsed.content.filter(|content| !content.is_empty()) {
             *started = true;
             on_activity(ProviderStreamActivity::Content);
-            translated.push_str(&content);
+            stream_state.translated.push_str(&content);
             on_delta(content)?;
         }
         return Ok(());
     }
 
-    if *response_completed {
+    if stream_state.response_completed {
         return Err(ProviderError::Protocol(
             "Responses 在 response.completed 后仍发送事件".to_string(),
         ));
@@ -437,27 +430,27 @@ fn dispatch_sse_event(
         on_activity(activity);
     }
     if let Some(usage) = parsed.token_usage {
-        *token_usage = Some(usage);
+        stream_state.token_usage = Some(usage);
     }
     if let Some(content) = parsed.content.filter(|content| !content.is_empty()) {
         *started = true;
         on_activity(ProviderStreamActivity::Content);
-        translated.push_str(&content);
+        stream_state.translated.push_str(&content);
         on_delta(content)?;
     }
     if let Some(error) = parsed.error {
         return Err(ProviderError::Protocol(error));
     }
     if parsed.completed {
-        *response_completed = true;
-        if translated.is_empty() {
+        stream_state.response_completed = true;
+        if stream_state.translated.is_empty() {
             if let Some(content) = parsed
                 .completed_content
                 .filter(|content| !content.is_empty())
             {
                 *started = true;
                 on_activity(ProviderStreamActivity::Content);
-                translated.push_str(&content);
+                stream_state.translated.push_str(&content);
                 on_delta(content)?;
             }
         }

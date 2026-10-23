@@ -3436,13 +3436,15 @@ function SettingsView({
         if (!draft.modelId.trim()) throw new Error("Model ID 不能为空");
         if (!shortcut) throw new Error("快捷键不能为空");
         await invokeCommand("save_provider_config", {
-          providerId: draft.providerId,
-          name: draft.providerName,
-          baseUrl: draft.baseUrl,
-          modelId: draft.modelId,
-          apiProtocol: draft.apiProtocol,
-          thinkingEffort: draft.thinkingEffort,
-          apiKey: draft.apiKey || null,
+          config: {
+            providerId: draft.providerId,
+            name: draft.providerName,
+            baseUrl: draft.baseUrl,
+            modelId: draft.modelId,
+            apiProtocol: draft.apiProtocol,
+            thinkingEffort: draft.thinkingEffort,
+            apiKey: draft.apiKey || null,
+          },
         });
         await invokeCommand("save_app_settings", {
           historyRetention: draft.settings.historyRetention,

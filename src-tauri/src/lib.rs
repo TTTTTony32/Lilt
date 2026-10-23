@@ -704,9 +704,9 @@ fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
     })
 }
 
-#[tauri::command]
-fn save_provider_config(
-    state: State<'_, AppState>,
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveProviderConfigInput {
     provider_id: String,
     name: String,
     base_url: String,
@@ -714,7 +714,22 @@ fn save_provider_config(
     api_protocol: ApiProtocol,
     thinking_effort: ThinkingEffort,
     api_key: Option<String>,
+}
+
+#[tauri::command]
+fn save_provider_config(
+    state: State<'_, AppState>,
+    config: SaveProviderConfigInput,
 ) -> Result<(), String> {
+    let SaveProviderConfigInput {
+        provider_id,
+        name,
+        base_url,
+        model_id,
+        api_protocol,
+        thinking_effort,
+        api_key,
+    } = config;
     let normalized_url =
         provider::normalize_base_url(&base_url).map_err(|error| error.to_string())?;
     let model_id = model_id.trim();
