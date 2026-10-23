@@ -84,7 +84,8 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-navigation-item > svg { flex: 0 0 auto; color: #819382; }
 .settings-navigation-item span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .settings-navigation-item strong { color: inherit; font-size: 12px; font-weight: 600; }
-.settings-content { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.settings-content { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.settings-content::before { content: ""; position: absolute; z-index: 1; top: 0; right: 0; left: 0; height: calc(var(--chrome-height) + 16px); background: linear-gradient(to bottom, rgba(247, 246, 241, .84) 0%, rgba(247, 246, 241, .58) 55%, rgba(247, 246, 241, 0) 100%); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); mask-image: linear-gradient(to bottom, #000 0%, #000 35%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 35%, transparent 100%); mask-repeat: no-repeat; pointer-events: none; }
 .settings-content-scroll { flex: 1 1 auto; min-height: 0; padding-top: var(--chrome-height); overflow-y: auto; scroll-padding-top: var(--chrome-height); scrollbar-width: none; }
 .settings-content-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .settings-section { width: 100%; max-width: 1120px; margin: 0 auto; padding: clamp(26px, 4vh, 38px) clamp(24px, 4vw, 72px) clamp(36px, 5vh, 56px); border-bottom: 0; }
