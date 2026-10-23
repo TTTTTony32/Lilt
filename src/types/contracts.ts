@@ -77,8 +77,12 @@ export interface ProviderConfig {
   modelId: string;
   promptId: string;
   thinkingEffort: ThinkingEffort;
+  apiProtocol: ApiProtocol;
   hasApiKey: boolean;
+  isBuiltin: boolean;
 }
+
+export type ApiProtocol = "chat_completions" | "responses";
 
 export type ThinkingEffort = "none" | "low" | "medium" | "high";
 
@@ -165,6 +169,7 @@ export interface CacheStats {
 export interface AppSnapshot {
   settings: AppSettings;
   provider: ProviderConfig;
+  providers: ProviderConfig[];
   models: ModelInfo[];
   prompts: Prompt[];
   glossaryTerms: GlossaryTerm[];
@@ -1620,14 +1625,40 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     closeBehavior: "ask",
   },
   provider: {
-    id: "default",
-    name: "OpenAI-compatible",
+    id: "openai",
+    name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
     modelId: "gpt-4o-mini",
     promptId: "builtin-general",
     thinkingEffort: "none",
+    apiProtocol: "responses",
     hasApiKey: false,
+    isBuiltin: true,
   },
+  providers: [
+    {
+      id: "openai",
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      modelId: "gpt-4o-mini",
+      promptId: "builtin-general",
+      thinkingEffort: "none",
+      apiProtocol: "responses",
+      hasApiKey: false,
+      isBuiltin: true,
+    },
+    {
+      id: "deepseek",
+      name: "DeepSeek",
+      baseUrl: "https://api.deepseek.com",
+      modelId: "deepseek-flash",
+      promptId: "builtin-general",
+      thinkingEffort: "none",
+      apiProtocol: "responses",
+      hasApiKey: false,
+      isBuiltin: true,
+    },
+  ],
   models: [],
   prompts: [],
   glossaryTerms: [],

@@ -11,7 +11,8 @@
 ### 段落翻译
 
 - 支持英语、简体中文、繁体中文、日语和韩语
-- 基于LLM服务进行翻译，目前暂时仅支持 `OpenAI Completions API`
+- 基于 LLM 服务进行翻译，支持 Chat Completions 与 Responses API
+- 内置 OpenAI、DeepSeek 供应商预设，也可保存自定义供应商配置
 - 提示词支持内置 Prompt 和自定义 Prompt
 
 ### 词典

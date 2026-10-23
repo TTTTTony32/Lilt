@@ -43,6 +43,7 @@ pub struct StreamRequest<'a> {
     pub cancel: &'a CancellationToken,
     pub mode: TranslationMode,
     pub thinking_effort: &'a crate::contracts::ThinkingEffort,
+    pub api_protocol: crate::contracts::ApiProtocol,
 }
 
 pub struct TranslationCore;
@@ -73,6 +74,7 @@ impl TranslationCore {
                 cancel: request.cancel,
                 operation: request.mode.provider_operation(),
                 thinking_effort: request.thinking_effort,
+                api_protocol: request.api_protocol,
             },
             on_delta,
         )
@@ -99,6 +101,7 @@ impl TranslationCore {
                 cancel: request.cancel,
                 operation: request.mode.provider_operation(),
                 thinking_effort: request.thinking_effort,
+                api_protocol: request.api_protocol,
             },
             on_delta,
             on_activity,

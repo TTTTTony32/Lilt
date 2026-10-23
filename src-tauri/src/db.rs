@@ -1,16 +1,17 @@
 use crate::contracts::{
-    AppSettings, CacheStats, CachedTranslation, CloseBehavior, DEFAULT_CACHE_MAX_BYTES,
-    DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION, DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED,
-    DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED, DEFAULT_PDF_PREFLIGHT_ENABLED,
-    DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT, DEFAULT_PROMPT_ID, DEFAULT_PROMPT_SOURCE_LANGUAGE,
-    DEFAULT_PROMPT_TARGET_LANGUAGE, DEFAULT_PROVIDER_ID, DEFAULT_SELECTION_MODE,
-    DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT, DEFAULT_SELECTION_WINDOW_WIDTH,
-    DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED, DICTIONARY_DISTRIBUTION_SCHEMA_VERSION,
-    DICTIONARY_SQLITE_SCHEMA_VERSION, DictionaryHistoryEntry, GlossaryTerm, HistoryEntry,
-    MAX_CACHE_MAX_BYTES, MAX_PDF_PREFLIGHT_PAGE_LIMIT, MAX_SELECTION_WINDOW_HEIGHT,
-    MAX_SELECTION_WINDOW_WIDTH, MIN_CACHE_MAX_BYTES, MIN_PDF_PREFLIGHT_PAGE_LIMIT,
-    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry,
-    Prompt, ProviderRecord, SelectionMode, ThinkingEffort, parse_selection_window_dimension,
+    ApiProtocol, AppSettings, CacheStats, CachedTranslation, CloseBehavior,
+    DEFAULT_CACHE_MAX_BYTES, DEFAULT_GLOSSARY_ID, DEFAULT_HISTORY_RETENTION,
+    DEFAULT_PARAGRAPH_EXAMPLE_LOOKUP_ENABLED, DEFAULT_PARAGRAPH_LEARNING_MODE_ENABLED,
+    DEFAULT_PDF_PREFLIGHT_ENABLED, DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT, DEFAULT_PROMPT_ID,
+    DEFAULT_PROMPT_SOURCE_LANGUAGE, DEFAULT_PROMPT_TARGET_LANGUAGE, DEFAULT_PROVIDER_ID,
+    DEFAULT_SELECTION_MODE, DEFAULT_SELECTION_SHORTCUT, DEFAULT_SELECTION_WINDOW_HEIGHT,
+    DEFAULT_SELECTION_WINDOW_WIDTH, DEFAULT_THINKING_EFFORT, DEFAULT_WORD_AI_CACHE_ENABLED,
+    DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
+    DictionaryHistoryEntry, GlossaryTerm, HistoryEntry, MAX_CACHE_MAX_BYTES,
+    MAX_PDF_PREFLIGHT_PAGE_LIMIT, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_CACHE_MAX_BYTES, MIN_PDF_PREFLIGHT_PAGE_LIMIT, MIN_SELECTION_WINDOW_HEIGHT,
+    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, PersonalDictionaryEntry, Prompt, ProviderRecord,
+    SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
 use crate::glossary::GlossaryImportTerm;
 use chrono::Utc;
@@ -83,6 +84,7 @@ pub struct AiDictionaryCacheRecord {
     pub model_id: String,
     pub thinking_effort: String,
     pub protocol_version: String,
+    pub api_protocol: String,
 }
 
 pub struct AiDictionaryCacheWrite<'a> {
@@ -150,7 +152,9 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 base_url TEXT NOT NULL,
                 model_id TEXT NOT NULL,
                 prompt_id TEXT NOT NULL,
-                thinking_effort TEXT NOT NULL DEFAULT 'none'
+                thinking_effort TEXT NOT NULL DEFAULT 'none',
+                api_protocol TEXT NOT NULL DEFAULT 'chat_completions',
+                is_builtin INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS models (
@@ -262,10 +266,13 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 source_language TEXT NOT NULL,
                 target_language TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
+                base_url TEXT NOT NULL DEFAULT '',
                 model_id TEXT NOT NULL,
+                thinking_effort TEXT NOT NULL DEFAULT 'none',
                 prompt_id TEXT NOT NULL,
                 glossary_version INTEGER NOT NULL,
                 protocol_version TEXT NOT NULL,
+                api_protocol TEXT NOT NULL DEFAULT 'chat_completions',
                 translated_text TEXT NOT NULL,
                 part_of_speech TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -290,6 +297,7 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 model_id TEXT NOT NULL,
                 thinking_effort TEXT NOT NULL,
                 protocol_version TEXT NOT NULL,
+                api_protocol TEXT NOT NULL DEFAULT 'chat_completions',
                 created_at TEXT NOT NULL,
                 last_used_at TEXT NOT NULL,
                 byte_size INTEGER NOT NULL
@@ -336,24 +344,11 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("数据库迁移失败：{error}"))?;
 
-    ensure_provider_thinking_effort_column(connection)?;
+    ensure_provider_columns(connection)?;
+    ensure_word_ai_cache_columns(connection)?;
+    ensure_ai_dictionary_cache_api_protocol_column(connection)?;
     ensure_prompt_language_columns(connection)?;
-
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO providers
-                (id, name, base_url, model_id, prompt_id, thinking_effort)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                DEFAULT_PROVIDER_ID,
-                "OpenAI-compatible",
-                "https://api.openai.com/v1",
-                DEFAULT_MODEL_ID,
-                DEFAULT_PROMPT_ID,
-                DEFAULT_THINKING_EFFORT.as_str(),
-            ],
-        )
-        .map_err(|error| format!("默认 Provider 初始化失败：{error}"))?;
+    migrate_provider_profiles(connection)?;
 
     migrate_prompt_collection(connection)?;
     upgrade_builtin_prompt_content(connection)?;
@@ -594,25 +589,147 @@ fn migrate_builtin_prompt_fields(
     Ok(())
 }
 
-fn ensure_provider_thinking_effort_column(connection: &Connection) -> Result<(), String> {
+fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, String> {
     let mut statement = connection
-        .prepare("PRAGMA table_info(providers)")
-        .map_err(|error| format!("检查 Provider 数据库结构失败：{error}"))?;
-    let columns = statement
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("检查数据库结构失败：{error}"))?;
+    statement
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|error| format!("读取 Provider 数据库结构失败：{error}"))?
+        .map_err(|error| format!("读取数据库结构失败：{error}"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("读取 Provider 数据库结构失败：{error}"))?;
-    if columns.iter().any(|column| column == "thinking_effort") {
-        return Ok(());
+        .map_err(|error| format!("读取数据库结构失败：{error}"))
+}
+
+fn ensure_provider_columns(connection: &Connection) -> Result<(), String> {
+    let columns = table_columns(connection, "providers")?;
+    for (name, definition) in [
+        ("thinking_effort", "TEXT NOT NULL DEFAULT 'none'"),
+        ("api_protocol", "TEXT NOT NULL DEFAULT 'chat_completions'"),
+        ("is_builtin", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection
+                .execute(
+                    &format!("ALTER TABLE providers ADD COLUMN {name} {definition}"),
+                    [],
+                )
+                .map_err(|error| format!("升级 Provider 数据库结构失败：{error}"))?;
+        }
     }
-    connection
-        .execute(
-            "ALTER TABLE providers ADD COLUMN thinking_effort TEXT NOT NULL DEFAULT 'none'",
-            [],
-        )
-        .map_err(|error| format!("升级 Provider 数据库结构失败：{error}"))?;
     Ok(())
+}
+
+fn ensure_word_ai_cache_columns(connection: &Connection) -> Result<(), String> {
+    let columns = table_columns(connection, "word_ai_cache")?;
+    for (name, definition) in [
+        ("base_url", "TEXT NOT NULL DEFAULT ''"),
+        ("thinking_effort", "TEXT NOT NULL DEFAULT 'none'"),
+        ("api_protocol", "TEXT NOT NULL DEFAULT 'chat_completions'"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection
+                .execute(
+                    &format!("ALTER TABLE word_ai_cache ADD COLUMN {name} {definition}"),
+                    [],
+                )
+                .map_err(|error| format!("升级单词 AI 缓存结构失败：{error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_ai_dictionary_cache_api_protocol_column(connection: &Connection) -> Result<(), String> {
+    let columns = table_columns(connection, "ai_dictionary_cache")?;
+    if !columns.iter().any(|column| column == "api_protocol") {
+        connection
+            .execute(
+                "ALTER TABLE ai_dictionary_cache ADD COLUMN api_protocol TEXT NOT NULL DEFAULT 'chat_completions'",
+                [],
+            )
+            .map_err(|error| format!("升级 AI 词典缓存结构失败：{error}"))?;
+    }
+    Ok(())
+}
+
+fn migrate_provider_profiles(connection: &Connection) -> Result<(), String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("开启 Provider 迁移事务失败：{error}"))?;
+    const MIGRATION_SETTING: &str = "provider_profiles_migration";
+    let legacy_exists = transaction
+        .query_row(
+            "SELECT 1 FROM providers WHERE id = ?1",
+            params![DEFAULT_PROVIDER_ID],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("检查旧 Provider 失败：{error}"))?
+        .is_some();
+
+    if get_setting(&transaction, MIGRATION_SETTING)?.as_deref() != Some("1") {
+        if legacy_exists {
+            transaction
+                .execute(
+                    "UPDATE providers SET name = ?1, api_protocol = 'chat_completions', is_builtin = 0 WHERE id = ?2",
+                    params!["自定义供应商1", DEFAULT_PROVIDER_ID],
+                )
+                .map_err(|error| format!("迁移旧 Provider 失败：{error}"))?;
+        }
+        set_setting(
+            &transaction,
+            "active_provider_id",
+            if legacy_exists {
+                DEFAULT_PROVIDER_ID
+            } else {
+                "openai"
+            },
+        )?;
+        set_setting(&transaction, MIGRATION_SETTING, "1")?;
+    }
+
+    for (id, name, base_url, model_id) in [
+        (
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            DEFAULT_MODEL_ID,
+        ),
+        (
+            "deepseek",
+            "DeepSeek",
+            "https://api.deepseek.com",
+            "deepseek-flash",
+        ),
+    ] {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO providers
+                    (id, name, base_url, model_id, prompt_id, thinking_effort, api_protocol, is_builtin)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'responses', 1)",
+                params![id, name, base_url, model_id, DEFAULT_PROMPT_ID, DEFAULT_THINKING_EFFORT.as_str()],
+            )
+            .map_err(|error| format!("初始化 {name} Provider 失败：{error}"))?;
+    }
+
+    let active_exists = get_setting(&transaction, "active_provider_id")?
+        .as_deref()
+        .map(|id| {
+            transaction
+                .query_row("SELECT 1 FROM providers WHERE id = ?1", params![id], |_| {
+                    Ok(())
+                })
+                .optional()
+                .map(|row| row.is_some())
+                .map_err(|error| format!("检查活动 Provider 失败：{error}"))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if !active_exists {
+        set_setting(&transaction, "active_provider_id", "openai")?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交 Provider 迁移事务失败：{error}"))
 }
 
 pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
@@ -804,54 +921,169 @@ pub fn save_selection_window_size(
     )
 }
 
+fn provider_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderRecord> {
+    Ok(ProviderRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        base_url: row.get(2)?,
+        model_id: row.get(3)?,
+        prompt_id: row.get(4)?,
+        thinking_effort: ThinkingEffort::from_storage(&row.get::<_, String>(5)?),
+        api_protocol: ApiProtocol::from_storage(&row.get::<_, String>(6)?),
+        is_builtin: row.get::<_, i64>(7)? != 0,
+    })
+}
+
 pub fn get_provider(connection: &Connection) -> Result<ProviderRecord, String> {
+    let provider_id =
+        get_setting(connection, "active_provider_id")?.unwrap_or_else(|| "openai".to_string());
+    get_provider_by_id(connection, &provider_id)
+}
+
+pub fn get_provider_by_id(connection: &Connection, id: &str) -> Result<ProviderRecord, String> {
     connection
         .query_row(
-            "SELECT id, name, base_url, model_id, prompt_id, thinking_effort
+            "SELECT id, name, base_url, model_id, prompt_id, thinking_effort, api_protocol, is_builtin
              FROM providers WHERE id = ?1",
-            params![DEFAULT_PROVIDER_ID],
-            |row| {
-                Ok(ProviderRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    base_url: row.get(2)?,
-                    model_id: row.get(3)?,
-                    prompt_id: row.get(4)?,
-                    thinking_effort: ThinkingEffort::from_storage(&row.get::<_, String>(5)?),
-                })
-            },
+            params![id],
+            provider_from_row,
         )
         .map_err(|error| format!("读取 Provider 失败：{error}"))
 }
 
+pub fn list_providers(connection: &Connection) -> Result<Vec<ProviderRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, name, base_url, model_id, prompt_id, thinking_effort, api_protocol, is_builtin
+             FROM providers ORDER BY is_builtin DESC, name COLLATE NOCASE",
+        )
+        .map_err(|error| format!("读取 Provider 列表失败：{error}"))?;
+    let rows = statement
+        .query_map([], provider_from_row)
+        .map_err(|error| format!("读取 Provider 列表失败：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取 Provider 列表失败：{error}"))
+}
+
+pub fn set_active_provider(connection: &Connection, id: &str) -> Result<(), String> {
+    get_provider_by_id(connection, id)?;
+    set_setting(connection, "active_provider_id", id)
+}
+
+pub fn create_provider(connection: &Connection) -> Result<ProviderRecord, String> {
+    let existing_names = list_providers(connection)?
+        .into_iter()
+        .map(|provider| provider.name)
+        .collect::<std::collections::HashSet<_>>();
+    let mut index = 1;
+    let name = loop {
+        let candidate = format!("自定义供应商{index}");
+        if !existing_names.contains(&candidate) {
+            break candidate;
+        }
+        index += 1;
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    connection
+        .execute(
+            "INSERT INTO providers
+                (id, name, base_url, model_id, prompt_id, thinking_effort, api_protocol, is_builtin)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'chat_completions', 0)",
+            params![
+                id,
+                name,
+                "https://api.openai.com/v1",
+                DEFAULT_MODEL_ID,
+                DEFAULT_PROMPT_ID,
+                DEFAULT_THINKING_EFFORT.as_str(),
+            ],
+        )
+        .map_err(|error| format!("创建自定义 Provider 失败：{error}"))?;
+    set_active_provider(connection, &id)?;
+    get_provider_by_id(connection, &id)
+}
+
+pub fn rename_provider(connection: &Connection, id: &str, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("供应商名称不能为空".to_string());
+    }
+    let changed = connection
+        .execute(
+            "UPDATE providers SET name = ?1 WHERE id = ?2 AND is_builtin = 0",
+            params![name, id],
+        )
+        .map_err(|error| format!("重命名 Provider 失败：{error}"))?;
+    if changed == 0 {
+        return Err("内置供应商不能重命名".to_string());
+    }
+    Ok(())
+}
+
+pub fn delete_provider(connection: &Connection, id: &str) -> Result<(), String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("开启 Provider 删除事务失败：{error}"))?;
+    let provider = get_provider_by_id(&transaction, id)?;
+    if provider.is_builtin {
+        return Err("内置供应商不能删除".to_string());
+    }
+    if get_setting(&transaction, "active_provider_id")?.as_deref() == Some(id) {
+        set_active_provider(&transaction, "openai")?;
+    }
+    let changed = transaction
+        .execute(
+            "DELETE FROM providers WHERE id = ?1 AND is_builtin = 0",
+            params![id],
+        )
+        .map_err(|error| format!("删除 Provider 失败：{error}"))?;
+    if changed == 0 {
+        return Err("自定义供应商不存在".to_string());
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交 Provider 删除事务失败：{error}"))
+}
+
 pub fn save_provider(
     connection: &Connection,
+    id: &str,
+    name: &str,
     base_url: &str,
     model_id: &str,
+    api_protocol: ApiProtocol,
     thinking_effort: ThinkingEffort,
 ) -> Result<(), String> {
+    let current = get_provider_by_id(connection, id)?;
+    let name = name.trim();
+    if !current.is_builtin && name.is_empty() {
+        return Err("供应商名称不能为空".to_string());
+    }
     connection
         .execute(
             "UPDATE providers
-             SET base_url = ?1, model_id = ?2, thinking_effort = ?3
-             WHERE id = ?4",
+             SET name = CASE WHEN is_builtin = 0 THEN ?1 ELSE name END,
+                 base_url = ?2, model_id = ?3, api_protocol = ?4, thinking_effort = ?5
+             WHERE id = ?6",
             params![
+                name,
                 base_url,
                 model_id,
+                api_protocol.as_str(),
                 thinking_effort.as_str(),
-                DEFAULT_PROVIDER_ID
+                id,
             ],
         )
         .map_err(|error| format!("保存 Provider 失败：{error}"))?;
     Ok(())
 }
 
-pub fn list_models(connection: &Connection) -> Result<Vec<ModelInfo>, String> {
+pub fn list_models(connection: &Connection, provider_id: &str) -> Result<Vec<ModelInfo>, String> {
     let mut statement = connection
         .prepare("SELECT id, label, source FROM models WHERE provider_id = ?1 ORDER BY label COLLATE NOCASE")
         .map_err(|error| format!("读取模型列表失败：{error}"))?;
     let rows = statement
-        .query_map(params![DEFAULT_PROVIDER_ID], |row| {
+        .query_map(params![provider_id], |row| {
             Ok(ModelInfo {
                 id: row.get(0)?,
                 label: row.get(1)?,
@@ -863,18 +1095,22 @@ pub fn list_models(connection: &Connection) -> Result<Vec<ModelInfo>, String> {
         .map_err(|error| format!("读取模型列表失败：{error}"))
 }
 
-pub fn replace_models(connection: &Connection, models: &[ModelInfo]) -> Result<(), String> {
+pub fn replace_models(
+    connection: &Connection,
+    provider_id: &str,
+    models: &[ModelInfo],
+) -> Result<(), String> {
     connection
         .execute(
             "DELETE FROM models WHERE provider_id = ?1",
-            params![DEFAULT_PROVIDER_ID],
+            params![provider_id],
         )
         .map_err(|error| format!("清理模型列表失败：{error}"))?;
     for model in models {
         connection
             .execute(
                 "INSERT INTO models (id, provider_id, label, source) VALUES (?1, ?2, ?3, ?4)",
-                params![model.id, DEFAULT_PROVIDER_ID, model.label, model.source],
+                params![model.id, provider_id, model.label, model.source],
             )
             .map_err(|error| format!("保存模型列表失败：{error}"))?;
     }
@@ -1006,18 +1242,35 @@ pub fn delete_prompt(
     if prompt_id == current_prompt_id {
         return Err("当前正在使用的 Prompt 不能删除".to_string());
     }
+    let referenced = connection
+        .query_row(
+            "SELECT 1 FROM providers WHERE prompt_id = ?1 LIMIT 1",
+            params![prompt_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("检查 Provider Prompt 关联失败：{error}"))?
+        .is_some();
+    if referenced {
+        return Err("仍有供应商正在使用此 Prompt，不能删除".to_string());
+    }
     connection
         .execute("DELETE FROM prompts WHERE id = ?1", params![prompt_id])
         .map_err(|error| format!("删除 Prompt 失败：{error}"))?;
     Ok(())
 }
 
-pub fn set_default_prompt(connection: &Connection, prompt_id: &str) -> Result<(), String> {
+pub fn set_default_prompt(
+    connection: &Connection,
+    provider_id: &str,
+    prompt_id: &str,
+) -> Result<(), String> {
     get_prompt(connection, prompt_id)?;
+    get_provider_by_id(connection, provider_id)?;
     connection
         .execute(
             "UPDATE providers SET prompt_id = ?1 WHERE id = ?2",
-            params![prompt_id, DEFAULT_PROVIDER_ID],
+            params![prompt_id, provider_id],
         )
         .map_err(|error| format!("设置默认 Prompt 失败：{error}"))?;
     Ok(())
@@ -1675,12 +1928,27 @@ pub fn find_example_by_id_for_word(
 pub fn find_word_ai_cache(
     connection: &Connection,
     cache_key: &str,
+    provider: &ProviderRecord,
+    prompt_id: &str,
+    glossary_version: i64,
 ) -> Result<Option<WordAiCacheRecord>, String> {
     let cached = connection
         .query_row(
             "SELECT translated_text, part_of_speech
-             FROM word_ai_cache WHERE cache_key = ?1",
-            params![cache_key],
+             FROM word_ai_cache
+             WHERE cache_key = ?1 AND provider_id = ?2 AND base_url = ?3 AND model_id = ?4
+               AND thinking_effort = ?5 AND prompt_id = ?6 AND glossary_version = ?7
+               AND api_protocol = ?8",
+            params![
+                cache_key,
+                provider.id,
+                provider.base_url,
+                provider.model_id,
+                provider.thinking_effort.as_str(),
+                prompt_id,
+                glossary_version,
+                provider.api_protocol.as_str(),
+            ],
             |row| {
                 Ok(WordAiCacheRecord {
                     translated_text: row.get(0)?,
@@ -1711,12 +1979,20 @@ pub fn save_word_ai_cache(
         .execute(
             "INSERT INTO word_ai_cache
                 (cache_key, example_id, normalized_word, word, canonical_word,
-                 source_language, target_language, provider_id, model_id, prompt_id,
-                 glossary_version, protocol_version, translated_text, part_of_speech,
-                 created_at, last_used_at, byte_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16)
+                 source_language, target_language, provider_id, base_url, model_id,
+                 thinking_effort, prompt_id, glossary_version, protocol_version, api_protocol,
+                 translated_text, part_of_speech, created_at, last_used_at, byte_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, ?19)
              ON CONFLICT(cache_key) DO UPDATE SET
                 example_id = excluded.example_id,
+                provider_id = excluded.provider_id,
+                base_url = excluded.base_url,
+                model_id = excluded.model_id,
+                thinking_effort = excluded.thinking_effort,
+                prompt_id = excluded.prompt_id,
+                glossary_version = excluded.glossary_version,
+                protocol_version = excluded.protocol_version,
+                api_protocol = excluded.api_protocol,
                 translated_text = excluded.translated_text,
                 part_of_speech = excluded.part_of_speech,
                 last_used_at = excluded.last_used_at,
@@ -1730,10 +2006,13 @@ pub fn save_word_ai_cache(
                 record.source_language,
                 record.target_language,
                 &record.provider.id,
+                &record.provider.base_url,
                 &record.provider.model_id,
+                record.provider.thinking_effort.as_str(),
                 record.prompt_id,
                 record.glossary_version,
                 record.protocol_version,
+                record.provider.api_protocol.as_str(),
                 record.translated_text,
                 record.part_of_speech,
                 &now,
@@ -1752,7 +2031,7 @@ pub fn find_ai_dictionary_cache(
         .query_row(
             "SELECT normalized_word, lookup_word, canonical_word,
                     source_language, definition_language, entry_json,
-                    provider_id, base_url, model_id, thinking_effort, protocol_version
+                    provider_id, base_url, model_id, thinking_effort, protocol_version, api_protocol
              FROM ai_dictionary_cache WHERE cache_key = ?1",
             params![cache_key],
             |row| {
@@ -1768,6 +2047,7 @@ pub fn find_ai_dictionary_cache(
                     model_id: row.get(8)?,
                     thinking_effort: row.get(9)?,
                     protocol_version: row.get(10)?,
+                    api_protocol: row.get(11)?,
                 })
             },
         )
@@ -1808,9 +2088,9 @@ pub fn save_ai_dictionary_cache(
             "INSERT INTO ai_dictionary_cache
                 (cache_key, normalized_word, lookup_word, canonical_word,
                  source_language, definition_language, entry_json, provider_id,
-                 base_url, model_id, thinking_effort, protocol_version,
+                 base_url, model_id, thinking_effort, protocol_version, api_protocol,
                  created_at, last_used_at, byte_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)
              ON CONFLICT(cache_key) DO UPDATE SET
                 normalized_word = excluded.normalized_word,
                 lookup_word = excluded.lookup_word,
@@ -1823,6 +2103,7 @@ pub fn save_ai_dictionary_cache(
                 model_id = excluded.model_id,
                 thinking_effort = excluded.thinking_effort,
                 protocol_version = excluded.protocol_version,
+                api_protocol = excluded.api_protocol,
                 last_used_at = excluded.last_used_at,
                 byte_size = excluded.byte_size",
             params![
@@ -1838,6 +2119,7 @@ pub fn save_ai_dictionary_cache(
                 &record.provider.model_id,
                 record.provider.thinking_effort.as_str(),
                 record.protocol_version,
+                record.provider.api_protocol.as_str(),
                 &now,
                 byte_size,
             ],
@@ -2146,6 +2428,8 @@ mod tests {
             model_id: DEFAULT_MODEL_ID.to_string(),
             prompt_id: DEFAULT_PROMPT_ID.to_string(),
             thinking_effort: DEFAULT_THINKING_EFFORT,
+            api_protocol: ApiProtocol::ChatCompletions,
+            is_builtin: false,
         }
     }
 
@@ -2186,8 +2470,11 @@ mod tests {
         let connection = test_connection();
         save_provider(
             &connection,
+            "openai",
+            "OpenAI",
             "https://example.com/v1",
             "reasoning-model",
+            ApiProtocol::ChatCompletions,
             ThinkingEffort::High,
         )
         .expect("provider save should succeed");
@@ -2492,7 +2779,7 @@ mod tests {
         };
         save_word_ai_cache(&connection, &word_cache).expect("word cache write should succeed");
         assert!(
-            find_word_ai_cache(&connection, "word-cache")
+            find_word_ai_cache(&connection, "word-cache", &provider, DEFAULT_PROMPT_ID, 1)
                 .unwrap()
                 .is_some()
         );
@@ -2504,7 +2791,7 @@ mod tests {
             )
             .expect("paragraph cache should delete");
         assert!(
-            find_word_ai_cache(&connection, "word-cache")
+            find_word_ai_cache(&connection, "word-cache", &provider, DEFAULT_PROMPT_ID, 1)
                 .unwrap()
                 .is_none()
         );
@@ -2889,7 +3176,8 @@ mod tests {
         let reused = create_prompt(&connection).expect("smallest prompt number should be reused");
         assert_eq!(reused.name, "自定义提示词1");
 
-        set_default_prompt(&connection, &second.id).expect("custom prompt should become default");
+        set_default_prompt(&connection, "openai", &second.id)
+            .expect("custom prompt should become default");
         assert!(delete_prompt(&connection, &second.id, &second.id).is_err());
         assert!(delete_prompt(&connection, DEFAULT_PROMPT_ID, &second.id).is_err());
         delete_prompt(&connection, &reused.id, &second.id)

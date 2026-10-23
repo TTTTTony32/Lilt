@@ -289,6 +289,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 }
 .form-actions { min-height: 38px; margin-top: 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .settings-actions { justify-content: flex-end; }
+.settings-provider-actions { display: flex; align-items: end; gap: 8px; min-width: 0; }
 .button-group { display: flex; gap: 8px; }
 .muted-text { color: #a1a39a; font-size: 11px; }
 .list-card-heading { margin-bottom: 9px; padding-bottom: 14px; border-bottom: 1px solid #eceae3; }

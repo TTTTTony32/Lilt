@@ -1028,6 +1028,7 @@ async fn translate_pdf_preflight_inner(
                 cancel: &cancellation,
                 mode: TranslationMode::PdfPreflight,
                 thinking_effort: &prepared.provider.thinking_effort,
+                api_protocol: prepared.provider.api_protocol,
             },
             |_| Ok(()),
             |activity| {
@@ -1258,6 +1259,7 @@ async fn translate_pdf_request_inner(
             cancel: &cancellation,
             mode: TranslationMode::PdfSegment,
             thinking_effort: &prepared.provider.thinking_effort,
+            api_protocol: prepared.provider.api_protocol,
         },
         |_| Ok(()),
     )
@@ -2023,8 +2025,11 @@ mod tests {
         crate::db::migrate(&connection).unwrap();
         crate::db::save_provider(
             &connection,
+            "openai",
+            "OpenAI",
             &format!("http://{address}/v1"),
             "stub-model",
+            crate::contracts::ApiProtocol::ChatCompletions,
             ThinkingEffort::None,
         )
         .unwrap();
@@ -2102,8 +2107,11 @@ mod tests {
         crate::db::migrate(&connection).unwrap();
         crate::db::save_provider(
             &connection,
+            "openai",
+            "OpenAI",
             "https://provider.example/v1",
             "stub-model",
+            crate::contracts::ApiProtocol::ChatCompletions,
             ThinkingEffort::None,
         )
         .unwrap();
@@ -2175,8 +2183,11 @@ mod tests {
         crate::db::migrate(&connection).expect("migrate database");
         crate::db::save_provider(
             &connection,
+            "openai",
+            "OpenAI",
             &format!("http://{provider_address}/v1"),
             "stub-model",
+            crate::contracts::ApiProtocol::ChatCompletions,
             ThinkingEffort::None,
         )
         .expect("save test provider");

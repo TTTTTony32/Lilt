@@ -20,7 +20,7 @@ mod translation_core;
 mod tray;
 
 use contracts::{
-    AI_DICTIONARY_PROTOCOL_VERSION, AppSnapshot, CloseBehavior, DEFAULT_PROVIDER_ID,
+    AI_DICTIONARY_PROTOCOL_VERSION, ApiProtocol, AppSnapshot, CloseBehavior,
     DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult, DictionaryInvalidInsight,
     DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryMatchType,
     DictionaryProperNounInsight, DictionarySource, DictionaryState, GlossaryExportResult,
@@ -310,6 +310,10 @@ pub fn run() {
             get_app_snapshot,
             save_provider_config,
             fetch_models,
+            set_active_provider,
+            create_provider,
+            rename_provider,
+            delete_provider,
             save_app_settings,
             clear_cache,
             set_pdf_preflight_enabled,
@@ -618,6 +622,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     Ok(AppSnapshot {
         settings: snapshot_data.settings,
         provider: snapshot_data.provider,
+        providers: snapshot_data.providers,
         models: snapshot_data.models,
         prompts: snapshot_data.prompts,
         glossary_terms: snapshot_data.glossary_terms,
@@ -632,6 +637,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
 struct SnapshotData {
     settings: contracts::AppSettings,
     provider: contracts::ProviderConfig,
+    providers: Vec<contracts::ProviderConfig>,
     models: Vec<ModelInfo>,
     prompts: Vec<Prompt>,
     glossary_terms: Vec<GlossaryTerm>,
@@ -645,8 +651,26 @@ struct SnapshotData {
 fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
     let settings = db::get_settings(connection)?;
     let provider = db::get_provider(connection)?;
+    let provider_configs = db::list_providers(connection)?;
     let has_api_key = secrets::load_api_key(&provider.id).ok().flatten().is_some();
-    let models = db::list_models(connection)?;
+    let providers = provider_configs
+        .into_iter()
+        .map(|item| {
+            let has_api_key = secrets::load_api_key(&item.id).ok().flatten().is_some();
+            ProviderConfig {
+                id: item.id,
+                name: item.name,
+                base_url: item.base_url,
+                model_id: item.model_id,
+                prompt_id: item.prompt_id,
+                thinking_effort: item.thinking_effort,
+                api_protocol: item.api_protocol,
+                has_api_key,
+                is_builtin: item.is_builtin,
+            }
+        })
+        .collect();
+    let models = db::list_models(connection, &provider.id)?;
     let prompts = db::list_prompts(connection)?;
     let glossary_terms = db::list_glossary_terms(connection)?;
     let history = db::get_history(connection, settings.history_retention)?;
@@ -663,8 +687,11 @@ fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
             model_id: provider.model_id,
             prompt_id: provider.prompt_id,
             thinking_effort: provider.thinking_effort,
+            api_protocol: provider.api_protocol,
             has_api_key,
+            is_builtin: provider.is_builtin,
         },
+        providers,
         models,
         prompts,
         glossary_terms,
@@ -679,8 +706,11 @@ fn read_snapshot_data(connection: &Connection) -> Result<SnapshotData, String> {
 #[tauri::command]
 fn save_provider_config(
     state: State<'_, AppState>,
+    provider_id: String,
+    name: String,
     base_url: String,
     model_id: String,
+    api_protocol: ApiProtocol,
     thinking_effort: ThinkingEffort,
     api_key: Option<String>,
 ) -> Result<(), String> {
@@ -691,7 +721,7 @@ fn save_provider_config(
         return Err("Model ID 不能为空".to_string());
     }
     if api_key.is_some() {
-        secrets::save_api_key(DEFAULT_PROVIDER_ID, api_key.as_deref())?;
+        secrets::save_api_key(&provider_id, api_key.as_deref())?;
     }
     diagnostics::info(format!(
         "command.save_provider_config origin={} model={} api_key_provided={}",
@@ -703,12 +733,21 @@ fn save_provider_config(
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::save_provider(&connection, &normalized_url, model_id, thinking_effort)
+    db::save_provider(
+        &connection,
+        &provider_id,
+        &name,
+        &normalized_url,
+        model_id,
+        api_protocol,
+        thinking_effort,
+    )
 }
 
 #[tauri::command]
 async fn fetch_models(
     state: State<'_, AppState>,
+    provider_id: String,
     base_url: Option<String>,
     api_key: Option<String>,
 ) -> Result<Vec<ModelInfo>, String> {
@@ -717,7 +756,7 @@ async fn fetch_models(
             .database
             .lock()
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
-        let provider = db::get_provider(&connection)?;
+        let provider = db::get_provider_by_id(&connection, &provider_id)?;
         (provider.base_url, provider.id)
     };
     let base_url = base_url
@@ -769,7 +808,7 @@ async fn fetch_models(
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::replace_models(&connection, &models).map_err(|error| {
+    db::replace_models(&connection, &provider_id, &models).map_err(|error| {
         diagnostics::error(format!(
             "command.fetch_models.persist_failed reason={error}"
         ));
@@ -780,6 +819,60 @@ async fn fetch_models(
         models.len()
     ));
     Ok(models)
+}
+
+#[tauri::command]
+fn set_active_provider(state: State<'_, AppState>, provider_id: String) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::set_active_provider(&connection, provider_id.trim())
+}
+
+#[tauri::command]
+fn create_provider(state: State<'_, AppState>) -> Result<String, String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::create_provider(&connection).map(|provider| provider.id)
+}
+
+#[tauri::command]
+fn rename_provider(
+    state: State<'_, AppState>,
+    provider_id: String,
+    name: String,
+) -> Result<(), String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::rename_provider(&connection, provider_id.trim(), name.trim())
+}
+
+#[tauri::command]
+fn delete_provider(state: State<'_, AppState>, provider_id: String) -> Result<(), String> {
+    let provider_id = provider_id.trim();
+    {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        let provider = db::get_provider_by_id(&connection, provider_id)?;
+        if provider.is_builtin {
+            return Err("内置供应商不能删除".to_string());
+        }
+    }
+    // Remove the external credential first so a keyring failure leaves the profile
+    // available for a retry. Deletion is idempotent when no credential exists.
+    secrets::save_api_key(provider_id, None)?;
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::delete_provider(&connection, provider_id)
 }
 
 #[tauri::command]
@@ -1169,6 +1262,7 @@ async fn translate_impl(
             cancel: &cancellation,
             mode: TranslationMode::Paragraph,
             thinking_effort: &prepared.provider.thinking_effort,
+            api_protocol: prepared.provider.api_protocol,
         },
         |content| {
             if learning_mode {
@@ -1389,6 +1483,7 @@ fn prepare_translation_internal(
         base_url: &provider.base_url,
         provider_id: &provider.id,
         model_id: &provider.model_id,
+        api_protocol: provider.api_protocol,
         prompt_id: &prompt.id,
         prompt_version: prompt.version,
         glossary_version,
@@ -1464,6 +1559,7 @@ struct CacheKeyInput<'a> {
     base_url: &'a str,
     provider_id: &'a str,
     model_id: &'a str,
+    api_protocol: ApiProtocol,
     prompt_id: &'a str,
     prompt_version: i64,
     glossary_version: i64,
@@ -1488,10 +1584,11 @@ fn make_learning_cache_key(input: &CacheKeyInput<'_>) -> String {
 
 fn cache_key_material(input: &CacheKeyInput<'_>) -> String {
     format!(
-        "base={}\nprovider={}\nmodel={}\nprompt={}@{}\nglossary={}\nsource_language={}\ntarget_language={}\nsource={}",
+        "base={}\nprovider={}\nmodel={}\napi_protocol={}\nprompt={}@{}\nglossary={}\nsource_language={}\ntarget_language={}\nsource={}",
         input.base_url,
         input.provider_id,
         input.model_id,
+        input.api_protocol.as_str(),
         input.prompt_id,
         input.prompt_version,
         input.glossary_version,
@@ -1508,10 +1605,11 @@ fn hash_cache_key(canonical: &str) -> String {
 
 fn make_pdf_cache_key(input: &CacheKeyInput<'_>, context: &PdfPromptContext) -> String {
     let canonical = format!(
-        "base={}\nprovider={}\nmodel={}\nprompt={}@{}\nglossary={}\nmode={}\ncontext_schema={}\ncontext={}\nwindow_before={}\nwindow_after={}\ntask_terms={}\nabbreviations={}\nengine_constraints={}\nsource_language={}\ntarget_language={}\nsource={}",
+        "base={}\nprovider={}\nmodel={}\napi_protocol={}\nprompt={}@{}\nglossary={}\nmode={}\ncontext_schema={}\ncontext={}\nwindow_before={}\nwindow_after={}\ntask_terms={}\nabbreviations={}\nengine_constraints={}\nsource_language={}\ntarget_language={}\nsource={}",
         input.base_url,
         input.provider_id,
         input.model_id,
+        input.api_protocol.as_str(),
         input.prompt_id,
         input.prompt_version,
         input.glossary_version,
@@ -1904,7 +2002,11 @@ fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_default_prompt(state: State<'_, AppState>, id: String) -> Result<(), String> {
+fn set_default_prompt(
+    state: State<'_, AppState>,
+    provider_id: String,
+    id: String,
+) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err("Prompt ID 不能为空".to_string());
     }
@@ -1912,7 +2014,7 @@ fn set_default_prompt(state: State<'_, AppState>, id: String) -> Result<(), Stri
         .database
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::set_default_prompt(&connection, id.trim())
+    db::set_default_prompt(&connection, provider_id.trim(), id.trim())
 }
 
 #[tauri::command]
@@ -2241,19 +2343,21 @@ struct AiDictionaryCacheKeyInput<'a> {
     provider_id: &'a str,
     base_url: &'a str,
     model_id: &'a str,
+    api_protocol: ApiProtocol,
     thinking_effort: &'a str,
     protocol_version: &'a str,
 }
 
 fn make_ai_dictionary_cache_key(input: &AiDictionaryCacheKeyInput<'_>) -> String {
     let canonical = format!(
-        "word={}\nsource_language={}\ndefinition_language={}\nprovider={}\nbase_url={}\nmodel={}\nthinking={}\nprotocol={}",
+        "word={}\nsource_language={}\ndefinition_language={}\nprovider={}\nbase_url={}\nmodel={}\napi_protocol={}\nthinking={}\nprotocol={}",
         input.normalized_word,
         input.source_language,
         input.definition_language,
         input.provider_id,
         input.base_url,
         input.model_id,
+        input.api_protocol.as_str(),
         input.thinking_effort,
         input.protocol_version,
     );
@@ -2289,6 +2393,7 @@ async fn query_ai_dictionary(
         provider_id: &provider.id,
         base_url: &provider.base_url,
         model_id: &provider.model_id,
+        api_protocol: provider.api_protocol,
         thinking_effort: provider.thinking_effort.as_str(),
         protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
     });
@@ -2350,6 +2455,7 @@ async fn query_ai_dictionary(
             cancel: &cancellation,
             mode: TranslationMode::Dictionary,
             thinking_effort: &provider.thinking_effort,
+            api_protocol: provider.api_protocol,
         },
         |_: String| Ok(()),
     )
@@ -2445,6 +2551,7 @@ fn decode_ai_dictionary_cache_record(
         || record.base_url != provider.base_url
         || record.model_id != provider.model_id
         || record.thinking_effort != provider.thinking_effort.as_str()
+        || record.api_protocol != provider.api_protocol.as_str()
         || record.protocol_version != AI_DICTIONARY_PROTOCOL_VERSION
     {
         return Err("AI 词典缓存身份不匹配".to_string());
@@ -3178,7 +3285,13 @@ async fn generate_word_example_impl(
                 .database
                 .lock()
                 .map_err(|_| "应用数据库锁已损坏".to_string())?;
-            match db::find_word_ai_cache(&connection, &prepared.cache_key) {
+            match db::find_word_ai_cache(
+                &connection,
+                &prepared.cache_key,
+                &prepared.provider,
+                &prepared.prompt.id,
+                prepared.glossary_version,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     diagnostics::error(format!(
@@ -3253,6 +3366,7 @@ async fn generate_word_example_impl(
             cancel: &cancellation,
             mode: TranslationMode::WordExample,
             thinking_effort: &prepared.provider.thinking_effort,
+            api_protocol: prepared.provider.api_protocol,
         },
         |content| {
             for delta in parser.push(&content)? {
@@ -3409,6 +3523,7 @@ fn prepare_word_example(
                 provider_id: &provider.id,
                 base_url: &provider.base_url,
                 model_id: &provider.model_id,
+                api_protocol: provider.api_protocol,
                 thinking_effort: provider.thinking_effort.as_str(),
                 protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
             });
@@ -3470,6 +3585,7 @@ fn prepare_word_example(
         base_url: &provider.base_url,
         provider_id: &provider.id,
         model_id: &provider.model_id,
+        api_protocol: provider.api_protocol,
         prompt_id: &prompt.id,
         prompt_version: prompt.version,
         glossary_version,
@@ -3524,6 +3640,7 @@ struct WordAiCacheKeyInput<'a> {
     base_url: &'a str,
     provider_id: &'a str,
     model_id: &'a str,
+    api_protocol: ApiProtocol,
     prompt_id: &'a str,
     prompt_version: i64,
     glossary_version: i64,
@@ -3537,10 +3654,11 @@ struct WordAiCacheKeyInput<'a> {
 
 fn make_word_ai_cache_key(input: &WordAiCacheKeyInput<'_>) -> String {
     let canonical = format!(
-        "base={}\nprovider={}\nmodel={}\nprompt={}@{}\nglossary={}\nexample={}\nsource={}\nword={}\ncanonical={}\ntarget_language={}\nprotocol={}",
+        "base={}\nprovider={}\nmodel={}\napi_protocol={}\nprompt={}@{}\nglossary={}\nexample={}\nsource={}\nword={}\ncanonical={}\ntarget_language={}\nprotocol={}",
         input.base_url,
         input.provider_id,
         input.model_id,
+        input.api_protocol.as_str(),
         input.prompt_id,
         input.prompt_version,
         input.glossary_version,
@@ -3853,7 +3971,7 @@ mod tests {
         make_pdf_cache_key, make_word_ai_cache_key, parse_ai_dictionary_protocol,
         unregister_request,
     };
-    use crate::contracts::GlossaryTerm;
+    use crate::contracts::{ApiProtocol, GlossaryTerm};
     use crate::translation_core::TranslationMode;
     use rusqlite::Connection;
     use serde_json::json;
@@ -3865,6 +3983,7 @@ mod tests {
             base_url: "https://example.com/v1",
             provider_id: "default",
             model_id: "model-a",
+            api_protocol: ApiProtocol::ChatCompletions,
             prompt_id: "prompt",
             prompt_version: 1,
             glossary_version: 1,
@@ -3893,6 +4012,7 @@ mod tests {
             base_url: "https://example.com/v1",
             provider_id: "default",
             model_id: "model-a",
+            api_protocol: ApiProtocol::ChatCompletions,
             prompt_id: "prompt",
             prompt_version: 1,
             glossary_version: 1,
@@ -3909,6 +4029,7 @@ mod tests {
             base_url: "https://example.com/v1",
             provider_id: "default",
             model_id: "model-a",
+            api_protocol: ApiProtocol::ChatCompletions,
             prompt_id: "prompt",
             prompt_version: 1,
             glossary_version: 1,
@@ -3946,6 +4067,7 @@ mod tests {
             base_url: "https://example.com/v1",
             provider_id: "default",
             model_id: "model-a",
+            api_protocol: ApiProtocol::ChatCompletions,
             prompt_id: "prompt",
             prompt_version: 1,
             glossary_version: 1,
@@ -4021,6 +4143,7 @@ mod tests {
             provider_id: "provider-a",
             base_url: "https://example.com/v1",
             model_id: "model-a",
+            api_protocol: ApiProtocol::ChatCompletions,
             thinking_effort: "none",
             protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
         };

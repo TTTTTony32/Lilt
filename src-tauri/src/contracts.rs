@@ -134,6 +134,30 @@ impl ThinkingEffort {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiProtocol {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+impl ApiProtocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
+
+    pub(crate) fn from_storage(value: &str) -> Self {
+        match value {
+            "responses" => Self::Responses,
+            _ => Self::ChatCompletions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SelectionTrigger {
@@ -224,7 +248,9 @@ pub struct ProviderConfig {
     pub model_id: String,
     pub prompt_id: String,
     pub thinking_effort: ThinkingEffort,
+    pub api_protocol: ApiProtocol,
     pub has_api_key: bool,
+    pub is_builtin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,6 +362,7 @@ pub struct CacheStats {
 pub struct AppSnapshot {
     pub settings: AppSettings,
     pub provider: ProviderConfig,
+    pub providers: Vec<ProviderConfig>,
     pub models: Vec<ModelInfo>,
     pub prompts: Vec<Prompt>,
     pub glossary_terms: Vec<GlossaryTerm>,
@@ -728,6 +755,8 @@ pub struct ProviderRecord {
     pub model_id: String,
     pub prompt_id: String,
     pub thinking_effort: ThinkingEffort,
+    pub api_protocol: ApiProtocol,
+    pub is_builtin: bool,
 }
 
 #[derive(Debug, Clone)]

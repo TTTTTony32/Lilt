@@ -34,6 +34,7 @@ import {
 } from "./lib/download-activity";
 import {
   DEFAULT_SNAPSHOT,
+  type ApiProtocol,
   type AppSettings,
   type AppSnapshot,
   type AppTab,
@@ -175,9 +176,12 @@ type SettingsNavigationTarget = {
 const SETTINGS_CHROME_HEIGHT = 76;
 
 interface SettingsDraft {
+  providerId: string;
+  providerName: string;
   baseUrl: string;
   modelId: string;
   thinkingEffort: ThinkingEffort;
+  apiProtocol: ApiProtocol;
   apiKey: string;
   settings: AppSettings;
   selectionMode: AppSettings["selectionMode"];
@@ -186,9 +190,12 @@ interface SettingsDraft {
 
 function createSettingsDraft(snapshot: AppSnapshot): SettingsDraft {
   return {
+    providerId: snapshot.provider.id,
+    providerName: snapshot.provider.name,
     baseUrl: snapshot.provider.baseUrl,
     modelId: snapshot.provider.modelId,
     thinkingEffort: snapshot.provider.thinkingEffort ?? "none",
+    apiProtocol: snapshot.provider.apiProtocol,
     apiKey: "",
     settings: snapshot.settings,
     selectionMode: snapshot.settings.selectionMode,
@@ -2778,11 +2785,13 @@ function HistoryRow({ item }: { item: HistoryEntry }) {
 
 function PromptManager({
   prompts,
+  providerId,
   currentPromptId,
   onChanged,
   onToast,
 }: {
   prompts: Prompt[];
+  providerId: string;
   currentPromptId: string;
   onChanged: () => Promise<void>;
   onToast: ShowToast;
@@ -2968,7 +2977,7 @@ function PromptManager({
 
   const setDefault = async (prompt: Prompt) => {
     try {
-      await invokeCommand("set_default_prompt", { id: prompt.id });
+      await invokeCommand("set_default_prompt", { providerId, id: prompt.id });
       await onChanged();
       onToast(`已将${prompt.name}设为默认提示词`);
     } catch (reason) {
@@ -3343,9 +3352,13 @@ function SettingsView({
   const [resourceModalOpen, setResourceModalOpen] = useState(false);
   const [resourceModalMounted, setResourceModalMounted] = useState(false);
   const resourceModalReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [providerSwitching, setProviderSwitching] = useState(false);
+  const [providerId, setProviderId] = useState(snapshot.provider.id);
+  const [providerName, setProviderName] = useState(snapshot.provider.name);
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
   const [modelId, setModelId] = useState(snapshot.provider.modelId);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
+  const [apiProtocol, setApiProtocol] = useState<ApiProtocol>(snapshot.provider.apiProtocol);
   const [availableModels, setAvailableModels] = useState<ModelInfo[] | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [settings, setSettings] = useState<AppSettings>(snapshot.settings);
@@ -3360,54 +3373,64 @@ function SettingsView({
   const saveTimerRef = useRef<number | null>(null);
   const saveVersionRef = useRef(0);
   const savingRef = useRef(false);
+  const savePromiseRef = useRef<Promise<void> | null>(null);
   const disposedRef = useRef(false);
   const saveDraft = useCallback(async (draft: SettingsDraft, version: number) => {
-    if (savingRef.current) return;
+    if (savingRef.current) return savePromiseRef.current ?? Promise.resolve();
     savingRef.current = true;
-    try {
-      const shortcut = draft.selectionShortcut.trim();
-      if (!draft.modelId.trim()) throw new Error("Model ID 不能为空");
-      if (!shortcut) throw new Error("快捷键不能为空");
-      await invokeCommand("save_provider_config", {
-        baseUrl: draft.baseUrl,
-        modelId: draft.modelId,
-        thinkingEffort: draft.thinkingEffort,
-        apiKey: draft.apiKey || null,
-      });
-      await invokeCommand("save_app_settings", {
-        historyRetention: draft.settings.historyRetention,
-        cacheEnabled: draft.settings.cacheEnabled,
-        cacheMaxBytes: draft.settings.cacheMaxBytes,
-        wordAiCacheEnabled: draft.settings.wordAiCacheEnabled,
-        paragraphExampleLookupEnabled: draft.settings.paragraphExampleLookupEnabled,
-        pdfPreflightPageLimit: draft.settings.pdfPreflightPageLimit,
-      });
-      await invokeCommand("configure_selection", {
-        mode: draft.selectionMode,
-        shortcut,
-      });
-      const rawStatus = await invokeCommand<unknown>("get_selection_status");
-      const nextStatus = decodeSelectionStatus(rawStatus);
-      if (!disposedRef.current && nextStatus) setSelectionStatus(nextStatus);
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      if (version === saveVersionRef.current) {
-        const nextDraft = { ...settingsDraftRef.current, apiKey: "" };
-        settingsDraftRef.current = nextDraft;
-        if (!disposedRef.current) {
-          setApiKey("");
+    const savePromise = (async () => {
+      try {
+        const shortcut = draft.selectionShortcut.trim();
+        if (!draft.modelId.trim()) throw new Error("Model ID 不能为空");
+        if (!shortcut) throw new Error("快捷键不能为空");
+        await invokeCommand("save_provider_config", {
+          providerId: draft.providerId,
+          name: draft.providerName,
+          baseUrl: draft.baseUrl,
+          modelId: draft.modelId,
+          apiProtocol: draft.apiProtocol,
+          thinkingEffort: draft.thinkingEffort,
+          apiKey: draft.apiKey || null,
+        });
+        await invokeCommand("save_app_settings", {
+          historyRetention: draft.settings.historyRetention,
+          cacheEnabled: draft.settings.cacheEnabled,
+          cacheMaxBytes: draft.settings.cacheMaxBytes,
+          wordAiCacheEnabled: draft.settings.wordAiCacheEnabled,
+          paragraphExampleLookupEnabled: draft.settings.paragraphExampleLookupEnabled,
+          pdfPreflightPageLimit: draft.settings.pdfPreflightPageLimit,
+        });
+        await invokeCommand("configure_selection", {
+          mode: draft.selectionMode,
+          shortcut,
+        });
+        const rawStatus = await invokeCommand<unknown>("get_selection_status");
+        const nextStatus = decodeSelectionStatus(rawStatus);
+        if (!disposedRef.current && nextStatus) setSelectionStatus(nextStatus);
+        const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+        if (version === saveVersionRef.current && next.provider.id === draft.providerId) {
+          const nextDraft = { ...settingsDraftRef.current, apiKey: "" };
+          settingsDraftRef.current = nextDraft;
+          if (!disposedRef.current) setApiKey("");
+          onSaved(next);
         }
-        onSaved(next);
+      } catch (reason) {
+        if (version === saveVersionRef.current && !disposedRef.current) {
+          onToast(describeError(reason, "设置自动保存失败"), "error");
+        }
+      } finally {
+        savingRef.current = false;
+        if (version !== saveVersionRef.current) {
+          if (saveTimerRef.current !== null) {
+            window.clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+          }
+          void saveDraft(settingsDraftRef.current, saveVersionRef.current);
+        }
       }
-    } catch (reason) {
-      if (version === saveVersionRef.current && !disposedRef.current) {
-        onToast(describeError(reason, "设置自动保存失败"), "error");
-      }
-    } finally {
-      savingRef.current = false;
-      if (version !== saveVersionRef.current) {
-        void saveDraft(settingsDraftRef.current, saveVersionRef.current);
-      }
-    }
+    })();
+    savePromiseRef.current = savePromise;
+    return savePromise;
   }, [onSaved, onToast]);
 
   const scheduleSave = useCallback((nextDraft: SettingsDraft) => {
@@ -3417,16 +3440,21 @@ function SettingsView({
     const version = saveVersionRef.current;
     saveTimerRef.current = window.setTimeout(() => {
       saveTimerRef.current = null;
-      void saveDraft(nextDraft, version);
+      // A provider may be switched while this timer is pending. Resolve the
+      // profile from the latest draft when the debounce expires.
+      void saveDraft(settingsDraftRef.current, version);
     }, 650);
   }, [saveDraft]);
 
   const updateDraft = useCallback((update: (current: SettingsDraft) => SettingsDraft) => {
     const nextDraft = update(settingsDraftRef.current);
     settingsDraftRef.current = nextDraft;
+    setProviderId(nextDraft.providerId);
+    setProviderName(nextDraft.providerName);
     setBaseUrl(nextDraft.baseUrl);
     setModelId(nextDraft.modelId);
     setThinkingEffort(nextDraft.thinkingEffort);
+    setApiProtocol(nextDraft.apiProtocol);
     setApiKey(nextDraft.apiKey);
     setSettings(nextDraft.settings);
     setSelectionMode(nextDraft.selectionMode);
@@ -3434,9 +3462,100 @@ function SettingsView({
     scheduleSave(nextDraft);
   }, [scheduleSave]);
 
-  const updateProviderDraft = useCallback((patch: Partial<Pick<SettingsDraft, "baseUrl" | "modelId" | "thinkingEffort" | "apiKey">>) => {
+  const updateProviderDraft = useCallback((patch: Partial<Pick<SettingsDraft, "providerName" | "baseUrl" | "modelId" | "thinkingEffort" | "apiProtocol" | "apiKey">>) => {
     updateDraft((current) => ({ ...current, ...patch }));
   }, [updateDraft]);
+
+  const flushPendingSave = useCallback(async () => {
+    while (true) {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (savingRef.current && savePromiseRef.current) {
+        await savePromiseRef.current;
+        continue;
+      }
+      const version = saveVersionRef.current;
+      await saveDraft(settingsDraftRef.current, version);
+      if (version === saveVersionRef.current && !savingRef.current && saveTimerRef.current === null) return;
+    }
+  }, [saveDraft]);
+
+  const applyProviderSnapshot = useCallback((next: AppSnapshot) => {
+    const nextDraft = createSettingsDraft(next);
+    const currentDraft = settingsDraftRef.current;
+    nextDraft.settings = {
+      ...next.settings,
+      historyRetention: currentDraft.settings.historyRetention,
+      cacheEnabled: currentDraft.settings.cacheEnabled,
+      cacheMaxBytes: currentDraft.settings.cacheMaxBytes,
+      wordAiCacheEnabled: currentDraft.settings.wordAiCacheEnabled,
+      paragraphExampleLookupEnabled: currentDraft.settings.paragraphExampleLookupEnabled,
+      pdfPreflightPageLimit: currentDraft.settings.pdfPreflightPageLimit,
+    };
+    nextDraft.selectionMode = currentDraft.selectionMode;
+    nextDraft.selectionShortcut = currentDraft.selectionShortcut;
+    settingsDraftRef.current = nextDraft;
+    setProviderId(next.provider.id);
+    setProviderName(next.provider.name);
+    setBaseUrl(next.provider.baseUrl);
+    setModelId(next.provider.modelId);
+    setThinkingEffort(next.provider.thinkingEffort ?? "none");
+    setApiProtocol(next.provider.apiProtocol);
+    setApiKey("");
+    setAvailableModels(next.models.length > 0 ? next.models : null);
+    setSettings(nextDraft.settings);
+    setSelectionMode(nextDraft.selectionMode);
+    setSelectionShortcut(nextDraft.selectionShortcut);
+    onSaved(next);
+  }, [onSaved]);
+
+  const switchProvider = useCallback(async (nextProviderId: string) => {
+    if (nextProviderId === settingsDraftRef.current.providerId || providerSwitching) return;
+    setProviderSwitching(true);
+    try {
+      await flushPendingSave();
+      await invokeCommand("set_active_provider", { providerId: nextProviderId });
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      applyProviderSnapshot(next);
+    } catch (reason) {
+      onToast(describeError(reason, "切换供应商失败"), "error");
+    } finally {
+      setProviderSwitching(false);
+    }
+  }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching]);
+
+  const createProvider = useCallback(async () => {
+    if (providerSwitching) return;
+    setProviderSwitching(true);
+    try {
+      await flushPendingSave();
+      await invokeCommand("create_provider");
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      applyProviderSnapshot(next);
+    } catch (reason) {
+      onToast(describeError(reason, "新增供应商失败"), "error");
+    } finally {
+      setProviderSwitching(false);
+    }
+  }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching]);
+
+  const deleteProvider = useCallback(async () => {
+    if (providerSwitching || snapshot.provider.isBuiltin) return;
+    if (!window.confirm("删除当前自定义供应商？其配置和模型列表将被移除")) return;
+    setProviderSwitching(true);
+    try {
+      await flushPendingSave();
+      await invokeCommand("delete_provider", { providerId });
+      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      applyProviderSnapshot(next);
+    } catch (reason) {
+      onToast(describeError(reason, "删除供应商失败"), "error");
+    } finally {
+      setProviderSwitching(false);
+    }
+  }, [applyProviderSnapshot, flushPendingSave, onToast, providerId, providerSwitching, snapshot.provider.isBuiltin]);
 
   const updateAppSettingsDraft = useCallback((patch: Partial<AppSettings>) => {
     updateDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
@@ -3664,17 +3783,21 @@ function SettingsView({
   }, [onToast, pdfEngine.error, pdfEngine.eventsError, resourceModal]);
 
   const fetchModels = async () => {
+    const requestedProviderId = providerId;
     try {
       const models = await invokeCommand<ModelInfo[]>("fetch_models", {
+        providerId: requestedProviderId,
         baseUrl: baseUrl.trim() || null,
         apiKey: apiKey.trim() || null,
       });
+      if (requestedProviderId !== settingsDraftRef.current.providerId) return;
       setAvailableModels(models.length > 0 ? models : null);
       if (models.length > 0 && !models.some((model) => model.id === modelId)) {
         updateProviderDraft({ modelId: models[0]?.id ?? modelId });
       }
       onToast(`模型列表已更新，共 ${models.length} 个模型`);
     } catch (reason) {
+      if (requestedProviderId !== settingsDraftRef.current.providerId) return;
       setAvailableModels(null);
       onToast(describeError(reason, "模型列表读取失败，可手动填写 Model ID"), "error");
     }
@@ -3734,20 +3857,35 @@ function SettingsView({
       </aside>
 
       <div className="settings-content">
-        <div className="settings-content-scroll" ref={settingsScrollRef}>
+        <div className="settings-content-scroll" ref={settingsScrollRef} inert={providerSwitching}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
-          <div className="card-heading"><div><strong>LLM提供商</strong></div></div>
+          <div className="card-heading"><div><strong>LLM 提供商</strong></div></div>
           <div className="form-grid">
-            <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" /></label>
-            {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" /></label>}
-            <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => updateProviderDraft({ thinkingEffort: value as ThinkingEffort })} />
-            <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => updateProviderDraft({ apiKey: event.target.value })} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" /></label>
+            <SettingsSelectField
+              label="供应商"
+              id="settings-provider-id"
+              ariaLabel="当前供应商"
+              value={providerId}
+              options={snapshot.providers.map((provider) => ({ value: provider.id, label: provider.name }))}
+              onChange={(value) => void switchProvider(value)}
+              disabled={providerSwitching}
+            />
+            <div className="settings-provider-actions">
+              <button className="secondary-button" type="button" onClick={() => void createProvider()} disabled={providerSwitching}>新增供应商</button>
+              <button className="secondary-button" type="button" onClick={() => void deleteProvider()} disabled={providerSwitching || snapshot.provider.isBuiltin}>删除自定义供应商</button>
+            </div>
+            <label className="wide-field">供应商名称<input value={providerName} onChange={(event) => updateProviderDraft({ providerName: event.target.value })} disabled={snapshot.provider.isBuiltin || providerSwitching} /></label>
+            <label className="wide-field">Base URL<input value={baseUrl} onChange={(event) => updateProviderDraft({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" disabled={providerSwitching} /></label>
+            {availableModels ? <SettingsSelectField label="Model ID" id="settings-model-id" ariaLabel="模型 ID" value={modelId} options={modelOptions} onChange={(value) => updateProviderDraft({ modelId: value })} disabled={providerSwitching} /> : <label>Model ID<input value={modelId} onChange={(event) => updateProviderDraft({ modelId: event.target.value })} placeholder="gpt-4o-mini" disabled={providerSwitching} /></label>}
+            <SettingsSelectField label="API 协议" id="settings-api-protocol" ariaLabel="API 协议" value={apiProtocol} options={[{ value: "chat_completions", label: "Chat Completions" }, { value: "responses", label: "Responses" }]} onChange={(value) => updateProviderDraft({ apiProtocol: value as ApiProtocol })} disabled={providerSwitching} />
+            <SettingsSelectField label="思考强度" id="settings-thinking-effort" ariaLabel="思考强度" value={thinkingEffort} options={[{ value: "none", label: "none" }, { value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "high", label: "high" }]} onChange={(value) => updateProviderDraft({ thinkingEffort: value as ThinkingEffort })} disabled={providerSwitching} />
+            <label className="wide-field">API Key<input type="password" value={apiKey} onChange={(event) => updateProviderDraft({ apiKey: event.target.value })} placeholder={snapshot.provider.hasApiKey ? "已保存，留空表示不修改" : "保存在 Windows 凭据管理器"} autoComplete="off" disabled={providerSwitching} /></label>
           </div>
-          <div className="form-actions settings-actions"><button className="secondary-button" type="button" onClick={() => void fetchModels()}>读取模型</button></div>
+          <div className="form-actions settings-actions"><button className="secondary-button" type="button" onClick={() => void fetchModels()} disabled={providerSwitching}>读取模型</button></div>
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>
-            <PromptManager prompts={snapshot.prompts} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} onToast={onToast} />
+            <PromptManager prompts={snapshot.prompts} providerId={providerId} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} onToast={onToast} />
           </div>
 
         <div className="settings-section" id="settings-section-selection" data-settings-section="selection" ref={(element) => { settingsSectionRefs.current.selection = element; }}>

@@ -1,5 +1,5 @@
 use crate::{
-    contracts::{ModelInfo, ThinkingEffort},
+    contracts::{ApiProtocol, ModelInfo, ThinkingEffort},
     diagnostics,
 };
 use futures_util::StreamExt;
@@ -53,6 +53,7 @@ pub struct ChatStreamRequest<'a> {
     pub cancel: &'a CancellationToken,
     pub operation: &'a str,
     pub thinking_effort: &'a ThinkingEffort,
+    pub api_protocol: ApiProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,17 +144,23 @@ where
     F: FnMut(String) -> Result<(), ProviderError>,
     A: FnMut(ProviderStreamActivity),
 {
-    let endpoint = endpoint(request.base_url, "chat/completions")?;
+    let route = match request.api_protocol {
+        ApiProtocol::ChatCompletions => "chat/completions",
+        ApiProtocol::Responses => "responses",
+    };
+    let endpoint = endpoint(request.base_url, route)?;
     let mut attempt = 0;
     loop {
         let mut started = false;
         diagnostics::info(format!(
-            "provider.{}.start request_id={} attempt={} origin={} route=/chat/completions model={}",
+            "provider.{}.start request_id={} attempt={} origin={} route=/{} model={} protocol={}",
             request.operation,
             request.request_id,
             attempt,
             safe_endpoint_origin(&endpoint),
-            request.model_id
+            route,
+            request.model_id,
+            request.api_protocol.as_str()
         ));
         match stream_once(
             &request,
@@ -209,7 +216,7 @@ async fn stream_once(
             .bearer_auth(request.api_key)
             .header("Accept", "text/event-stream")
             .timeout(TRANSLATION_REQUEST_TIMEOUT)
-            .json(&chat_completion_payload(request))
+            .json(&request_payload(request))
             .send() => result.map_err(|error| request_error("翻译", error))?,
     };
     diagnostics::info(format!(
@@ -221,9 +228,11 @@ async fn stream_once(
     ensure_success(&response)?;
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut line_buffer = Vec::new();
+    let mut pending_event = PendingSseEvent::default();
     let mut translated = String::new();
     let mut token_usage = None;
+    let mut response_completed = false;
     loop {
         let chunk = tokio::select! {
             _ = request.cancel.cancelled() => return Err(ProviderError::Cancelled),
@@ -233,46 +242,54 @@ async fn stream_once(
         };
         let Some(chunk) = chunk else { break };
         let bytes = chunk.map_err(|error| ProviderError::Network(error.to_string()))?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-        while let Some(position) = buffer.find('\n') {
-            let line = buffer[..position].trim_end_matches('\r').to_string();
-            buffer.drain(..=position);
-            let parsed = parse_sse_details(&line)?;
-            if let Some(usage) = parsed.token_usage {
-                token_usage = Some(usage);
-            }
-            for activity in parsed.activities {
-                *started = true;
-                on_activity(activity);
-            }
-            if let Some(content) = parsed.content {
-                if content.is_empty() {
-                    continue;
-                }
-                *started = true;
-                on_activity(ProviderStreamActivity::Content);
-                translated.push_str(&content);
-                on_delta(content)?;
+        for byte in bytes {
+            if byte == b'\n' {
+                consume_sse_line(
+                    &line_buffer,
+                    &mut pending_event,
+                    request,
+                    started,
+                    &mut translated,
+                    &mut token_usage,
+                    &mut response_completed,
+                    on_delta,
+                    on_activity,
+                )?;
+                line_buffer.clear();
+            } else {
+                line_buffer.push(byte);
             }
         }
     }
-    if !buffer.trim().is_empty() {
-        let parsed = parse_sse_details(buffer.trim())?;
-        if let Some(usage) = parsed.token_usage {
-            token_usage = Some(usage);
-        }
-        for activity in parsed.activities {
-            *started = true;
-            on_activity(activity);
-        }
-        if let Some(content) = parsed.content {
-            if !content.is_empty() {
-                *started = true;
-                on_activity(ProviderStreamActivity::Content);
-                translated.push_str(&content);
-                on_delta(content)?;
-            }
-        }
+    if !line_buffer.is_empty() {
+        consume_sse_line(
+            &line_buffer,
+            &mut pending_event,
+            request,
+            started,
+            &mut translated,
+            &mut token_usage,
+            &mut response_completed,
+            on_delta,
+            on_activity,
+        )?;
+    }
+    if !pending_event.data.is_empty() {
+        dispatch_sse_event(
+            &mut pending_event,
+            request,
+            started,
+            &mut translated,
+            &mut token_usage,
+            &mut response_completed,
+            on_delta,
+            on_activity,
+        )?;
+    }
+    if request.api_protocol == ApiProtocol::Responses && !response_completed {
+        return Err(ProviderError::Protocol(
+            "Responses 流在 response.completed 前结束".to_string(),
+        ));
     }
     if translated.is_empty() {
         return Err(ProviderError::Protocol("流式响应没有返回译文".to_string()));
@@ -283,7 +300,19 @@ async fn stream_once(
     })
 }
 
-fn chat_completion_payload(request: &ChatStreamRequest<'_>) -> Value {
+fn request_payload(request: &ChatStreamRequest<'_>) -> Value {
+    if request.api_protocol == ApiProtocol::Responses {
+        let mut payload = json!({
+            "model": request.model_id,
+            "instructions": request.system_prompt,
+            "input": request.user_text,
+            "stream": true,
+        });
+        if request.thinking_effort.as_str() != "none" {
+            payload["reasoning"] = json!({ "effort": request.thinking_effort.as_str() });
+        }
+        return payload;
+    }
     json!({
         "model": request.model_id,
         "stream": true,
@@ -293,6 +322,248 @@ fn chat_completion_payload(request: &ChatStreamRequest<'_>) -> Value {
             { "role": "system", "content": request.system_prompt },
             { "role": "user", "content": request.user_text }
         ]
+    })
+}
+
+#[derive(Default)]
+struct PendingSseEvent {
+    event: Option<String>,
+    data: Vec<String>,
+}
+
+fn consume_sse_line(
+    bytes: &[u8],
+    pending: &mut PendingSseEvent,
+    request: &ChatStreamRequest<'_>,
+    started: &mut bool,
+    translated: &mut String,
+    token_usage: &mut Option<crate::pdf_protocol::TokenUsage>,
+    response_completed: &mut bool,
+    on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
+    on_activity: &mut impl FnMut(ProviderStreamActivity),
+) -> Result<(), ProviderError> {
+    let line = std::str::from_utf8(bytes)
+        .map_err(|error| ProviderError::Protocol(format!("SSE UTF-8 解析失败：{error}")))?
+        .trim_end_matches('\r');
+    if line.is_empty() {
+        return dispatch_sse_event(
+            pending,
+            request,
+            started,
+            translated,
+            token_usage,
+            response_completed,
+            on_delta,
+            on_activity,
+        );
+    }
+    if line.starts_with(':') {
+        return Ok(());
+    }
+    if let Some(event) = line.strip_prefix("event:") {
+        pending.event = Some(event.trim().to_string());
+    } else if let Some(data) = line.strip_prefix("data:") {
+        pending
+            .data
+            .push(data.strip_prefix(' ').unwrap_or(data).to_string());
+    }
+    Ok(())
+}
+
+fn dispatch_sse_event(
+    pending: &mut PendingSseEvent,
+    request: &ChatStreamRequest<'_>,
+    started: &mut bool,
+    translated: &mut String,
+    token_usage: &mut Option<crate::pdf_protocol::TokenUsage>,
+    response_completed: &mut bool,
+    on_delta: &mut impl FnMut(String) -> Result<(), ProviderError>,
+    on_activity: &mut impl FnMut(ProviderStreamActivity),
+) -> Result<(), ProviderError> {
+    if pending.data.is_empty() {
+        pending.event = None;
+        return Ok(());
+    }
+    let data = std::mem::take(&mut pending.data).join("\n");
+    let event_name = pending.event.take();
+    if request.api_protocol == ApiProtocol::ChatCompletions {
+        let parsed = parse_sse_details(&format!("data: {data}"))?;
+        if let Some(usage) = parsed.token_usage {
+            *token_usage = Some(usage);
+        }
+        for activity in parsed.activities {
+            *started = true;
+            on_activity(activity);
+        }
+        if let Some(content) = parsed.content.filter(|content| !content.is_empty()) {
+            *started = true;
+            on_activity(ProviderStreamActivity::Content);
+            translated.push_str(&content);
+            on_delta(content)?;
+        }
+        return Ok(());
+    }
+
+    if *response_completed {
+        return Err(ProviderError::Protocol(
+            "Responses 在 response.completed 后仍发送事件".to_string(),
+        ));
+    }
+    let parsed = parse_responses_event(event_name.as_deref(), &data)?;
+    for activity in parsed.activities {
+        *started = true;
+        on_activity(activity);
+    }
+    if let Some(usage) = parsed.token_usage {
+        *token_usage = Some(usage);
+    }
+    if let Some(content) = parsed.content.filter(|content| !content.is_empty()) {
+        *started = true;
+        on_activity(ProviderStreamActivity::Content);
+        translated.push_str(&content);
+        on_delta(content)?;
+    }
+    if let Some(error) = parsed.error {
+        return Err(ProviderError::Protocol(error));
+    }
+    if parsed.completed {
+        *response_completed = true;
+        if translated.is_empty() {
+            if let Some(content) = parsed
+                .completed_content
+                .filter(|content| !content.is_empty())
+            {
+                *started = true;
+                on_activity(ProviderStreamActivity::Content);
+                translated.push_str(&content);
+                on_delta(content)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ParsedResponsesEvent {
+    content: Option<String>,
+    completed_content: Option<String>,
+    token_usage: Option<crate::pdf_protocol::TokenUsage>,
+    activities: Vec<ProviderStreamActivity>,
+    completed: bool,
+    error: Option<String>,
+}
+
+fn parse_responses_event(
+    event_name: Option<&str>,
+    data: &str,
+) -> Result<ParsedResponsesEvent, ProviderError> {
+    let value: Value = serde_json::from_str(data)
+        .map_err(|error| ProviderError::Protocol(format!("Responses JSON 解析失败：{error}")))?;
+    let event_type = event_name
+        .or_else(|| value.get("type").and_then(Value::as_str))
+        .ok_or_else(|| ProviderError::Protocol("Responses 事件缺少 type".to_string()))?;
+    let mut parsed = ParsedResponsesEvent {
+        content: None,
+        completed_content: None,
+        token_usage: None,
+        activities: Vec::new(),
+        completed: false,
+        error: None,
+    };
+    match event_type {
+        "response.output_text.delta" => {
+            parsed.content = value
+                .get("delta")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if parsed.content.as_deref().unwrap_or_default().is_empty() {
+                return Err(ProviderError::Protocol(
+                    "Responses 文本增量缺少 delta".to_string(),
+                ));
+            }
+        }
+        "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+            if value
+                .get("delta")
+                .and_then(Value::as_str)
+                .is_some_and(|delta| !delta.is_empty())
+            {
+                parsed.activities.push(ProviderStreamActivity::Thinking);
+            }
+        }
+        "response.completed" => {
+            let response = value.get("response").unwrap_or(&value);
+            if let Some(status) = response.get("status").and_then(Value::as_str)
+                && status != "completed"
+            {
+                parsed.error = Some(format!("Responses 终态为 {status}"));
+            }
+            parsed.completed = true;
+            parsed.token_usage = response.get("usage").and_then(parse_responses_token_usage);
+            parsed.completed_content = response_output_text(response);
+        }
+        "response.failed" | "error" => {
+            let message = value
+                .pointer("/response/error/message")
+                .or_else(|| value.pointer("/error/message"))
+                .and_then(Value::as_str)
+                .unwrap_or("Provider 返回了失败事件");
+            parsed.error = Some(format!("Responses 失败：{message}"));
+        }
+        "response.incomplete" => {
+            let reason = value
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("响应不完整");
+            parsed.error = Some(format!("Responses 不完整：{reason}"));
+        }
+        "response.created"
+        | "response.in_progress"
+        | "response.queued"
+        | "response.output_item.added"
+        | "response.output_item.done"
+        | "response.content_part.added"
+        | "response.content_part.done"
+        | "response.output_text.done"
+        | "response.reasoning_text.done"
+        | "response.reasoning_summary_part.added"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_text.done" => {}
+        other => {
+            return Err(ProviderError::Protocol(format!(
+                "无法识别 Responses 事件：{other}"
+            )));
+        }
+    }
+    Ok(parsed)
+}
+
+fn response_output_text(response: &Value) -> Option<String> {
+    if let Some(text) = response.get("output_text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    let text = response
+        .get("output")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<String>();
+    Some(text)
+}
+
+fn parse_responses_token_usage(value: &Value) -> Option<crate::pdf_protocol::TokenUsage> {
+    let prompt_tokens = value.get("input_tokens").and_then(Value::as_u64);
+    let completion_tokens = value.get("output_tokens").and_then(Value::as_u64);
+    let total_tokens = value
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| Some(prompt_tokens?.saturating_add(completion_tokens?)));
+    Some(crate::pdf_protocol::TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
     })
 }
 
@@ -467,7 +738,7 @@ mod tests {
         parse_model_payload, parse_sse_details, parse_sse_line, stream_chat_completion_with_usage,
         stream_chat_completion_with_usage_and_activity,
     };
-    use crate::contracts::ThinkingEffort;
+    use crate::contracts::{ApiProtocol, ThinkingEffort};
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -591,6 +862,7 @@ mod tests {
                 cancel: &cancellation,
                 operation: "pdf_segment",
                 thinking_effort: &ThinkingEffort::None,
+                api_protocol: ApiProtocol::ChatCompletions,
             },
             |delta| {
                 deltas.push(delta);
@@ -648,6 +920,7 @@ mod tests {
                 cancel: &cancellation,
                 operation: "pdf_preflight",
                 thinking_effort: &ThinkingEffort::None,
+                api_protocol: ApiProtocol::ChatCompletions,
             },
             |delta| {
                 deltas.push(delta);
@@ -746,8 +1019,9 @@ mod tests {
                 cancel: &cancellation,
                 operation: "test",
                 thinking_effort: &effort,
+                api_protocol: ApiProtocol::ChatCompletions,
             };
-            let payload = super::chat_completion_payload(&request);
+            let payload = super::request_payload(&request);
             assert_eq!(payload["reasoning_effort"], effort.as_str());
         }
     }
