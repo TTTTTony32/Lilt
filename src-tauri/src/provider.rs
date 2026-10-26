@@ -542,7 +542,8 @@ fn parse_responses_event(
         | "response.reasoning_text.done"
         | "response.reasoning_summary_part.added"
         | "response.reasoning_summary_part.done"
-        | "response.reasoning_summary_text.done" => {}
+        | "response.reasoning_summary_text.done"
+        | "response.metadata" => {}
         other => {
             return Err(ProviderError::Protocol(format!(
                 "无法识别 Responses 事件：{other}"
@@ -938,6 +939,61 @@ mod tests {
             })
         );
         assert_eq!(deltas, vec!["本地", " Provider"]);
+    }
+
+    #[tokio::test]
+    async fn ignores_response_metadata_during_successful_responses_stream() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8192];
+            let bytes_read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]).to_lowercase();
+            assert!(request.starts_with("post /v1/responses"));
+
+            let body = concat!(
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+                "event: response.metadata\n",
+                "data: {\"type\":\"response.metadata\",\"metadata\":{\"source\":\"test\"},\"delta\":\"ignored\"}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"Hello\"}}\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut deltas = Vec::new();
+        let result = stream_chat_completion_with_usage(
+            ChatStreamRequest {
+                request_id: "responses-metadata-1",
+                base_url: &format!("http://{address}/v1"),
+                api_key: "test-key",
+                model_id: "stub-model",
+                system_prompt: "system",
+                user_text: "hello",
+                cancel: &cancellation,
+                operation: "test",
+                thinking_effort: &ThinkingEffort::None,
+                api_protocol: ApiProtocol::Responses,
+            },
+            |delta| {
+                deltas.push(delta);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(result.content, "Hello");
+        assert_eq!(deltas, vec!["Hello"]);
     }
 
     #[tokio::test]
