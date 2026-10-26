@@ -489,6 +489,17 @@ export interface PdfJobUiState {
   diagnostics?: PdfQualityDiagnostic[];
 }
 
+export interface PdfTranslationHistoryEntry {
+  taskId: string;
+  sourceFileName: string | null;
+  outputFileName: string;
+  outputPdf: string;
+  completedAtUnixMs: number | null;
+  outputMode: string | null;
+  pageCount: number | null;
+  legacy: boolean;
+}
+
 export interface PdfJobContextMetadata {
   preflight?: PdfPreflightState;
   documentContext?: DocumentContext | null;
@@ -859,6 +870,42 @@ export const decodePdfTranslationStartedResult = decodePdfTranslationStartResult
 
 export function decodePdfTranslationCancelResult(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+export function decodePdfTranslationHistory(value: unknown): PdfTranslationHistoryEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: PdfTranslationHistoryEntry[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) return null;
+    const taskId = nonEmptyString(readField(item, "taskId", "task_id"));
+    const sourceFileName = optionalStringField(item, "sourceFileName", "source_file_name");
+    const outputFileName = nonEmptyString(readField(item, "outputFileName", "output_file_name"));
+    const outputPdf = nonEmptyString(readField(item, "outputPdf", "output_pdf"));
+    const outputMode = optionalStringField(item, "outputMode", "output_mode");
+    const pageCount = optionalNonNegativeIntegerField(item, "pageCount", "page_count");
+    const completedAtRaw = readField(item, "completedAtUnixMs", "completed_at_unix_ms");
+    const completedAtUnixMs = completedAtRaw === undefined || completedAtRaw === null
+      ? null
+      : typeof completedAtRaw === "number" && Number.isSafeInteger(completedAtRaw) && completedAtRaw >= 0
+        ? completedAtRaw
+        : undefined;
+    if (
+      taskId === null || !sourceFileName.valid || !outputMode.valid || !pageCount.valid
+      || outputFileName === null || outputPdf === null || completedAtUnixMs === undefined
+      || typeof item.legacy !== "boolean"
+    ) return null;
+    entries.push({
+      taskId,
+      sourceFileName: sourceFileName.value,
+      outputFileName,
+      outputPdf,
+      completedAtUnixMs,
+      outputMode: outputMode.value,
+      pageCount: pageCount.value,
+      legacy: item.legacy,
+    });
+  }
+  return entries;
 }
 
 function decodePdfJobProgress(value: Record<string, unknown>): PdfJobProgress | null {

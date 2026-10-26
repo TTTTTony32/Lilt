@@ -15,18 +15,19 @@ use crate::{
     AppState, PdfPromptContext, PreparedTranslation, TranslationCore, TranslationMode,
     prepare_pdf_translation,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const WORKER_EXIT_GRACE_PERIOD: Duration = Duration::from_secs(3);
+const PDF_TRANSLATION_HISTORY_SCHEMA_VERSION: u32 = 1;
 
 type PreflightActivityHandler =
     Box<dyn FnMut(crate::provider::ProviderStreamActivity) + Send + 'static>;
@@ -192,6 +193,31 @@ struct PdfTranslationFinishedEvent {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfTranslationHistoryManifest {
+    schema_version: u32,
+    task_id: String,
+    source_file_name: String,
+    output_file: String,
+    output_mode: Option<String>,
+    page_count: Option<u32>,
+    completed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfTranslationHistoryEntry {
+    task_id: String,
+    source_file_name: Option<String>,
+    output_file_name: String,
+    output_pdf: String,
+    completed_at_unix_ms: Option<u64>,
+    output_mode: Option<String>,
+    page_count: Option<u32>,
+    legacy: bool,
+}
+
 #[tauri::command]
 pub async fn start_pdf_translation(
     app: AppHandle,
@@ -212,10 +238,18 @@ pub async fn start_pdf_translation(
     let source = validate_input_pdf(&file_path)?;
     let options = normalize_pdf_options(pdf_options)?;
     let command = crate::pdf_engine::build_worker_command(&state.data_dir)?;
+    let source_file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| is_pdf_basename(value))
+        .ok_or_else(|| "PDF 文件名无法识别".to_string())?
+        .to_string();
     let task_id = Uuid::new_v4().to_string();
     let job_dir = state.data_dir.join("pdf_jobs").join(&task_id);
-    let input_pdf = job_dir.join("input.pdf");
+    let input_dir = job_dir.join("input");
+    let input_pdf = input_dir.join(&source_file_name);
     let output_dir = job_dir.join("output");
+    fs::create_dir_all(&input_dir).map_err(|error| format!("创建 PDF 输入目录失败：{error}"))?;
     fs::create_dir_all(&output_dir).map_err(|error| format!("创建 PDF 任务目录失败：{error}"))?;
     if let Err(error) = fs::copy(source, &input_pdf) {
         let _ = fs::remove_dir_all(&job_dir);
@@ -273,6 +307,7 @@ pub async fn start_pdf_translation(
             session,
             cancellation,
             job_dir,
+            source_file_name,
             persistence,
         )
     });
@@ -301,6 +336,62 @@ pub fn cancel_pdf_translation(state: State<'_, AppState>, task_id: String) -> Re
         task_id.trim()
     ));
     Ok(true)
+}
+
+#[tauri::command]
+pub fn list_pdf_translation_history(
+    state: State<'_, AppState>,
+) -> Result<Vec<PdfTranslationHistoryEntry>, String> {
+    let history_dir = state.data_dir.join("pdf_jobs");
+    let data_root = state
+        .data_dir
+        .canonicalize()
+        .map_err(|error| format!("解析应用数据目录失败：{error}"))?;
+    let history_root = match history_dir.canonicalize() {
+        Ok(path) if path.is_dir() && path.starts_with(&data_root) => path,
+        Ok(_) => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("读取 PDF 翻译历史目录失败：{error}")),
+    };
+    let task_directories = fs::read_dir(&history_root)
+        .map_err(|error| format!("读取 PDF 翻译历史目录失败：{error}"))?;
+    let mut history = Vec::new();
+
+    for task_entry in task_directories.flatten() {
+        let Ok(file_type) = task_entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(task_id) = task_entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if Uuid::parse_str(&task_id).is_err() {
+            continue;
+        }
+        let task_dir = task_entry.path();
+        let Ok(canonical_task_dir) = task_dir.canonicalize() else {
+            continue;
+        };
+        if !canonical_task_dir.starts_with(&history_root) {
+            continue;
+        }
+
+        let item = read_pdf_translation_history_manifest(&canonical_task_dir, &task_id)
+            .or_else(|| recover_pdf_translation_history(&canonical_task_dir, &task_id));
+        if let Some(item) = item {
+            history.push(item);
+        }
+    }
+
+    history.sort_by(|left, right| {
+        right
+            .completed_at_unix_ms
+            .cmp(&left.completed_at_unix_ms)
+            .then_with(|| right.task_id.cmp(&left.task_id))
+    });
+    Ok(history)
 }
 
 pub(crate) fn shutdown_for_update(state: &AppState) {
@@ -337,6 +428,7 @@ fn run_job_loop(
     session: Arc<WorkerSession>,
     cancellation: CancellationToken,
     job_dir: PathBuf,
+    source_file_name: String,
     persistence: Arc<Mutex<Vec<PdfTranslationPersistence>>>,
 ) {
     let mut keep_output = false;
@@ -351,6 +443,7 @@ fn run_job_loop(
                     &session,
                     &cancellation,
                     &job_dir,
+                    &source_file_name,
                     &persistence,
                     &preflight_registry,
                     *message,
@@ -407,6 +500,7 @@ fn handle_worker_message(
     session: &Arc<WorkerSession>,
     cancellation: &CancellationToken,
     job_dir: &Path,
+    source_file_name: &str,
     persistence: &Arc<Mutex<Vec<PdfTranslationPersistence>>>,
     preflight_registry: &PreflightRegistry,
     message: WorkerToRustMessage,
@@ -641,6 +735,19 @@ fn handle_worker_message(
                     if record.cache_enabled && record.index_examples {
                         crate::schedule_example_index(state, &record.cache_key);
                     }
+                }
+                if let Err(error) = write_pdf_translation_history_manifest(
+                    job_dir,
+                    task_id,
+                    source_file_name,
+                    &finished.output_pdf,
+                    finished.output_mode.as_deref(),
+                    finished.page_count,
+                ) {
+                    diagnostics::warn(format!(
+                        "pdf.history.write_failed task_id={} reason={error}",
+                        task_id
+                    ));
                 }
                 let event = PdfTranslationFinishedEvent {
                     task_id: finished.task_id,
@@ -1611,6 +1718,10 @@ fn validate_input_pdf(file_path: &str) -> Result<&Path, String> {
 }
 
 fn validate_output_pdf(file_path: &str, job_dir: &Path) -> Result<(), String> {
+    validate_output_pdf_path(file_path, job_dir).map(|_| ())
+}
+
+fn validate_output_pdf_path(file_path: &str, job_dir: &Path) -> Result<PathBuf, String> {
     let path = Path::new(file_path);
     if !path
         .extension()
@@ -1628,7 +1739,200 @@ fn validate_output_pdf(file_path: &str, job_dir: &Path) -> Result<(), String> {
     if !output.starts_with(&root) || !output.is_file() {
         return Err("PDF 输出文件不在当前任务目录内".to_string());
     }
-    Ok(())
+    Ok(output)
+}
+
+fn is_pdf_basename(file_name: &str) -> bool {
+    let path = Path::new(file_name);
+    path.file_name().and_then(|value| value.to_str()) == Some(file_name)
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
+}
+
+fn write_pdf_translation_history_manifest(
+    task_dir: &Path,
+    task_id: &str,
+    source_file_name: &str,
+    output_pdf: &str,
+    output_mode: Option<&str>,
+    page_count: Option<u32>,
+) -> Result<(), String> {
+    if !is_pdf_basename(source_file_name) {
+        return Err("PDF 翻译历史中的源文件名无效".to_string());
+    }
+    let canonical_task_dir = task_dir
+        .canonicalize()
+        .map_err(|error| format!("解析 PDF 任务目录失败：{error}"))?;
+    let canonical_output = validate_output_pdf_path(output_pdf, &canonical_task_dir)?;
+    let relative_output = canonical_output
+        .strip_prefix(&canonical_task_dir)
+        .map_err(|_| "PDF 输出文件不在当前任务目录内".to_string())?;
+    let relative_output = relative_output.to_string_lossy().replace('\\', "/");
+    let completed_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("获取 PDF 翻译完成时间失败：{error}"))?
+        .as_millis();
+    let completed_at_unix_ms = u64::try_from(completed_at_unix_ms)
+        .map_err(|_| "PDF 翻译完成时间超出可保存范围".to_string())?;
+    let manifest = PdfTranslationHistoryManifest {
+        schema_version: PDF_TRANSLATION_HISTORY_SCHEMA_VERSION,
+        task_id: task_id.to_string(),
+        source_file_name: source_file_name.to_string(),
+        output_file: relative_output,
+        output_mode: output_mode.map(str::to_string),
+        page_count,
+        completed_at_unix_ms,
+    };
+    let serialized = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("序列化 PDF 翻译历史失败：{error}"))?;
+    let temporary_path = canonical_task_dir.join("history.json.tmp");
+    fs::write(&temporary_path, serialized)
+        .map_err(|error| format!("写入 PDF 翻译历史失败：{error}"))?;
+    fs::rename(temporary_path, canonical_task_dir.join("history.json"))
+        .map_err(|error| format!("保存 PDF 翻译历史失败：{error}"))
+}
+
+fn read_pdf_translation_history_manifest(
+    task_dir: &Path,
+    expected_task_id: &str,
+) -> Option<PdfTranslationHistoryEntry> {
+    let manifest_path = task_dir.join("history.json");
+    let manifest_text = fs::read_to_string(manifest_path).ok()?;
+    let manifest: PdfTranslationHistoryManifest = serde_json::from_str(&manifest_text).ok()?;
+    if manifest.schema_version != PDF_TRANSLATION_HISTORY_SCHEMA_VERSION
+        || manifest.task_id != expected_task_id
+        || !is_pdf_basename(&manifest.source_file_name)
+    {
+        return None;
+    }
+    let output_path = resolve_task_relative_pdf(task_dir, &manifest.output_file)?;
+    let output_file_name = output_path.file_name()?.to_str()?.to_string();
+    Some(PdfTranslationHistoryEntry {
+        task_id: expected_task_id.to_string(),
+        source_file_name: Some(manifest.source_file_name),
+        output_file_name,
+        output_pdf: output_path.to_string_lossy().into_owned(),
+        completed_at_unix_ms: Some(manifest.completed_at_unix_ms),
+        output_mode: manifest.output_mode,
+        page_count: manifest.page_count,
+        legacy: false,
+    })
+}
+
+fn resolve_task_relative_pdf(task_dir: &Path, relative_path: &str) -> Option<PathBuf> {
+    let relative_path = Path::new(relative_path);
+    if relative_path.as_os_str().is_empty()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let canonical_task_dir = task_dir.canonicalize().ok()?;
+    let output_path = task_dir.join(relative_path).canonicalize().ok()?;
+    if !output_path.starts_with(&canonical_task_dir)
+        || !output_path.is_file()
+        || !output_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
+    {
+        return None;
+    }
+    Some(output_path)
+}
+
+fn recover_pdf_translation_history(
+    task_dir: &Path,
+    task_id: &str,
+) -> Option<PdfTranslationHistoryEntry> {
+    let output_dir = task_dir.join("output");
+    let output_entries = fs::read_dir(&output_dir).ok()?;
+    let mut outputs = output_entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() {
+                return None;
+            }
+            let file_name = entry.file_name().to_str()?.to_string();
+            let relative_path = Path::new("output").join(&file_name);
+            let output_path = resolve_task_relative_pdf(task_dir, relative_path.to_str()?)?;
+            let modified_at = output_path
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()
+                .and_then(system_time_to_unix_ms);
+            Some((output_path, modified_at))
+        })
+        .collect::<Vec<_>>();
+    outputs.sort_by(|(left_path, left_time), (right_path, right_time)| {
+        let left_is_bilingual = left_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(is_bilingual_pdf_output);
+        let right_is_bilingual = right_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(is_bilingual_pdf_output);
+        right_is_bilingual
+            .cmp(&left_is_bilingual)
+            .then_with(|| right_time.cmp(left_time))
+    });
+    let (output_path, completed_at_unix_ms) = outputs.into_iter().next()?;
+    let output_file_name = output_path.file_name()?.to_str()?.to_string();
+    let source_file_name = recover_task_source_file_name(task_dir);
+    let output_mode = infer_pdf_output_mode(&output_file_name);
+    Some(PdfTranslationHistoryEntry {
+        task_id: task_id.to_string(),
+        source_file_name,
+        output_file_name,
+        output_pdf: output_path.to_string_lossy().into_owned(),
+        completed_at_unix_ms,
+        output_mode,
+        page_count: None,
+        legacy: true,
+    })
+}
+
+fn recover_task_source_file_name(task_dir: &Path) -> Option<String> {
+    let input_dir = task_dir.join("input");
+    let input_entries = fs::read_dir(input_dir).ok()?;
+    let mut names = input_entries
+        .flatten()
+        .filter_map(|entry| {
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let file_name = entry.file_name().to_str()?.to_string();
+            is_pdf_basename(&file_name).then_some(file_name)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.into_iter().next()
+}
+
+fn infer_pdf_output_mode(file_name: &str) -> Option<String> {
+    let lower = file_name.to_ascii_lowercase();
+    if is_bilingual_pdf_output(&lower) {
+        Some("bilingual".to_string())
+    } else if lower.ends_with(".mono.pdf") {
+        Some("monolingual".to_string())
+    } else {
+        None
+    }
+}
+
+fn is_bilingual_pdf_output(file_name: &str) -> bool {
+    file_name.to_ascii_lowercase().ends_with(".dual.pdf")
+}
+
+fn system_time_to_unix_ms(time: SystemTime) -> Option<u64> {
+    let milliseconds = time.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    u64::try_from(milliseconds).ok()
 }
 
 fn normalize_pdf_page_range(value: Option<&Value>) -> Result<Option<String>, String> {

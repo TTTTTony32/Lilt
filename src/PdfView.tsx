@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FileType2, Upload } from "lucide-react";
+import { FileType2, FolderOpen, History, Upload } from "lucide-react";
 import { describeError } from "./lib/errors";
 import { type PdfFile, validatePdfPath } from "./lib/pdf";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -26,10 +26,12 @@ import {
   PDF_JOB_EVENT_NAMES,
   decodePdfJobEvent,
   decodePdfTranslationCancelResult,
+  decodePdfTranslationHistory,
   decodePdfTranslationStartResult,
   type PdfQualityDiagnostic,
   type PdfJobEvent,
   type PdfJobUiState,
+  type PdfTranslationHistoryEntry,
 } from "./types/contracts";
 
 const PdfReader = lazy(() => import("./PdfReader"));
@@ -115,6 +117,25 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+function formatPdfHistoryTime(timestamp: number | null): string {
+  if (timestamp === null) return "未知";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function pdfHistoryDateTime(timestamp: number | null): string | undefined {
+  if (timestamp === null) return undefined;
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
 interface PdfViewProps {
   active: boolean;
   pdfEngine: PdfEngineRuntime;
@@ -143,6 +164,9 @@ export default function PdfView({
   const [selectedFile, setSelectedFile] = useState<PdfFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pdfHistory, setPdfHistory] = useState<PdfTranslationHistoryEntry[]>([]);
+  const [pdfHistoryLoading, setPdfHistoryLoading] = useState(true);
+  const [pdfHistoryError, setPdfHistoryError] = useState<string | null>(null);
 
   const {
     status: engineStatus,
@@ -160,6 +184,28 @@ export default function PdfView({
   const activeTaskIdRef = useRef<string | null>(null);
   const cancelTimeoutRef = useRef<number | null>(null);
   const taskbarProgressKeyRef = useRef<string | null>(null);
+  const pdfHistoryRequestRef = useRef(0);
+
+  const refreshPdfTranslationHistory = useCallback(async () => {
+    const requestId = pdfHistoryRequestRef.current + 1;
+    pdfHistoryRequestRef.current = requestId;
+    setPdfHistoryLoading(true);
+    setPdfHistoryError(null);
+    try {
+      const raw = await invokeCommand<unknown>("list_pdf_translation_history");
+      const history = decodePdfTranslationHistory(raw);
+      if (history === null) throw new Error("PDF 翻译历史格式无效");
+      if (disposedRef.current || pdfHistoryRequestRef.current !== requestId) return;
+      setPdfHistory(history);
+    } catch (reason) {
+      if (disposedRef.current || pdfHistoryRequestRef.current !== requestId) return;
+      setPdfHistoryError(describeError(reason, "读取 PDF 翻译历史失败"));
+    } finally {
+      if (!disposedRef.current && pdfHistoryRequestRef.current === requestId) {
+        setPdfHistoryLoading(false);
+      }
+    }
+  }, []);
 
   const updatePdfJob = useCallback((updater: (current: PdfJobUiState) => PdfJobUiState) => {
     setPdfJob((current) => {
@@ -312,6 +358,7 @@ export default function PdfView({
         break;
       case "finished": {
         clearPdfTaskRefs();
+        void refreshPdfTranslationHistory();
         const translatedFile = validatePdfPath(event.outputPdf);
         const outputPathError = "翻译已完成，但输出 PDF 路径无效。请从任务面板检查输出文件。";
         if (translatedFile) {
@@ -379,7 +426,7 @@ export default function PdfView({
         });
         break;
     }
-  }, [clearPdfTaskRefs, matchesPdfTask, updatePdfJob]);
+  }, [clearPdfTaskRefs, matchesPdfTask, refreshPdfTranslationHistory, updatePdfJob]);
 
   const startPdfTranslation = useCallback(async (
     samples: PdfPreflightSample[] = [],
@@ -569,6 +616,10 @@ export default function PdfView({
       if (taskId) void invokeCommand("cancel_pdf_translation", { taskId }).catch(() => undefined);
     };
   }, [clearPdfTaskRefs]);
+
+  useEffect(() => {
+    void refreshPdfTranslationHistory();
+  }, [refreshPdfTranslationHistory]);
 
   useEffect(() => {
     const percentage = progressPercent(pdfJob.progress);
@@ -807,6 +858,56 @@ export default function PdfView({
           <div className="pdf-message-area" aria-live="polite">
             {error && <p className="error-message" role="alert">{error}</p>}
           </div>
+
+          <section className="pdf-history-card" aria-labelledby="pdf-history-title">
+            <div className="pdf-history-heading">
+              <History size={16} aria-hidden="true" />
+              <h2 id="pdf-history-title">历史任务</h2>
+            </div>
+            {pdfHistoryLoading ? (
+              <p className="pdf-history-state" role="status">正在读取历史任务</p>
+            ) : pdfHistoryError ? (
+              <p className="pdf-history-state error-message" role="alert">{pdfHistoryError}</p>
+            ) : pdfHistory.length === 0 ? (
+              <p className="pdf-history-state">暂无成功的 PDF 翻译任务</p>
+            ) : (
+              <div className="pdf-history-list">
+                {pdfHistory.map((entry) => {
+                  const detail = [
+                    entry.sourceFileName === null
+                      ? `原始 PDF 文件名不可用 · 输出：${entry.outputFileName}`
+                      : `输出：${entry.outputFileName}`,
+                    entry.legacy && entry.sourceFileName !== null ? "历史信息由文件恢复" : null,
+                    entry.outputMode === "bilingual"
+                      ? "双语"
+                      : entry.outputMode === "monolingual"
+                        ? "单语"
+                        : entry.outputMode,
+                    entry.pageCount === null ? null : `${entry.pageCount} 页`,
+                  ].filter((part): part is string => Boolean(part));
+                  return (
+                    <button
+                      className="pdf-history-item"
+                      key={entry.taskId}
+                      type="button"
+                      onClick={() => void openOutputDirectory(entry.outputPdf)}
+                      aria-label={`打开 ${entry.outputFileName} 所在文件夹`}
+                    >
+                      <span className="pdf-history-icon" aria-hidden="true"><FolderOpen size={16} /></span>
+                      <span className="pdf-history-copy">
+                        <strong>{entry.sourceFileName ?? entry.outputFileName}</strong>
+                        <small>{detail.join(" · ")}</small>
+                      </span>
+                      <time className="pdf-history-time" dateTime={pdfHistoryDateTime(entry.completedAtUnixMs)}>
+                        <span>{entry.legacy ? "文件修改时间" : "完成时间"}</span>
+                        {formatPdfHistoryTime(entry.completedAtUnixMs)}
+                      </time>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
 
         </>
       )}

@@ -358,6 +358,7 @@ pub fn run() {
             pdf_engine::prepare_pdf_engine,
             pdf_jobs::start_pdf_translation,
             pdf_jobs::cancel_pdf_translation,
+            pdf_jobs::list_pdf_translation_history,
             prepare_for_updater_exit,
             recover_after_updater_failure,
             set_main_taskbar_progress,
