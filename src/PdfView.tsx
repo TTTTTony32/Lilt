@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type UIEvent } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileType2, FolderOpen, History, Upload } from "lucide-react";
@@ -41,6 +41,7 @@ const INVALID_FILE_ERROR = "请选择 PDF 文件，文件扩展名必须为 .pdf
 const EMPTY_PATH_ERROR = "未找到 PDF 文件路径，请重试。";
 const PDF_TRANSLATION_START_TIMEOUT_MS = 30_000;
 const PDF_TRANSLATION_CANCEL_TIMEOUT_MS = 10_000;
+const PDF_HISTORY_PAGE_SIZE = 20;
 
 function emptyPdfJob(): PdfJobUiState {
   return {
@@ -167,6 +168,7 @@ export default function PdfView({
   const [pdfHistory, setPdfHistory] = useState<PdfTranslationHistoryEntry[]>([]);
   const [pdfHistoryLoading, setPdfHistoryLoading] = useState(true);
   const [pdfHistoryError, setPdfHistoryError] = useState<string | null>(null);
+  const [pdfHistoryVisibleCount, setPdfHistoryVisibleCount] = useState(PDF_HISTORY_PAGE_SIZE);
 
   const {
     status: engineStatus,
@@ -196,6 +198,7 @@ export default function PdfView({
       const history = decodePdfTranslationHistory(raw);
       if (history === null) throw new Error("PDF 翻译历史格式无效");
       if (disposedRef.current || pdfHistoryRequestRef.current !== requestId) return;
+      setPdfHistoryVisibleCount(PDF_HISTORY_PAGE_SIZE);
       setPdfHistory(history);
     } catch (reason) {
       if (disposedRef.current || pdfHistoryRequestRef.current !== requestId) return;
@@ -769,6 +772,35 @@ export default function PdfView({
     }
   }, []);
 
+  const pdfHistoryListRef = useRef<HTMLDivElement | null>(null);
+  const pdfHistoryLoadingMoreRef = useRef(false);
+
+  const revealNextPdfHistoryPage = useCallback(() => {
+    if (pdfHistoryLoadingMoreRef.current || pdfHistoryVisibleCount >= pdfHistory.length) return;
+    pdfHistoryLoadingMoreRef.current = true;
+    setPdfHistoryVisibleCount((count) => Math.min(count + PDF_HISTORY_PAGE_SIZE, pdfHistory.length));
+  }, [pdfHistory.length, pdfHistoryVisibleCount]);
+
+  useEffect(() => {
+    pdfHistoryLoadingMoreRef.current = false;
+  }, [pdfHistoryVisibleCount]);
+
+  useEffect(() => {
+    const historyList = pdfHistoryListRef.current;
+    if (!historyList || pdfHistoryLoading || pdfHistoryVisibleCount >= pdfHistory.length) return;
+    if (historyList.scrollHeight <= historyList.clientHeight + 4) {
+      revealNextPdfHistoryPage();
+    }
+  }, [pdfHistory.length, pdfHistoryLoading, pdfHistoryVisibleCount, revealNextPdfHistoryPage]);
+
+  const handlePdfHistoryScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const historyList = event.currentTarget;
+    if (pdfHistoryVisibleCount >= pdfHistory.length) return;
+    if (historyList.scrollHeight - historyList.scrollTop - historyList.clientHeight <= 72) {
+      revealNextPdfHistoryPage();
+    }
+  }, [pdfHistory.length, pdfHistoryVisibleCount, revealNextPdfHistoryPage]);
+
   const pdfJobBusy = isPdfJobBusy(pdfJob.status);
   const progressValue = progressPercent(pdfJob.progress);
   const selectedFilePath = selectedFile?.path;
@@ -871,8 +903,15 @@ export default function PdfView({
             ) : pdfHistory.length === 0 ? (
               <p className="pdf-history-state">暂无成功的 PDF 翻译任务</p>
             ) : (
-              <div className="pdf-history-list">
-                {pdfHistory.map((entry) => {
+              <div
+                className="pdf-history-list"
+                ref={pdfHistoryListRef}
+                onScroll={handlePdfHistoryScroll}
+                role="region"
+                aria-label="PDF 翻译历史列表"
+                tabIndex={0}
+              >
+                {pdfHistory.slice(0, pdfHistoryVisibleCount).map((entry) => {
                   const detail = [
                     entry.sourceFileName === null
                       ? `原始 PDF 文件名不可用 · 输出：${entry.outputFileName}`
@@ -905,6 +944,9 @@ export default function PdfView({
                     </button>
                   );
                 })}
+                {pdfHistoryVisibleCount < pdfHistory.length && (
+                  <p className="pdf-history-load-more" role="status">继续滚动以加载更多</p>
+                )}
               </div>
             )}
           </section>

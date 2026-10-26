@@ -1008,7 +1008,19 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 /* Let primary page surfaces keep expanding with a taller main window. */
 .brand-lockup { transform: translate(6px, 4px); }
 .translation-panel { height: max(320px, calc(100vh - var(--page-block-start) - var(--page-block-end) - 170px)); }
-.pdf-drop-zone { min-height: max(240px, 42vh); }
+.pdf-page:not(.pdf-reader-page) { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.pdf-page:not(.pdf-reader-page) > .page-heading,
+.pdf-page:not(.pdf-reader-page) > .pdf-import-card,
+.pdf-page:not(.pdf-reader-page) > .pdf-message-area { flex: 0 0 auto; }
+.pdf-page:not(.pdf-reader-page) .pdf-drop-zone { min-height: clamp(170px, 26vh, 245px); padding: clamp(18px, 3vh, 30px) clamp(18px, 4vw, 40px); }
+.pdf-page:not(.pdf-reader-page) .pdf-message-area { min-height: 0; padding: 4px 2px 0; }
+.pdf-page:not(.pdf-reader-page) .pdf-history-card { min-height: 0; flex: 1 1 0; margin-top: 2px; display: flex; flex-direction: column; overflow: hidden; }
+.pdf-page:not(.pdf-reader-page) .pdf-history-list { min-height: 0; flex: 1 1 auto; align-content: start; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: #cbd6ca transparent; scrollbar-width: thin; }
+.pdf-page:not(.pdf-reader-page) .pdf-history-list:focus-visible { outline: 2px solid rgba(101, 137, 108, .42); outline-offset: -2px; border-radius: 5px; }
+.pdf-history-list::-webkit-scrollbar { width: 6px; }
+.pdf-history-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #cbd6ca; }
+.pdf-history-list::-webkit-scrollbar-track { background: transparent; }
+.pdf-history-load-more { margin: 2px 0 0; padding: 8px 0 2px; color: #9b9f96; font-size: 10px; text-align: center; }
 .pdf-reader-shell { min-height: max(320px, 48vh); }
 .pdf-task-log { height: max(140px, 26vh); max-height: none; }
 
