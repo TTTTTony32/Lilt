@@ -15,6 +15,8 @@ pub mod pdf_worker;
 mod provider;
 mod secrets;
 mod selection;
+#[cfg(test)]
+mod test_support;
 mod translation_core;
 #[cfg(desktop)]
 mod tray;

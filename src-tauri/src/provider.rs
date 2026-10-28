@@ -769,6 +769,7 @@ mod tests {
         stream_chat_completion_with_usage_and_activity,
     };
     use crate::contracts::{ApiProtocol, ThinkingEffort};
+    use crate::test_support::read_http_request;
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -883,13 +884,18 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 8192];
-            let bytes_read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..bytes_read]).to_lowercase();
-            assert!(request.starts_with("post /v1/chat/completions"));
-            assert!(request.contains("authorization: bearer test-key"));
-            assert!(request.contains("\"model\":\"stub-model\""));
-            assert!(request.contains("\"reasoning_effort\":\"none\""));
+            let request = read_http_request(&mut stream).expect("read complete provider request");
+            let body_start = request
+                .windows(4)
+                .position(|value| value == b"\r\n\r\n")
+                .expect("request headers end")
+                + 4;
+            let headers = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+            assert!(headers.starts_with("post /v1/chat/completions"));
+            assert!(headers.contains("authorization: bearer test-key"));
+            let body: serde_json::Value = serde_json::from_slice(&request[body_start..]).unwrap();
+            assert_eq!(body["model"], "stub-model");
+            assert_eq!(body["reasoning_effort"], "none");
 
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"本地\"}}]}\n\n",
