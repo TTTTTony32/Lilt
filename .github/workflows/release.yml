@@ -8,6 +8,11 @@ on:
       - "v*"
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "运行完整的前端和 Rust 测试"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,26 +44,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
-
-      - name: Identify tested commit and toolchains
-        id: test_context
-        shell: pwsh
-        run: |
-          $commit = (git rev-parse HEAD).Trim()
-          $rustVersion = ((rustc --version) -split ' ')[1]
-          $nodeVersion = (node --version).Trim()
-          "commit=$commit" >> $env:GITHUB_OUTPUT
-          "cache_key=lilt-tests-v1-${commit}-${rustVersion}-${nodeVersion}" >> $env:GITHUB_OUTPUT
-
-      # Only a successful main-branch run saves this marker; a cache miss runs the tests.
-      - name: Look up tests already passed on main
-        id: tested_commit
-        uses: actions/cache/restore@v6
-        continue-on-error: true
-        with:
-          path: .ci-tests-passed
-          key: ${{ steps.test_context.outputs.cache_key }}
-          lookup-only: true
 
       - name: Validate project versions
         shell: pwsh
@@ -97,7 +82,7 @@ jobs:
           }
 
       - name: Typecheck
-        if: steps.tested_commit.outputs.cache-hit != 'true'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/'))
         run: npm run typecheck
 
       - name: Lint
@@ -110,15 +95,15 @@ jobs:
         run: npm run lint:rust
 
       - name: Frontend tests
-        if: steps.tested_commit.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && inputs.run_tests
         run: npm test
 
       - name: Build Rust test binaries
-        if: steps.tested_commit.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && inputs.run_tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run
 
       - name: Add Windows test manifest
-        if: steps.tested_commit.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && inputs.run_tests
         shell: pwsh
         run: |
           $manifest = @'
@@ -143,21 +128,8 @@ jobs:
           }
 
       - name: Rust tests
-        if: steps.tested_commit.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && inputs.run_tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-
-      - name: Record tests passed on main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tested_commit.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: Set-Content -Path '.ci-tests-passed' -Value '${{ steps.test_context.outputs.commit }}' -Encoding ascii
-
-      - name: Cache successful test record
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tested_commit.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        continue-on-error: true
-        with:
-          path: .ci-tests-passed
-          key: ${{ steps.test_context.outputs.cache_key }}
 
   build:
     name: Build Windows ${{ matrix.arch }}

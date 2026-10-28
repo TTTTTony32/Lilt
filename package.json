@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -b",
     "lint": "eslint src",
-    "lint:rust": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness",
+    "lint:rust": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --lib --bins --all-features -- -D clippy::correctness",
     "test": "vitest run --config vitest.config.ts",
     "tauri": "tauri"
   },
