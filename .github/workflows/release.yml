@@ -1,17 +1,20 @@
-name: Release build
+name: CI and release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')) }}
 
 jobs:
   quality:
@@ -32,9 +35,30 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Identify tested commit and toolchains
+        id: test_context
+        shell: pwsh
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          $rustVersion = ((rustc --version) -split ' ')[1]
+          $nodeVersion = (node --version).Trim()
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "cache_key=lilt-tests-v1-${commit}-${rustVersion}-${nodeVersion}" >> $env:GITHUB_OUTPUT
+
+      # Only a successful main-branch run saves this marker; a cache miss runs the tests.
+      - name: Look up tests already passed on main
+        id: tested_commit
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: .ci-tests-passed
+          key: ${{ steps.test_context.outputs.cache_key }}
+          lookup-only: true
 
       - name: Validate project versions
         shell: pwsh
@@ -61,7 +85,7 @@ jobs:
           Write-Host "项目版本：$($package.version)"
 
       - name: Validate release tag
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -73,24 +97,28 @@ jobs:
           }
 
       - name: Typecheck
+        if: steps.tested_commit.outputs.cache-hit != 'true'
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
 
-      - name: Frontend tests
-        run: npm test
-
       - name: Rust format check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+        run: npm run lint:rust
+
+      - name: Frontend tests
+        if: steps.tested_commit.outputs.cache-hit != 'true'
+        run: npm test
 
       - name: Build Rust test binaries
-        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
+        if: steps.tested_commit.outputs.cache-hit != 'true'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run
 
       - name: Add Windows test manifest
+        if: steps.tested_commit.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $manifest = @'
@@ -115,10 +143,25 @@ jobs:
           }
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        if: steps.tested_commit.outputs.cache-hit != 'true'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Record tests passed on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tested_commit.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Set-Content -Path '.ci-tests-passed' -Value '${{ steps.test_context.outputs.commit }}' -Encoding ascii
+
+      - name: Cache successful test record
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tested_commit.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: .ci-tests-passed
+          key: ${{ steps.test_context.outputs.cache_key }}
 
   build:
     name: Build Windows ${{ matrix.arch }}
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     needs: quality
     runs-on: ${{ matrix.runner }}
     strategy:

@@ -279,14 +279,14 @@ pub async fn start_pdf_translation(
     })?;
 
     let handle = PdfJobHandle {
-        session: session.clone(),
-        cancellation: cancellation.clone(),
+        session,
+        cancellation,
     };
     state
         .pdf_jobs
         .lock()
         .map_err(|_| "PDF 任务状态锁已损坏".to_string())?
-        .insert(task_id.clone(), handle);
+        .insert(task_id.clone(), handle.clone());
 
     app.emit(
         "pdf_translation_started",
@@ -304,8 +304,7 @@ pub async fn start_pdf_translation(
             app_for_worker,
             state,
             loop_task_id,
-            session,
-            cancellation,
+            handle,
             job_dir,
             source_file_name,
             persistence,
@@ -425,12 +424,15 @@ fn run_job_loop(
     app: AppHandle,
     state: AppState,
     task_id: String,
-    session: Arc<WorkerSession>,
-    cancellation: CancellationToken,
+    handle: PdfJobHandle,
     job_dir: PathBuf,
     source_file_name: String,
     persistence: Arc<Mutex<Vec<PdfTranslationPersistence>>>,
 ) {
+    let PdfJobHandle {
+        session,
+        cancellation,
+    } = handle;
     let mut keep_output = false;
     let preflight_registry = PreflightRegistry::default();
     loop {
@@ -2305,12 +2307,17 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 8192];
-            let bytes_read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..bytes_read]).to_lowercase();
-            assert!(request.starts_with("post /v1/chat/completions"));
-            assert!(request.contains("authorization: bearer test-key"));
-            assert!(request.contains("\"reasoning_effort\":\"none\""));
+            let request = read_http_request(&mut stream).expect("read complete provider request");
+            let body_start = request
+                .windows(4)
+                .position(|value| value == b"\r\n\r\n")
+                .expect("request headers end")
+                + 4;
+            let headers = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+            assert!(headers.starts_with("post /v1/chat/completions"));
+            assert!(headers.contains("authorization: bearer test-key"));
+            let body: serde_json::Value = serde_json::from_slice(&request[body_start..]).unwrap();
+            assert_eq!(body["reasoning_effort"], "none");
 
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",

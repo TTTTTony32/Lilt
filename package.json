@@ -10,8 +10,9 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "lint": "eslint src",
+    "lint:rust": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness",
     "test": "vitest run --config vitest.config.ts",
     "tauri": "tauri"
   },

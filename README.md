@@ -77,11 +77,12 @@ npm run dev
 npm run typecheck
 npm run lint
 npm test
-cargo check --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+npm run lint:rust
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
+
+`lint:rust` 与 CI 使用同一条 Clippy 命令：正确性问题会阻止检查通过，其他建议以警告显示。PR 和 `main` 分支提交会触发质量检查；CI 只在同一提交、相同 Node 和 Rust 版本已通过 `main` 的测试时跳过重复测试，未找到记录时仍会运行测试。
 
 构建前端和桌面安装包：
 
