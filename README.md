@@ -82,7 +82,7 @@ npm run lint:rust
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-`lint:rust` 与 CI 使用同一条 Clippy 命令，检查应用的库和可执行程序；正确性问题会阻止检查通过，其他建议以警告显示。PR 和 `main` 分支提交默认只运行静态检查，发布时运行静态检查并构建安装包。完整前端和 Rust 测试可在本地运行，或手动触发工作流时勾选 `run_tests`。
+`lint:rust` 与 CI 使用同一条 Clippy 命令，检查应用的库和可执行程序；正确性问题会阻止检查通过，其他建议以警告显示。PR 默认只运行静态检查，直接推送 `main` 不触发 CI；推送发布标签时运行静态检查并构建安装包。完整前端和 Rust 测试可在本地运行，或手动触发工作流时勾选 `run_tests`。
 
 构建前端和桌面安装包：
 
