@@ -373,7 +373,10 @@ mod tests {
         .unwrap();
         assert_eq!(all_models.model_buckets.len(), 2);
         assert_eq!(all_models.model_buckets[0].model_id, "model-a");
-        assert_eq!(all_models.model_buckets[0].buckets[0].stats.input_tokens, Some(100));
+        assert_eq!(
+            all_models.model_buckets[0].buckets[0].stats.input_tokens,
+            Some(100)
+        );
         assert_eq!(all_models.model_buckets[1].model_id, "model-b");
     }
 
