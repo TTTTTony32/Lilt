@@ -326,6 +326,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .setting-line > span { display: flex; flex-direction: column; gap: 5px; }
 .setting-line strong { color: #59665a; font-size: 12px; font-weight: 600; }
 .setting-line small { color: #a0a29a; font-size: 10px; }
+.setting-line .pdf-concurrency-warning { color: #a25e53; line-height: 1.5; }
 .number-input { width: 72px; -moz-appearance: textfield; appearance: textfield; }
 .number-input::-webkit-outer-spin-button,
 .number-input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }

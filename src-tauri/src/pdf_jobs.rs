@@ -2162,8 +2162,8 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
     let concurrency = object
         .get("network_concurrency")
         .map_or(Some(2), Value::as_u64)
-        .filter(|value| (2..=4).contains(value))
-        .ok_or_else(|| "PDF 网络并发必须为 2 到 4 的整数".to_string())?;
+        .filter(|value| (1..=16).contains(value))
+        .ok_or_else(|| "PDF 网络并发必须为 1 到 16 的整数".to_string())?;
     object.insert("network_concurrency".to_string(), json!(concurrency));
     object
         .entry("source_language".to_string())

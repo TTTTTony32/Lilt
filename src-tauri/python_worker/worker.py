@@ -1254,7 +1254,7 @@ def _run_babeldoc(
         engine_constraints=_segment_engine_constraints(options),
     )
     concurrency = options.get("network_concurrency", 2)
-    translator.network_concurrency = concurrency if isinstance(concurrency, int) and not isinstance(concurrency, bool) and 2 <= concurrency <= 4 else 2
+    translator.network_concurrency = concurrency if isinstance(concurrency, int) and not isinstance(concurrency, bool) and 1 <= concurrency <= 16 else 2
     config = TranslationConfig(
         input_file=input_pdf,
         output_dir=output_dir,

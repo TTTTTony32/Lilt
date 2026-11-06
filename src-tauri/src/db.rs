@@ -782,7 +782,7 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         .clamp(MIN_PDF_PREFLIGHT_PAGE_LIMIT, MAX_PDF_PREFLIGHT_PAGE_LIMIT);
     let pdf_network_concurrency = get_setting(connection, "pdf_network_concurrency")?
         .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| (2..=4).contains(value))
+        .filter(|value| (1..=16).contains(value))
         .unwrap_or(2);
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
@@ -805,8 +805,8 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
 }
 
 pub fn save_pdf_network_concurrency(connection: &Connection, value: i64) -> Result<(), String> {
-    if !(2..=4).contains(&value) {
-        return Err("PDF 网络并发必须为 2 至 4".to_string());
+    if !(1..=16).contains(&value) {
+        return Err("PDF 网络并发必须为 1 至 16".to_string());
     }
     set_setting(connection, "pdf_network_concurrency", &value.to_string())
 }
@@ -2441,15 +2441,21 @@ mod tests {
             get_settings(&connection).unwrap().pdf_network_concurrency,
             2
         );
-        save_pdf_network_concurrency(&connection, 4).unwrap();
+        save_pdf_network_concurrency(&connection, 1).unwrap();
         assert_eq!(
             get_settings(&connection).unwrap().pdf_network_concurrency,
-            4
+            1
         );
-        assert!(save_pdf_network_concurrency(&connection, 5).is_err());
+        save_pdf_network_concurrency(&connection, 16).unwrap();
         assert_eq!(
             get_settings(&connection).unwrap().pdf_network_concurrency,
-            4
+            16
+        );
+        assert!(save_pdf_network_concurrency(&connection, 0).is_err());
+        assert!(save_pdf_network_concurrency(&connection, 17).is_err());
+        assert_eq!(
+            get_settings(&connection).unwrap().pdf_network_concurrency,
+            16
         );
     }
 
