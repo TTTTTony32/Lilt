@@ -12,6 +12,7 @@
 
 - Python 3.13.15 embeddable package，使用 Windows x64 的 `amd64` 包。
 - BabelDOC 0.6.4，依赖从 PyPI 按固定版本解析，构建时写入资源清单。
+- `bitstring>=4.3.0,<5`：BabelDOC 0.6.4 依赖 `BitStream`，bitstring 5 已移除该接口；开发准备与发行构建均需保持此范围。
 - `src-tauri/python_worker/worker.py` 是 Worker 的唯一源码来源。
 - BabelDOC 的离线资源在构建阶段生成并恢复到 Engine 私有缓存目录，正式运行不访问 PyPI、Git 仓库或系统 Python。
 

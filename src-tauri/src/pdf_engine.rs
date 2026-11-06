@@ -21,10 +21,10 @@ use crate::AppState;
 
 pub(crate) const BABELDOC_ENGINE_VERSION: &str = "babeldoc-0.6.4";
 const BABELDOC_VERSION: &str = "0.6.4";
-const PDF_ENGINE_RELEASE_REVISION: &str = "r3";
+const PDF_ENGINE_RELEASE_REVISION: &str = "r4";
 const SUPPORTED_ENGINE_TARGET: &str = "windows-x86_64";
 #[cfg(not(debug_assertions))]
-const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r3";
+const PDF_ENGINE_RELEASE_TAG: &str = "lilt-pdf-engine-babeldoc-0.6.4-r4";
 #[cfg(not(debug_assertions))]
 const RELEASE_REPOSITORY_OWNER: &str = "TTTTTony32";
 #[cfg(not(debug_assertions))]
@@ -188,6 +188,22 @@ impl PdfEngineRuntime {
         let manifest: EngineManifest = serde_json::from_str(&manifest_text)
             .map_err(|error| format!("解析 PDF Engine manifest 失败：{error}"))?;
         validate_manifest(&manifest)?;
+
+        #[cfg(not(debug_assertions))]
+        if data_root.is_some()
+            && !manifest
+                .distribution_version
+                .as_deref()
+                .is_some_and(|version| {
+                    version
+                        .strip_prefix(PDF_ENGINE_RELEASE_TAG)
+                        .is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1)
+                })
+        {
+            return Err(format!(
+                "PDF Engine 分发版本不匹配，请准备 {PDF_ENGINE_RELEASE_TAG}"
+            ));
+        }
 
         let python = resolve_runtime_file(&root, &manifest.python, "Python")?;
         let worker = resolve_runtime_file(&root, &manifest.worker, "Worker")?;
@@ -1175,6 +1191,8 @@ fn prepare_staging_engine(
         .arg(&site_packages)
         .arg("--no-editable")
         .arg(babeldoc_source)
+        // BabelDOC 0.6.4 imports BitStream, which bitstring 5 removed.
+        .arg("bitstring>=4.3.0,<5")
         .current_dir(project_root);
     run_preparation_command(install_babeldoc, "安装 BabelDOC 0.6.4 及依赖")?;
 
@@ -1192,7 +1210,7 @@ fn prepare_staging_engine(
     verify_import
         .args([
             "-c",
-            "import babeldoc; assert babeldoc.__version__ == '0.6.4'",
+            "import babeldoc; assert babeldoc.__version__ == '0.6.4'; from bitstring import BitStream; from babeldoc.format.pdf.high_level import do_translate, get_translation_stage; from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater; from babeldoc.format.pdf.translation_config import TranslationConfig, WatermarkOutputMode; from babeldoc.progress_monitor import ProgressMonitor",
         ])
         .current_dir(staging);
     run_preparation_command(verify_import, "验证 BabelDOC 运行时")?;
@@ -1586,7 +1604,7 @@ mod tests {
 
     #[test]
     fn displays_engine_version_with_distribution_revision() {
-        assert_eq!(display_engine_version(), "babeldoc-0.6.4-r3");
+        assert_eq!(display_engine_version(), "babeldoc-0.6.4-r4");
     }
 
     #[test]

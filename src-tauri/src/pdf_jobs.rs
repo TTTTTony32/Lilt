@@ -6,9 +6,10 @@ use crate::diagnostics;
 use crate::pdf_protocol::{
     DocumentPreflightAcceptedMessage, DocumentPreflightActivityMessage,
     DocumentPreflightActivityPhase, DocumentPreflightRequestMessage,
-    DocumentPreflightResponseMessage, DocumentPreflightTimeoutMessage, PDF_WORKER_PROTOCOL_VERSION,
-    ProtocolErrorPayload, RustToWorkerMessage, TranslateRequestMessage, TranslateResponseMessage,
-    TranslatedSegment, TranslationResponseOutcome, WorkerToRustMessage,
+    DocumentPreflightResponseMessage, DocumentPreflightTimeoutMessage, FailedSegment,
+    PDF_WORKER_PROTOCOL_VERSION, ProtocolErrorPayload, RustToWorkerMessage,
+    TranslateRequestMessage, TranslateResponseMessage, TranslatedSegment,
+    TranslationResponseOutcome, WorkerToRustMessage,
 };
 use crate::pdf_worker::{WorkerSession, WorkerSessionEvent};
 use crate::{
@@ -36,6 +37,7 @@ type PreflightActivityHandler =
 pub(crate) struct PdfJobHandle {
     pub(crate) session: Arc<WorkerSession>,
     pub(crate) cancellation: CancellationToken,
+    network_gate: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -189,6 +191,8 @@ struct PdfTranslationFinishedEvent {
     output_mode: Option<String>,
     #[serde(default)]
     page_count: Option<u32>,
+    incomplete_count: Option<u32>,
+    metrics: Value,
     #[serde(default)]
     warnings: Vec<String>,
 }
@@ -202,6 +206,8 @@ struct PdfTranslationHistoryManifest {
     output_file: String,
     output_mode: Option<String>,
     page_count: Option<u32>,
+    #[serde(default)]
+    incomplete_count: Option<u32>,
     completed_at_unix_ms: u64,
 }
 
@@ -215,6 +221,7 @@ pub struct PdfTranslationHistoryEntry {
     completed_at_unix_ms: Option<u64>,
     output_mode: Option<String>,
     page_count: Option<u32>,
+    incomplete_count: Option<u32>,
     legacy: bool,
 }
 
@@ -237,6 +244,7 @@ pub async fn start_pdf_translation(
     }
     let source = validate_input_pdf(&file_path)?;
     let options = normalize_pdf_options(pdf_options)?;
+    let concurrency = options["network_concurrency"].as_u64().unwrap_or(2) as usize;
     let command = crate::pdf_engine::build_worker_command(&state.data_dir)?;
     let source_file_name = source
         .file_name()
@@ -281,6 +289,7 @@ pub async fn start_pdf_translation(
     let handle = PdfJobHandle {
         session,
         cancellation,
+        network_gate: Arc::new(tokio::sync::Semaphore::new(concurrency)),
     };
     state
         .pdf_jobs
@@ -432,6 +441,7 @@ fn run_job_loop(
     let PdfJobHandle {
         session,
         cancellation,
+        network_gate,
     } = handle;
     let mut keep_output = false;
     let preflight_registry = PreflightRegistry::default();
@@ -448,6 +458,7 @@ fn run_job_loop(
                     &source_file_name,
                     &persistence,
                     &preflight_registry,
+                    &network_gate,
                     *message,
                 ) {
                     keep_output = should_keep_output;
@@ -505,6 +516,7 @@ fn handle_worker_message(
     source_file_name: &str,
     persistence: &Arc<Mutex<Vec<PdfTranslationPersistence>>>,
     preflight_registry: &PreflightRegistry,
+    network_gate: &Arc<tokio::sync::Semaphore>,
     message: WorkerToRustMessage,
 ) -> Option<bool> {
     match message {
@@ -658,8 +670,14 @@ fn handle_worker_message(
             let app = app.clone();
             let cancellation = cancellation.child_token();
             let persistence = persistence.clone();
+            let gate = network_gate.clone();
             tauri::async_runtime::spawn(async move {
+                let permit = tokio::select! {
+                    permit = gate.acquire() => match permit { Ok(permit) => permit, Err(_) => return },
+                    _ = cancellation.cancelled() => return,
+                };
                 let result = translate_pdf_request_for_job(&state, request, cancellation).await;
+                drop(permit);
                 if let Some(record) = result.persistence
                     && let Ok(mut records) = persistence.lock()
                 {
@@ -745,6 +763,7 @@ fn handle_worker_message(
                     &finished.output_pdf,
                     finished.output_mode.as_deref(),
                     finished.page_count,
+                    finished.incomplete_count,
                 ) {
                     diagnostics::warn(format!(
                         "pdf.history.write_failed task_id={} reason={error}",
@@ -756,6 +775,8 @@ fn handle_worker_message(
                     output_pdf: finished.output_pdf,
                     output_mode: finished.output_mode,
                     page_count: finished.page_count,
+                    incomplete_count: finished.incomplete_count,
+                    metrics: finished.metrics,
                     warnings: finished.warnings,
                 };
                 let _ = app.emit("pdf_translation_finished", event);
@@ -978,11 +999,10 @@ where
     assert_eq!(request.base_url, "https://provider.example/v1");
     assert_eq!(request.model_id, "stub-model");
     assert_eq!(request.api_key, "test-key");
-    assert!(request.system_prompt.contains("PDF 文档预检"));
+    assert!(request.system_prompt.contains("PDF 主题预检"));
     assert!(request.system_prompt.contains("只返回 JSON 对象"));
     assert!(request.system_prompt.contains("schema_version"));
-    assert!(request.system_prompt.contains("key_terms"));
-    assert!(request.system_prompt.contains("translation_notes"));
+    assert!(request.system_prompt.contains("topic"));
 
     let user_payload: Value = serde_json::from_str(request.user_text)
         .expect("PDF preflight fixture should receive JSON user text");
@@ -1001,18 +1021,8 @@ where
     let content = serde_json::to_string(&json!({
         "schema_version": 1,
         "title": "A paper",
-        "abstract": "A short abstract",
-        "key_terms": [{
-            "source": "cache",
-            "target": "缓存",
-            "confidence": 0.9
-        }],
-        "abbreviations": [{
-            "abbreviation": "API",
-            "expanded": "Application Programming Interface",
-            "target": "接口",
-            "confidence": 0.8
-        }]
+        "topic": "A short topic",
+        "domain": "computer science"
     }))
     .expect("encode deterministic PDF preflight context");
     on_activity(crate::provider::ProviderStreamActivity::Thinking);
@@ -1122,7 +1132,7 @@ async fn translate_pdf_preflight_inner(
         },
     };
     let system_prompt = format!(
-        "{}\n\n你正在执行 PDF 文档预检。只返回 JSON 对象，不要返回 Markdown。字段必须包括 schema_version、title、abstract、document_type、domain、headings、key_terms、abbreviations、translation_notes。key_terms 的元素使用 source、target、source_kind、confidence、note；abbreviations 的元素使用 abbreviation、expanded、target、confidence。无法确认的字段使用 null 或空数组。",
+        "{}\n\n你正在执行 PDF 主题预检。只返回 JSON 对象，字段为 schema_version、title、topic、domain。只描述文章主题和领域，不要提取术语或缩写；无法确认的字段使用 null。",
         prepared.system_prompt
     );
     let translated = stream_backend
@@ -1253,6 +1263,7 @@ async fn translate_pdf_request_inner(
             outcome: TranslationResponseOutcome::Failed,
             translated_text: None,
             translated_segments: Vec::new(),
+            failed_segments: Vec::new(),
             token_usage: None,
             cache_hit: false,
             warnings: Vec::new(),
@@ -1314,33 +1325,33 @@ async fn translate_pdf_request_inner(
             Err(_) => return failed("state_lock", "应用数据库锁已损坏".to_string()),
         };
         if let Some(cached) = cached {
-            let (translated_text, translated_segments) =
-                match build_translation_response(&request, cached.translated_text.clone()) {
-                    Ok(value) => value,
-                    Err(error) => return failed("cache_validation_failed", error),
+            let (translated_segments, failed_segments) =
+                build_partial_translation_response(&request, &cached.translated_text);
+            if failed_segments.is_empty() {
+                let warnings =
+                    quality_warnings(&request, &translated_segments, &prepared.glossary_terms);
+                return PdfTranslationRequestResult {
+                    response: TranslateResponseMessage {
+                        task_id,
+                        translation_request_id,
+                        outcome: TranslationResponseOutcome::Completed,
+                        translated_text: None,
+                        translated_segments,
+                        failed_segments,
+                        token_usage: None,
+                        cache_hit: true,
+                        warnings,
+                        error: None,
+                    },
+                    persistence: Some(make_pdf_persistence(
+                        &prepared,
+                        &request,
+                        source_text,
+                        cached.translated_text,
+                        true,
+                    )),
                 };
-            let warnings =
-                quality_warnings(&request, &translated_segments, &prepared.glossary_terms);
-            return PdfTranslationRequestResult {
-                response: TranslateResponseMessage {
-                    task_id,
-                    translation_request_id,
-                    outcome: TranslationResponseOutcome::Completed,
-                    translated_text,
-                    translated_segments,
-                    token_usage: None,
-                    cache_hit: true,
-                    warnings,
-                    error: None,
-                },
-                persistence: Some(make_pdf_persistence(
-                    &prepared,
-                    &request,
-                    source_text,
-                    cached.translated_text,
-                    true,
-                )),
-            };
+            }
         }
     }
     let api_key = match api_key_override {
@@ -1356,7 +1367,10 @@ async fn translate_pdf_request_inner(
             Err(error) => return failed("api_key_failed", error),
         },
     };
-    let system_prompt = prepared.system_prompt.clone();
+    let system_prompt = format!(
+        "{}\n\nPDF 批量翻译协议：输入是 JSON 数组，每项有 id 和 input。只返回 JSON 数组，每项仅包含原样的 id 和翻译后的 output，例如 [{{\"id\":\"s-1\",\"output\":\"译文\"}}]。不得遗漏、合并或增加段落，保留所有公式占位符和富文本标签。",
+        prepared.system_prompt
+    );
     let translated = TranslationCore::stream_with_usage(
         crate::translation_core::StreamRequest {
             request_id: &translation_request_id,
@@ -1383,6 +1397,7 @@ async fn translate_pdf_request_inner(
                     outcome: TranslationResponseOutcome::Cancelled,
                     translated_text: None,
                     translated_segments: Vec::new(),
+                    failed_segments: Vec::new(),
                     token_usage: None,
                     cache_hit: false,
                     warnings: Vec::new(),
@@ -1391,36 +1406,69 @@ async fn translate_pdf_request_inner(
                 persistence: None,
             };
         }
-        Err(error) => return failed("provider_failed", error.to_string()),
+        Err(error) => {
+            if matches!(
+                error,
+                crate::provider::ProviderError::RateLimited(_)
+                    | crate::provider::ProviderError::Server(_)
+                    | crate::provider::ProviderError::Network(_)
+                    | crate::provider::ProviderError::Timeout(_)
+                    | crate::provider::ProviderError::Protocol(_)
+            ) {
+                return PdfTranslationRequestResult {
+                    response: TranslateResponseMessage {
+                        task_id,
+                        translation_request_id,
+                        outcome: TranslationResponseOutcome::Completed,
+                        translated_text: None,
+                        translated_segments: Vec::new(),
+                        failed_segments: request
+                            .segments
+                            .iter()
+                            .map(|segment| FailedSegment {
+                                segment_id: segment.segment_id.clone(),
+                                code: error.safe_summary().to_string(),
+                                retryable: true,
+                            })
+                            .collect(),
+                        token_usage: None,
+                        cache_hit: false,
+                        warnings: Vec::new(),
+                        error: None,
+                    },
+                    persistence: None,
+                };
+            }
+            return failed(error.safe_summary(), error.to_string());
+        }
     };
     let translated_for_persistence = translated.content.clone();
     let token_usage = translated.token_usage.clone();
-    match build_translation_response(&request, translated.content) {
-        Ok((translated_text, translated_segments)) => PdfTranslationRequestResult {
-            response: TranslateResponseMessage {
-                task_id,
-                translation_request_id,
-                outcome: TranslationResponseOutcome::Completed,
-                translated_text,
-                warnings: quality_warnings(
-                    &request,
-                    &translated_segments,
-                    &prepared.glossary_terms,
-                ),
-                translated_segments,
-                token_usage,
-                cache_hit: false,
-                error: None,
-            },
-            persistence: Some(make_pdf_persistence(
+    let (translated_segments, failed_segments) =
+        build_partial_translation_response(&request, &translated.content);
+    let complete = failed_segments.is_empty();
+    PdfTranslationRequestResult {
+        response: TranslateResponseMessage {
+            task_id,
+            translation_request_id,
+            outcome: TranslationResponseOutcome::Completed,
+            translated_text: None,
+            warnings: quality_warnings(&request, &translated_segments, &prepared.glossary_terms),
+            translated_segments,
+            failed_segments,
+            token_usage,
+            cache_hit: false,
+            error: None,
+        },
+        persistence: complete.then(|| {
+            make_pdf_persistence(
                 &prepared,
                 &request,
                 source_text,
                 translated_for_persistence,
                 false,
-            )),
-        },
-        Err(error) => failed("response_validation_failed", error),
+            )
+        }),
     }
 }
 
@@ -1443,7 +1491,9 @@ fn make_pdf_persistence(
         cache_enabled: prepared.cache_enabled,
         cache_max_bytes: prepared.cache_max_bytes,
         cache_hit,
-        index_examples: request.segments.len() == 1,
+        // PDF requests always contain an array, including one-item retries.
+        // Do not expose that JSON as a normal paragraph example.
+        index_examples: false,
     }
 }
 
@@ -1486,9 +1536,6 @@ fn commit_pdf_persistence(
 }
 
 fn request_source_text(request: &TranslateRequestMessage) -> Result<String, String> {
-    if request.segments.len() == 1 {
-        return Ok(request.segments[0].source_text.clone());
-    }
     let items = request
         .segments
         .iter()
@@ -1503,6 +1550,80 @@ fn request_source_text(request: &TranslateRequestMessage) -> Result<String, Stri
     serde_json::to_string(&items).map_err(|error| format!("构造批量翻译请求失败：{error}"))
 }
 
+fn build_partial_translation_response(
+    request: &TranslateRequestMessage,
+    translated: &str,
+) -> (Vec<TranslatedSegment>, Vec<FailedSegment>) {
+    let trimmed = translated.trim();
+    let json_text = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .strip_suffix("```")
+        .unwrap_or(trimmed)
+        .trim();
+    let values: Vec<Value> = serde_json::from_str(json_text).unwrap_or_default();
+    let mut by_id: HashMap<String, Option<String>> = HashMap::new();
+    for item in values {
+        let Some(id) = item.get("id").map(value_id).filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let output = item
+            .get("output")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        match by_id.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(output);
+            }
+        }
+    }
+    let mut success = Vec::new();
+    let mut failures = Vec::new();
+    for segment in &request.segments {
+        let output = by_id
+            .remove(&segment.segment_id)
+            .flatten()
+            .filter(|output| !output.trim().is_empty())
+            .filter(|output| {
+                !looks_like_untranslated_prose(
+                    &segment.source_text,
+                    output,
+                    &request.target_language,
+                )
+            })
+            .filter(|output| validate_placeholders(&segment.placeholders, output).is_ok())
+            .filter(|output| {
+                segment.placeholders.iter().all(|token| {
+                    segment.source_text.matches(token).count() == output.matches(token).count()
+                })
+            });
+        match output {
+            Some(translated_text) => success.push(TranslatedSegment {
+                segment_id: segment.segment_id.clone(),
+                translated_text,
+            }),
+            None => failures.push(FailedSegment {
+                segment_id: segment.segment_id.clone(),
+                code: "invalid_translation".to_string(),
+                retryable: true,
+            }),
+        }
+    }
+    (success, failures)
+}
+
+fn looks_like_untranslated_prose(source: &str, output: &str, target_language: &str) -> bool {
+    source.trim() == output.trim()
+        && target_language.to_ascii_lowercase().starts_with("zh")
+        && source.split_whitespace().count() >= 6
+        && source.chars().filter(|ch| ch.is_ascii_alphabetic()).count() >= 30
+}
+
+#[cfg(test)]
 fn build_translation_response(
     request: &TranslateRequestMessage,
     translated: String,
@@ -1760,6 +1881,7 @@ fn write_pdf_translation_history_manifest(
     output_pdf: &str,
     output_mode: Option<&str>,
     page_count: Option<u32>,
+    incomplete_count: Option<u32>,
 ) -> Result<(), String> {
     if !is_pdf_basename(source_file_name) {
         return Err("PDF 翻译历史中的源文件名无效".to_string());
@@ -1785,6 +1907,7 @@ fn write_pdf_translation_history_manifest(
         output_file: relative_output,
         output_mode: output_mode.map(str::to_string),
         page_count,
+        incomplete_count,
         completed_at_unix_ms,
     };
     let serialized = serde_json::to_vec_pretty(&manifest)
@@ -1819,6 +1942,7 @@ fn read_pdf_translation_history_manifest(
         completed_at_unix_ms: Some(manifest.completed_at_unix_ms),
         output_mode: manifest.output_mode,
         page_count: manifest.page_count,
+        incomplete_count: manifest.incomplete_count,
         legacy: false,
     })
 }
@@ -1896,6 +2020,7 @@ fn recover_pdf_translation_history(
         completed_at_unix_ms,
         output_mode,
         page_count: None,
+        incomplete_count: None,
         legacy: true,
     })
 }
@@ -1983,6 +2108,12 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
         .as_object()
         .cloned()
         .ok_or_else(|| "PDF 选项必须是对象".to_string())?;
+    let concurrency = object
+        .get("network_concurrency")
+        .map_or(Some(2), Value::as_u64)
+        .filter(|value| (2..=4).contains(value))
+        .ok_or_else(|| "PDF 网络并发必须为 2 到 4 的整数".to_string())?;
+    object.insert("network_concurrency".to_string(), json!(concurrency));
     object
         .entry("source_language".to_string())
         .or_insert_with(|| Value::String("en".to_string()));
@@ -2020,11 +2151,12 @@ fn normalize_pdf_options(options: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PdfPreflightCompletedEvent, PreflightKey, PreflightRegistry, build_translation_response,
-        commit_pdf_persistence, constrained_abbreviation_pairs, normalize_pdf_options,
-        normalize_pdf_page_range, quality_warnings, request_source_text,
-        translate_pdf_preflight_with_api_key, translate_pdf_request_inner,
-        translate_pdf_request_with_api_key, validate_input_pdf, validate_output_pdf,
+        PdfPreflightCompletedEvent, PreflightKey, PreflightRegistry,
+        build_partial_translation_response, build_translation_response, commit_pdf_persistence,
+        constrained_abbreviation_pairs, normalize_pdf_options, normalize_pdf_page_range,
+        quality_warnings, request_source_text, translate_pdf_preflight_with_api_key,
+        translate_pdf_request_inner, translate_pdf_request_with_api_key, validate_input_pdf,
+        validate_output_pdf,
     };
     use crate::AppState;
     use crate::StartupRuntime;
@@ -2160,6 +2292,30 @@ mod tests {
         .expect("batch source should serialize");
         assert!(source.contains("p1-s1"));
         assert!(source.contains("p1-s2"));
+    }
+
+    #[test]
+    fn partial_batch_keeps_valid_items_and_rejects_lost_markup() {
+        let input = request(vec![
+            TranslationSegment {
+                segment_id: "a".into(),
+                source_text: "hello {v1}".into(),
+                placeholders: vec!["{v1}".into()],
+            },
+            TranslationSegment {
+                segment_id: "b".into(),
+                source_text: "<style id='1'>world</style>".into(),
+                placeholders: vec!["<style id='1'>".into(), "</style>".into()],
+            },
+        ]);
+        let (good, failed) = build_partial_translation_response(
+            &input,
+            r#"[{"id":"a","output":"你好 {v1}"},{"id":"b","output":"世界"}]"#,
+        );
+        assert_eq!(good.len(), 1);
+        assert_eq!(good[0].segment_id, "a");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].segment_id, "b");
     }
 
     #[test]
@@ -2321,7 +2477,7 @@ mod tests {
             assert_eq!(body["reasoning_effort"], "none");
 
             let body = concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"[{\\\"id\\\":\\\"p1-s1\\\",\\\"output\\\":\\\"你好\\\"}]\"}}]}\n\n",
                 "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n",
                 "data: [DONE]\n\n"
             );
@@ -2401,7 +2557,8 @@ mod tests {
             response.outcome,
             crate::pdf_protocol::TranslationResponseOutcome::Completed
         );
-        assert_eq!(response.translated_text.as_deref(), Some("你好"));
+        assert_eq!(response.translated_text, None);
+        assert_eq!(response.translated_segments[0].translated_text, "你好");
         assert_eq!(response.translated_segments[0].segment_id, "p1-s1");
         assert_eq!(
             response.token_usage,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import logging
 import multiprocessing
 import os
@@ -18,12 +19,13 @@ import threading
 import time
 import uuid
 from asyncio import CancelledError
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 MAX_LINE_BYTES = 8 * 1024 * 1024
 ENGINE_VERSION = "babeldoc-0.6.4"
 PREFLIGHT_MAX_SAMPLES = 12
@@ -63,7 +65,9 @@ class WorkerCancelled(RuntimeError):
 
 
 class WorkerTranslationError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class WorkerEngineUnavailable(RuntimeError):
@@ -195,6 +199,7 @@ class TranslationResponse:
     token_usage: dict[str, int]
     cache_hit: bool
     error: dict[str, Any] | None
+    failed_segments: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -606,7 +611,10 @@ class ResponseRouter:
                     if response.outcome == "cancelled":
                         raise WorkerCancelled("Rust Translation Core 已取消翻译")
                     error = response.error or {}
-                    raise WorkerTranslationError(str(error.get("message") or "翻译请求失败"))
+                    raise WorkerTranslationError(
+                        str(error.get("message") or "翻译请求失败"),
+                        retryable=bool(error.get("retryable", False)),
+                    )
                 except queue.Empty:
                     continue
         finally:
@@ -631,6 +639,7 @@ class ResponseRouter:
                 token_usage=_token_usage(message.get("token_usage")),
                 cache_hit=bool(message.get("cache_hit", False)),
                 error=message.get("error") if isinstance(message.get("error"), dict) else None,
+                failed_segments=message.get("failed_segments") if isinstance(message.get("failed_segments"), list) else [],
             )
         )
 
@@ -664,6 +673,10 @@ class LiltTranslator:
         self.prompt_token_count = _Counter()
         self.completion_token_count = _Counter()
         self.cache_hit_prompt_token_count = _Counter()
+        self.incomplete_count = _Counter()
+        self.metrics: dict[str, Any] = {"occurrences": 0, "unique_segments": 0, "deduplicated": 0, "batch_requests": 0, "retry_requests": 0, "max_in_flight": 0, "translation_seconds": 0.0}
+        self._stage_results: dict[tuple[str, str], str | None] = {}
+        self._next_segment_id = 0
 
     def translate(self, text: str, ignore_cache: bool = False, rate_limit_params: dict | None = None) -> str:
         return self._translate(text, rate_limit_params=rate_limit_params)
@@ -911,6 +924,8 @@ class BabelDocWorker:
                     "output_mode": result.get("output_mode"),
                     "page_count": result.get("page_count"),
                     "warnings": result.get("warnings", []),
+                    "incomplete_count": result.get("incomplete_count", 0),
+                    "metrics": result.get("metrics", {}),
                 }
             )
         except WorkerCancelled as exc:
@@ -1016,6 +1031,196 @@ def run_worker(stdin: BinaryIO, stdout: BinaryIO) -> None:
         reader.join(timeout=2)
 
 
+PDF_BATCH_MAX_INPUT_TOKENS = 2048
+PDF_BATCH_MAX_SEGMENTS = 24
+PDF_BATCH_ITEM_TOKEN_RESERVE = 12
+
+
+def _batch_segment_payload(group: dict[str, Any]) -> dict[str, Any]:
+    text = group["text"]
+    return {
+        "segment_id": group["id"],
+        "source_text": text,
+        "placeholders": list(dict.fromkeys(re.findall(r"\{v\d+\}|<style\s+id=['\"]\d+['\"]>|</style>", text))),
+    }
+
+
+def _make_translation_batches(groups: list[dict[str, Any]], tokenizer: Any) -> list[list[dict[str, Any]]]:
+    """Bound input using BabelDOC's tokenizer; oversized paragraphs stay intact."""
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    estimated_tokens = 0
+    for group in groups:
+        payload = _batch_segment_payload(group)
+        wire_item = json.dumps({"id": payload["segment_id"], "input": payload["source_text"],
+                                "placeholders": payload["placeholders"]}, ensure_ascii=False, separators=(",", ":"))
+        try:
+            item_tokens = len(tokenizer.encode_ordinary(wire_item))
+        except (AttributeError, TypeError, ValueError):
+            # Byte count is a conservative fallback when the engine has no tokenizer.
+            item_tokens = len(wire_item.encode("utf-8"))
+        item_tokens += PDF_BATCH_ITEM_TOKEN_RESERVE
+        if current and (len(current) >= PDF_BATCH_MAX_SEGMENTS
+                        or estimated_tokens + item_tokens > PDF_BATCH_MAX_INPUT_TOKENS):
+            batches.append(current)
+            current, estimated_tokens = [], 0
+        current.append(group)
+        estimated_tokens += item_tokens
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _run_translation_stage(translator: LiltTranslator, config: Any, docs: Any) -> None:
+    """Translate the engine's parsed paragraphs with task-owned retry accounting."""
+    from babeldoc.format.pdf.document_il.midend.il_translator import ILTranslator, ParagraphTranslateTracker
+    from babeldoc.format.pdf.document_il.utils.paragraph_helper import (
+        is_cid_paragraph, is_placeholder_only_paragraph, is_pure_numeric_paragraph,
+    )
+
+    started = time.monotonic()
+    engine = ILTranslator(translate_engine=translator, translation_config=config)
+    engine.docs = docs
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    all_paragraphs = sum(len(page.pdf_paragraph) for page in docs.page)
+    with config.progress_monitor.stage_start("Translate Paragraphs", all_paragraphs) as progress:
+        for page in docs.page:
+            fonts = {font.font_id: font for font in page.pdf_font}
+            xfonts = {}
+            for xobj in page.pdf_xobject:
+                xfonts[xobj.xobj_id] = {**fonts, **{font.font_id: font for font in xobj.pdf_font}}
+            for paragraph in page.pdf_paragraph:
+                config.raise_if_cancelled()
+                if (paragraph.debug_id is None or paragraph.unicode is None
+                    or len(paragraph.unicode) < config.min_text_length
+                    or is_cid_paragraph(paragraph) or is_pure_numeric_paragraph(paragraph)
+                    or is_placeholder_only_paragraph(paragraph)):
+                    progress.advance(1)
+                    continue
+                original_unicode = paragraph.unicode
+                original_composition = copy.deepcopy(paragraph.pdf_paragraph_composition)
+                tracker = ParagraphTranslateTracker()
+                try:
+                    text, translate_input = engine.pre_translate_paragraph(paragraph, tracker, fonts, xfonts)
+                except Exception:
+                    paragraph.unicode = original_unicode
+                    paragraph.pdf_paragraph_composition = original_composition
+                    translator.incomplete_count.inc(1)
+                    progress.advance(1)
+                    continue
+                if text is None:
+                    progress.advance(1)
+                    continue
+                # Original unicode includes the underlying formula characters,
+                # while text contains BabelDOC's style and formula placeholders.
+                key = (original_unicode, text)
+                occurrence = (paragraph, tracker, translate_input, original_unicode, original_composition)
+                translator.metrics["occurrences"] += 1
+                if key not in groups:
+                    translator._next_segment_id += 1
+                    groups[key] = {"id": f"s-{translator._next_segment_id}", "text": text, "occurrences": []}
+                groups[key]["occurrences"].append(occurrence)
+
+        translator.metrics["unique_segments"] += len(groups)
+        translator.metrics["deduplicated"] += sum(len(group["occurrences"]) - 1 for group in groups.values())
+
+        pending = [group for key, group in groups.items() if key not in translator._stage_results]
+        for key, group in groups.items():
+            if key in translator._stage_results:
+                progress.advance(len(group["occurrences"]))
+        state = (translator.preflight.ensure([
+            {"segment_id": group["id"], "source_text": group["text"], "placeholders": []}
+            for group in pending[:PREFLIGHT_MAX_SAMPLES]
+        ]) if translator.preflight is not None else _empty_context_state())
+
+        def request_batch(batch: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+            try:
+                response = translator.router.request(
+                    task_id=translator.task_id, mode="pdf_segment",
+                    source_language=translator.lang_in, target_language=translator.lang_out,
+                    segments=[_batch_segment_payload(group) for group in batch],
+                    document_context=state.document_context,
+                    engine_constraints={**translator.engine_constraints, "response_format": "json", "placeholder_policy": "preserve", "pipeline_version": 3},
+                    context_before=[], context_after=[], task_terms=[], abbreviations=[],
+                )
+            except WorkerTranslationError as exc:
+                if not exc.retryable:
+                    raise
+                return batch, {}
+            translator._record_usage(response.token_usage)
+            values = {item["segment_id"]: item["translated_text"] for item in response.translated_segments
+                      if item.get("translated_text", "").strip()}
+            return batch, values
+
+        # A retry waits briefly before being eligible; other batches can use
+        # the available slots while a provider recovers from transient errors.
+        batches = [(batch, 0, 0.0) for batch in _make_translation_batches(pending, getattr(engine, "tokenizer", None))]
+
+        concurrency = getattr(translator, "network_concurrency", 2)
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            active: dict[Any, int] = {}
+            while batches or active:
+                if translator.cancel_event.is_set():
+                    raise WorkerCancelled("用户取消了 PDF 翻译")
+                while batches and len(active) < concurrency:
+                    now = time.monotonic()
+                    ready = next((index for index, item in enumerate(batches) if item[2] <= now), None)
+                    if ready is None:
+                        break
+                    batch, attempt, _ = batches.pop(ready)
+                    active[executor.submit(request_batch, batch)] = attempt
+                    translator.metrics["batch_requests"] += 1
+                    translator.metrics["retry_requests"] += int(attempt > 0)
+                    translator.metrics["max_in_flight"] = max(translator.metrics["max_in_flight"], len(active))
+                if not active:
+                    # Event.wait makes a delayed retry interruptible by cancel.
+                    delay = max(0.0, min(item[2] for item in batches) - time.monotonic())
+                    translator.cancel_event.wait(min(delay, 0.1))
+                    continue
+                completed, _ = wait(active, timeout=0.1, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    attempt = active.pop(future)
+                    batch, translations = future.result()
+                    missing = []
+                    for group in batch:
+                        value = translations.get(group["id"])
+                        if value is not None:
+                            group["result"] = value
+                            progress.advance(len(group["occurrences"]))
+                        elif attempt < 2:
+                            missing.append(group)
+                        else:
+                            group["result"] = None
+                            progress.advance(len(group["occurrences"]))
+                    if missing:
+                        retry_at = time.monotonic() + min(0.25 * (2 ** attempt), 1.0)
+                        # The final retry isolates failures without resending successes.
+                        if attempt == 1:
+                            batches.extend(([group], attempt + 1, retry_at) for group in missing)
+                        else:
+                            batches.append((missing, attempt + 1, retry_at))
+
+        for key, group in groups.items():
+            if key not in translator._stage_results:
+                translator._stage_results[key] = group.get("result")
+            translated = translator._stage_results[key]
+            for paragraph, tracker, translate_input, original_unicode, original_composition in group["occurrences"]:
+                if translated is not None:
+                    try:
+                        engine.post_translate_paragraph(paragraph, tracker, translate_input, translated)
+                    except Exception:
+                        translated_for_occurrence = None
+                    else:
+                        translated_for_occurrence = translated
+                else:
+                    translated_for_occurrence = None
+                if translated_for_occurrence is None:
+                    paragraph.unicode = original_unicode
+                    paragraph.pdf_paragraph_composition = original_composition
+                    translator.incomplete_count.inc(1)
+    translator.metrics["translation_seconds"] += round(time.monotonic() - started, 3)
+
+
 def _run_babeldoc(
     start: dict[str, Any],
     input_pdf: Path,
@@ -1048,6 +1253,8 @@ def _run_babeldoc(
         preflight=preflight,
         engine_constraints=_segment_engine_constraints(options),
     )
+    concurrency = options.get("network_concurrency", 2)
+    translator.network_concurrency = concurrency if isinstance(concurrency, int) and not isinstance(concurrency, bool) and 2 <= concurrency <= 4 else 2
     config = TranslationConfig(
         input_file=input_pdf,
         output_dir=output_dir,
@@ -1060,6 +1267,7 @@ def _run_babeldoc(
         no_dual=bool(options.get("no_dual", False)),
         no_mono=bool(options.get("no_mono", False)),
         qps=1,
+        min_text_length=1,
         debug=False,
         skip_clean=os.name == "nt",
         use_alternating_pages_dual=bool(options.get("alternating_pages", False)),
@@ -1097,13 +1305,34 @@ def _run_babeldoc(
         report_interval=0.1,
     )
     config.progress_monitor = progress_monitor
+    high_level = sys.modules.get("babeldoc.format.pdf.high_level") if getattr(do_translate, "__module__", "").startswith("babeldoc.") else None
+    original_stage = getattr(high_level, "ILTranslatorLLMOnly", None) if high_level else None
+    if high_level is not None and original_stage is not None:
+        class LiltStage:
+            stage_name = "Translate Paragraphs"
+
+            def __init__(self, translate_engine: LiltTranslator, translation_config: Any) -> None:
+                self.translate_engine = translate_engine
+                self.translation_config = translation_config
+
+            def translate(self, docs: Any) -> None:
+                _run_translation_stage(self.translate_engine, self.translation_config, docs)
+
+        high_level.ILTranslatorLLMOnly = LiltStage
     try:
-        result = do_translate(progress_monitor, config)
-    except CancelledError as exc:
-        raise WorkerCancelled("用户取消了 PDF 翻译") from exc
+        try:
+            result = do_translate(progress_monitor, config)
+        except CancelledError as exc:
+            raise WorkerCancelled("用户取消了 PDF 翻译") from exc
+    finally:
+        if high_level is not None and original_stage is not None:
+            high_level.ILTranslatorLLMOnly = original_stage
     if cancel_event.is_set():
         raise WorkerCancelled("用户取消了 PDF 翻译")
-    return _translate_result_to_payload(result, options)
+    payload = _translate_result_to_payload(result, options)
+    payload["incomplete_count"] = translator.incomplete_count.value
+    payload["metrics"] = translator.metrics
+    return payload
 
 
 def _translate_result_to_payload(result: Any, options: dict[str, Any]) -> dict[str, Any]:

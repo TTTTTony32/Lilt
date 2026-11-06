@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use thiserror::Error;
 
-pub const PDF_WORKER_PROTOCOL_VERSION: u32 = 2;
+pub const PDF_WORKER_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -69,6 +69,8 @@ pub struct TranslateResponseMessage {
     #[serde(default)]
     pub translated_segments: Vec<TranslatedSegment>,
     #[serde(default)]
+    pub failed_segments: Vec<FailedSegment>,
+    #[serde(default)]
     pub token_usage: Option<TokenUsage>,
     #[serde(default)]
     pub cache_hit: bool,
@@ -124,6 +126,13 @@ pub enum TranslationResponseOutcome {
 pub struct TranslatedSegment {
     pub segment_id: String,
     pub translated_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FailedSegment {
+    pub segment_id: String,
+    pub code: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -300,6 +309,10 @@ pub struct FinishedMessage {
     pub output_mode: Option<String>,
     #[serde(default)]
     pub page_count: Option<u32>,
+    #[serde(default)]
+    pub incomplete_count: Option<u32>,
+    #[serde(default)]
+    pub metrics: Value,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -479,6 +492,7 @@ mod tests {
                 segment_id: "p1-s1".to_string(),
                 translated_text: "译文".to_string(),
             }],
+            failed_segments: Vec::new(),
             token_usage: Some(TokenUsage {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(4),
@@ -575,7 +589,7 @@ mod tests {
 
     #[test]
     fn optional_worker_fields_can_be_omitted() {
-        let line = r#"{"type":"JOB_STARTED","protocol_version":2,"task_id":"task-1"}"#;
+        let line = r#"{"type":"JOB_STARTED","protocol_version":3,"task_id":"task-1"}"#;
         let decoded = decode_worker_message(line).expect("optional fields should default");
         assert_eq!(
             decoded,
@@ -635,7 +649,7 @@ mod tests {
 
     #[test]
     fn decoder_rejects_unknown_protocol_versions() {
-        let line = r#"{"type":"JOB_STARTED","protocol_version":3,"task_id":"task-1"}"#;
+        let line = r#"{"type":"JOB_STARTED","protocol_version":4,"task_id":"task-1"}"#;
         assert_eq!(
             decode_worker_message(line).expect_err("unknown protocol must be rejected"),
             ProtocolError::UnsupportedProtocolVersion(3)
@@ -671,6 +685,8 @@ mod tests {
             output_pdf: "jobs/task-1/output/translated.pdf".to_string(),
             output_mode: Some("bilingual".to_string()),
             page_count: Some(3),
+            incomplete_count: Some(0),
+            metrics: serde_json::Value::Null,
             warnings: Vec::new(),
         });
         assert!(
@@ -714,6 +730,7 @@ mod tests {
             outcome: TranslationResponseOutcome::Failed,
             translated_text: None,
             translated_segments: Vec::new(),
+            failed_segments: Vec::new(),
             token_usage: None,
             cache_hit: false,
             warnings: Vec::new(),

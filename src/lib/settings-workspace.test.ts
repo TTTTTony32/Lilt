@@ -3,6 +3,13 @@ import { DEFAULT_SNAPSHOT } from "../types/contracts";
 import { createSettingsWorkspace, createWorkspacePrompt, createWorkspaceProvider, isSettingsWorkspaceDirty, workspaceSaveInput } from "./settings-workspace";
 
 describe("settings workspace drafts", () => {
+  it("saves PDF concurrency through the draft", () => {
+    const original = createSettingsWorkspace(DEFAULT_SNAPSHOT);
+    const edited = { ...original, settings: { ...original.settings, pdfNetworkConcurrency: 4 } };
+    expect(original.settings.pdfNetworkConcurrency).toBe(2);
+    expect(isSettingsWorkspaceDirty(edited, original)).toBe(true);
+    expect(workspaceSaveInput(edited, original).settings.pdfNetworkConcurrency).toBe(4);
+  });
   it("detects edits and recognizes a reverted draft", () => {
     const original = createSettingsWorkspace(DEFAULT_SNAPSHOT);
     const edited = { ...original, settings: { ...original.settings, cacheEnabled: !original.settings.cacheEnabled } };

@@ -780,6 +780,10 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(DEFAULT_PDF_PREFLIGHT_PAGE_LIMIT)
         .clamp(MIN_PDF_PREFLIGHT_PAGE_LIMIT, MAX_PDF_PREFLIGHT_PAGE_LIMIT);
+    let pdf_network_concurrency = get_setting(connection, "pdf_network_concurrency")?
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| (2..=4).contains(value))
+        .unwrap_or(2);
     let stats = get_cache_stats(connection, cache_max_bytes)?;
     Ok(AppSettings {
         history_retention,
@@ -796,7 +800,15 @@ pub fn get_settings(connection: &Connection) -> Result<AppSettings, String> {
         close_behavior,
         pdf_preflight_enabled,
         pdf_preflight_page_limit,
+        pdf_network_concurrency,
     })
+}
+
+pub fn save_pdf_network_concurrency(connection: &Connection, value: i64) -> Result<(), String> {
+    if !(2..=4).contains(&value) {
+        return Err("PDF 网络并发必须为 2 至 4".to_string());
+    }
+    set_setting(connection, "pdf_network_concurrency", &value.to_string())
 }
 
 pub fn get_selection_settings(connection: &Connection) -> Result<(SelectionMode, String), String> {
@@ -2420,6 +2432,25 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
         migrate(&connection).expect("database migration should succeed");
         connection
+    }
+
+    #[test]
+    fn pdf_network_concurrency_defaults_and_validates() {
+        let connection = test_connection();
+        assert_eq!(
+            get_settings(&connection).unwrap().pdf_network_concurrency,
+            2
+        );
+        save_pdf_network_concurrency(&connection, 4).unwrap();
+        assert_eq!(
+            get_settings(&connection).unwrap().pdf_network_concurrency,
+            4
+        );
+        assert!(save_pdf_network_concurrency(&connection, 5).is_err());
+        assert_eq!(
+            get_settings(&connection).unwrap().pdf_network_concurrency,
+            4
+        );
     }
 
     fn test_provider() -> ProviderRecord {

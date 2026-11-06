@@ -1805,6 +1805,7 @@ function App() {
             pdfEngine={pdfEngine}
             pdfPreflightEnabled={snapshot.settings.pdfPreflightEnabled}
             pdfPreflightPageLimit={snapshot.settings.pdfPreflightPageLimit}
+            pdfNetworkConcurrency={snapshot.settings.pdfNetworkConcurrency}
             pdfPreflightSaving={pdfPreflightSaving}
             onPdfPreflightEnabledChange={(enabled) => { void handlePdfPreflightEnabledChange(enabled); }}
             onResourceDownloadPrompt={openResourceDownloadPrompt}
@@ -4035,6 +4036,17 @@ function SettingsView({
 
         <div className="settings-section" id="settings-section-pdf" data-settings-section="pdf" ref={(element) => { settingsSectionRefs.current.pdf = element; }}>
           <div className="card-heading"><div><strong>PDF 全文翻译</strong></div></div>
+          <label className="setting-line">
+            <span><strong>网络并发</strong></span>
+            <select
+              className="number-input"
+              value={settings.pdfNetworkConcurrency}
+              onChange={(event) => updateAppSettingsDraft({ pdfNetworkConcurrency: Number(event.target.value) })}
+              aria-label="PDF 网络并发"
+            >
+              {[2, 3, 4].map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </label>
           <label className="setting-line">
             <span><strong>预检读取页数</strong></span>
             <input

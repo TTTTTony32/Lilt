@@ -198,7 +198,12 @@ where
                 ));
                 return Ok(result);
             }
-            Err(error) if !started && attempt == 0 && error.retryable() => {
+            Err(error)
+                if request.operation != "pdf_segment"
+                    && !started
+                    && attempt == 0
+                    && error.retryable() =>
+            {
                 diagnostics::warn(format!(
                     "provider.{}.retry request_id={} reason={}",
                     request.operation,

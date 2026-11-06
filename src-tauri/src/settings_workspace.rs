@@ -54,6 +54,7 @@ pub struct WorkspaceSettings {
     pub word_ai_cache_enabled: bool,
     pub paragraph_example_lookup_enabled: bool,
     pub pdf_preflight_page_limit: i64,
+    pub pdf_network_concurrency: i64,
     pub selection_mode: SelectionMode,
     pub selection_shortcut: String,
     pub close_behavior: CloseBehavior,
@@ -203,6 +204,7 @@ fn apply_database_changes(connection: &Connection, input: &WorkspaceInput) -> Re
         input.settings.paragraph_example_lookup_enabled,
         input.settings.pdf_preflight_page_limit,
     )?;
+    db::save_pdf_network_concurrency(connection, input.settings.pdf_network_concurrency)?;
     db::save_selection_settings(
         connection,
         input.settings.selection_mode,
@@ -361,6 +363,7 @@ mod tests {
                 word_ai_cache_enabled: settings.word_ai_cache_enabled,
                 paragraph_example_lookup_enabled: settings.paragraph_example_lookup_enabled,
                 pdf_preflight_page_limit: settings.pdf_preflight_page_limit,
+                pdf_network_concurrency: settings.pdf_network_concurrency,
                 selection_mode: settings.selection_mode,
                 selection_shortcut: settings.selection_shortcut,
                 close_behavior: settings.close_behavior,
@@ -497,7 +500,7 @@ mod tests {
             "settings": {
                 "historyRetention": 50, "cacheEnabled": true, "cacheMaxBytes": 268435456,
                 "wordAiCacheEnabled": true, "paragraphExampleLookupEnabled": true,
-                "pdfPreflightPageLimit": 10, "selectionMode": "shortcut",
+                "pdfPreflightPageLimit": 10, "pdfNetworkConcurrency": 2, "selectionMode": "shortcut",
                 "selectionShortcut": "Ctrl+Shift+L", "closeBehavior": "ask"
             }
         })).unwrap();

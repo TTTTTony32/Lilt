@@ -14,6 +14,7 @@ export interface AppSettings {
   paragraphLearningModeEnabled: boolean;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
+  pdfNetworkConcurrency: number;
   selectionMode: SelectionMode;
   selectionShortcut: string;
   selectionWindowWidth: number;
@@ -408,6 +409,7 @@ export type PdfTaskAbbreviation = Abbreviation;
 export interface DocumentContext {
   schemaVersion: number;
   title: string | null;
+  topic?: string | null;
   abstract: string | null;
   documentType: string | null;
   domain: string | null;
@@ -479,6 +481,7 @@ export interface PdfJobUiState {
   outputPdf: string | null;
   outputMode: string | null;
   pageCount: number | null;
+  incompleteCount?: number | null;
   warnings: string[];
   tokenUsage: PdfJobTokenUsage | null;
   code: string | null;
@@ -542,6 +545,7 @@ export type PdfJobEvent =
     outputPdf: string;
     outputMode: string | null;
     pageCount: number | null;
+    incompleteCount?: number | null;
     warnings: string[];
   } & PdfJobContextMetadata
   | {
@@ -1002,6 +1006,7 @@ export function decodeDocumentContext(value: unknown): DocumentContext | null {
       ? rawSchemaVersion
       : null;
   const title = optionalStringField(value, "title");
+  const topic = optionalStringField(value, "topic");
   const abstract = optionalStringField(value, "abstract", "summary");
   const documentType = optionalStringField(value, "documentType", "document_type", "type");
   const domain = optionalStringField(value, "domain", "field");
@@ -1020,6 +1025,7 @@ export function decodeDocumentContext(value: unknown): DocumentContext | null {
   if (
     schemaVersion === null ||
     !title.valid ||
+    !topic.valid ||
     !abstract.valid ||
     !documentType.valid ||
     !domain.valid ||
@@ -1037,6 +1043,7 @@ export function decodeDocumentContext(value: unknown): DocumentContext | null {
   return {
     schemaVersion,
     title: title.value,
+    ...(topic.value === null ? {} : { topic: topic.value }),
     abstract: abstract.value,
     documentType: documentType.value,
     domain: domain.value,
@@ -1352,14 +1359,16 @@ export function decodePdfJobEvent(name: string, value: unknown): PdfJobEvent | n
     const outputPdf = nonEmptyString(readField(value, "outputPdf", "output_pdf"));
     const outputMode = optionalStringField(value, "outputMode", "output_mode");
     const pageCount = optionalNonNegativeIntegerField(value, "pageCount", "page_count");
+    const incompleteCount = optionalNonNegativeIntegerField(value, "incompleteCount", "incomplete_count");
     const warnings = decodeStringArrayField(readField(value, "warnings"));
-    if (outputPdf === null || !outputMode.valid || !pageCount.valid || warnings === null) return null;
+    if (outputPdf === null || !outputMode.valid || !pageCount.valid || !incompleteCount.valid || warnings === null) return null;
     return {
       type: "finished",
       taskId,
       outputPdf,
       outputMode: outputMode.value,
       pageCount: pageCount.value,
+      ...(incompleteCount.value === null ? {} : { incompleteCount: incompleteCount.value }),
       warnings,
       ...metadata,
     };
@@ -1665,6 +1674,7 @@ export const DEFAULT_SNAPSHOT: AppSnapshot = {
     paragraphLearningModeEnabled: false,
     pdfPreflightEnabled: true,
     pdfPreflightPageLimit: 10,
+    pdfNetworkConcurrency: 2,
     selectionMode: "shortcut",
     selectionShortcut: "Ctrl+Shift+L",
     selectionWindowWidth: 560,

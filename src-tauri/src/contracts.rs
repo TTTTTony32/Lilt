@@ -51,6 +51,7 @@ pub struct AppSettings {
     pub close_behavior: CloseBehavior,
     pub pdf_preflight_enabled: bool,
     pub pdf_preflight_page_limit: i64,
+    pub pdf_network_concurrency: i64,
 }
 
 pub fn parse_selection_window_dimension(

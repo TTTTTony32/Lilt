@@ -368,6 +368,11 @@ describe("dictionary and glossary transfer contracts", () => {
 });
 
 describe("PDF document context and quality contracts", () => {
+  it("decodes topic and incomplete count from worker events", () => {
+    expect(decodeDocumentContext({ schema_version: 2, title: "paper", topic: "satellites", domain: "networks" })?.topic).toBe("satellites");
+    expect(decodePdfJobEvent("pdf_translation_finished", { task_id: "t", output_pdf: "C:/a.pdf", incomplete_count: 3 })).toMatchObject({ type: "finished", incompleteCount: 3 });
+    expect(decodePdfJobEvent("pdf_translation_finished", { task_id: "t", output_pdf: "C:/a.pdf", incomplete_count: -1 })).toBeNull();
+  });
   it("decodes a versioned document context with snake_case worker fields", () => {
     expect(decodeDocumentContext({
       schema_version: 1,

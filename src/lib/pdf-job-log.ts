@@ -69,12 +69,13 @@ function formatContextSummary(context: DocumentContext): string[] {
   const metadata = [
     context.documentType ? `类型：${context.documentType}` : null,
     context.domain ? `领域：${context.domain}` : null,
-    `术语 ${context.keyTerms.length}`,
-    `缩写 ${context.abbreviations.length}`,
+    context.keyTerms.length > 0 ? `术语 ${context.keyTerms.length}` : null,
+    context.abbreviations.length > 0 ? `缩写 ${context.abbreviations.length}` : null,
     context.headings.length > 0 ? `标题层级 ${context.headings.length}` : null,
   ].filter((item): item is string => item !== null);
   const messages = [
     `文档上下文：${contextTitle(context)}${metadata.length > 0 ? ` · ${metadata.join(" · ")}` : ""}`,
+    context.topic?.trim() ? `主题：${context.topic.trim()}` : null,
     context.abstract?.trim() ? `摘要：${context.abstract.trim()}` : null,
     context.translationNotes.length > 0 ? `翻译注意事项：${context.translationNotes.join("；")}` : null,
     context.keyTerms.length > 0

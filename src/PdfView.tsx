@@ -142,6 +142,7 @@ interface PdfViewProps {
   pdfEngine: PdfEngineRuntime;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
+  pdfNetworkConcurrency: number;
   pdfPreflightSaving: boolean;
   onPdfPreflightEnabledChange: (enabled: boolean) => void;
   onResourceDownloadPrompt: (request: ResourceDownloadPromptRequest) => void;
@@ -156,6 +157,7 @@ export default function PdfView({
   pdfEngine,
   pdfPreflightEnabled,
   pdfPreflightPageLimit,
+  pdfNetworkConcurrency,
   pdfPreflightSaving,
   onPdfPreflightEnabledChange,
   onResourceDownloadPrompt,
@@ -380,6 +382,7 @@ export default function PdfView({
             outputPdf: event.outputPdf,
             outputMode: event.outputMode,
             pageCount: event.pageCount,
+            incompleteCount: event.incompleteCount ?? null,
             warnings: appendUniqueStrings(current.warnings, event.warnings),
             message: null,
             code: null,
@@ -496,6 +499,7 @@ export default function PdfView({
         metadata: { file_name: selectedFile.fileName },
         preflight_enabled: pdfPreflightEnabled,
         preflight_page_limit: pdfPreflightPageLimit,
+        network_concurrency: pdfNetworkConcurrency,
         samples: pdfPreflightEnabled ? samples : [],
         ...(pages ? { pages } : {}),
       };
@@ -540,7 +544,7 @@ export default function PdfView({
         };
       });
     }
-  }, [clearPdfTaskRefs, engineError, engineStatus?.status, jobEventsError, jobEventsReady, pdfPreflightEnabled, pdfPreflightPageLimit, pdfPreflightSaving, selectedFile, updatePdfJob]);
+  }, [clearPdfTaskRefs, engineError, engineStatus?.status, jobEventsError, jobEventsReady, pdfPreflightEnabled, pdfPreflightPageLimit, pdfNetworkConcurrency, pdfPreflightSaving, selectedFile, updatePdfJob]);
 
   const cancelPdfTranslation = useCallback(async () => {
     const taskId = activeTaskIdRef.current;

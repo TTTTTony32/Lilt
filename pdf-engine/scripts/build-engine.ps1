@@ -151,7 +151,8 @@ Invoke-Checked -FilePath $uvPath -ArgumentList @(
     "--python-version", $manifest.pythonVersionMajorMinor,
     "--python-platform", $manifest.uvPlatform,
     "--index-url", "https://pypi.org/simple",
-    "BabelDOC==$($manifest.babeldocVersion)"
+    "BabelDOC==$($manifest.babeldocVersion)",
+    "bitstring>=4.3.0,<5"
 ) -Label "安装 BabelDOC $($manifest.babeldocVersion) 及依赖"
 
 $workerDestination = Join-Path $runtimeRoot "pdf-worker\worker.py"
@@ -189,7 +190,7 @@ Set-EngineHome -EngineHome $runtimeRoot
 Push-Location $runtimeRoot
 try {
     Invoke-Checked -FilePath $pythonPath -ArgumentList @(
-        "-s", "-c", "import babeldoc; assert babeldoc.__version__ == '$($manifest.babeldocVersion)'"
+        "-s", "-c", "import babeldoc; assert babeldoc.__version__ == '$($manifest.babeldocVersion)'; from bitstring import BitStream; from babeldoc.format.pdf.high_level import do_translate, get_translation_stage; from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater; from babeldoc.format.pdf.translation_config import TranslationConfig, WatermarkOutputMode; from babeldoc.progress_monitor import ProgressMonitor"
     ) -Label "验证 BabelDOC Python 导入"
 
     Invoke-Checked -FilePath $pythonPath -ArgumentList @(

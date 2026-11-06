@@ -221,6 +221,9 @@ function PdfTaskPanel({
         <div className="pdf-task-panel-section pdf-task-output-section">
           <div className="pdf-task-output">
             <strong>输出已生成</strong>
+            {job.incompleteCount != null && job.incompleteCount > 0 && (
+              <small>有{job.incompleteCount}段未完成翻译</small>
+            )}
             <button
               className="pdf-task-output-path"
               type="button"

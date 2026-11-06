@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from worker import (
@@ -24,7 +25,133 @@ from worker import (
     WorkerProtocolError,
     decode_message,
     encode_message,
+    _make_translation_batches,
+    _run_translation_stage,
 )
+
+
+class TranslationStageTests(unittest.TestCase):
+    def test_batch_size_uses_token_budget_and_keeps_long_paragraphs_intact(self):
+        class Tokenizer:
+            def encode_ordinary(self, text):
+                return text.encode("utf-8")
+
+        short = [{"id": str(index), "text": "short"} for index in range(25)]
+        self.assertEqual([len(batch) for batch in _make_translation_batches(short, Tokenizer())], [24, 1])
+        long = [{"id": str(index), "text": "x" * 1400} for index in range(2)]
+        oversized = {"id": "large", "text": "x" * 3000}
+        batches = _make_translation_batches(long + [oversized], Tokenizer())
+        self.assertEqual([len(batch) for batch in batches], [1, 1, 1])
+        self.assertIs(batches[-1][0], oversized)
+
+    def test_progress_advances_before_slower_batch_completes(self):
+        first_batch_finished = threading.Event()
+        progress_values = []
+
+        class FakeEngine:
+            def __init__(self, **_kwargs):
+                pass
+
+            def pre_translate_paragraph(self, paragraph, _tracker, _fonts, _xfonts):
+                return paragraph.unicode, paragraph.unicode
+
+            def post_translate_paragraph(self, paragraph, _tracker, _input, result):
+                paragraph.unicode = result
+
+        class Progress:
+            def __init__(self):
+                self.value = 0
+
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+
+            def advance(self, count):
+                self.value += count
+                progress_values.append(self.value)
+                if self.value >= 24:
+                    first_batch_finished.set()
+
+        def request(**kwargs):
+            segments = kwargs["segments"]
+            if len(segments) == 1:
+                if not first_batch_finished.wait(timeout=3):
+                    raise AssertionError("progress did not advance while another request was waiting")
+            return SimpleNamespace(
+                translated_segments=[{"segment_id": segment["segment_id"], "translated_text": "译:" + segment["source_text"]} for segment in segments],
+                token_usage={},
+            )
+
+        il_module = mock.MagicMock(ILTranslator=FakeEngine, ParagraphTranslateTracker=lambda: object())
+        helper_module = mock.MagicMock(
+            is_cid_paragraph=lambda _: False,
+            is_placeholder_only_paragraph=lambda _: False,
+            is_pure_numeric_paragraph=lambda _: False,
+        )
+        paragraphs = [SimpleNamespace(debug_id=index, unicode=f"paragraph {index}", pdf_paragraph_composition=[]) for index in range(25)]
+        docs = SimpleNamespace(page=[SimpleNamespace(pdf_font=[], pdf_xobject=[], pdf_paragraph=paragraphs)])
+        config = SimpleNamespace(min_text_length=1, raise_if_cancelled=lambda: None,
+                                 progress_monitor=SimpleNamespace(stage_start=lambda *_args: Progress()))
+        translator = LiltTranslator(task_id="t", lang_in="en", lang_out="zh-CN",
+                                    router=SimpleNamespace(request=request), cancel_event=threading.Event())
+        with mock.patch.dict(sys.modules, {
+            "babeldoc.format.pdf.document_il.midend.il_translator": il_module,
+            "babeldoc.format.pdf.document_il.utils.paragraph_helper": helper_module,
+        }):
+            _run_translation_stage(translator, config, docs)
+        self.assertEqual(progress_values[-1], 25)
+        self.assertEqual(translator.incomplete_count.value, 0)
+
+    def test_retries_only_missing_and_counts_duplicate_positions(self):
+        calls = []
+        placeholders = []
+
+        class FakeEngine:
+            def __init__(self, **_kwargs):
+                pass
+
+            def pre_translate_paragraph(self, paragraph, _tracker, _fonts, _xfonts):
+                return paragraph.unicode, paragraph.unicode
+
+            def post_translate_paragraph(self, paragraph, _tracker, _translate_input, result):
+                paragraph.unicode = result
+
+        class Progress:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def advance(self, _count): pass
+
+        def request(**kwargs):
+            segments = kwargs["segments"]
+            calls.append([segment["source_text"] for segment in segments])
+            placeholders.extend(segment["placeholders"] for segment in segments if segment["source_text"].startswith("Time"))
+            return SimpleNamespace(
+                translated_segments=[{"segment_id": segment["segment_id"], "translated_text": "译:" + segment["source_text"]}
+                                     for segment in segments if segment["source_text"] != "failed"],
+                token_usage={},
+            )
+
+        il_module = mock.MagicMock(ILTranslator=FakeEngine, ParagraphTranslateTracker=lambda: object())
+        helper_module = mock.MagicMock(
+            is_cid_paragraph=lambda _: False,
+            is_placeholder_only_paragraph=lambda _: False,
+            is_pure_numeric_paragraph=lambda _: False,
+        )
+        paragraphs = [SimpleNamespace(debug_id=index, unicode=value, pdf_paragraph_composition=[])
+                      for index, value in enumerate(["Time {v1}", "failed", "failed"])]
+        docs = SimpleNamespace(page=[SimpleNamespace(pdf_font=[], pdf_xobject=[], pdf_paragraph=paragraphs)])
+        config = SimpleNamespace(min_text_length=1, raise_if_cancelled=lambda: None,
+                                 progress_monitor=SimpleNamespace(stage_start=lambda *_args: Progress()))
+        translator = LiltTranslator(task_id="t", lang_in="en", lang_out="zh-CN",
+                                    router=SimpleNamespace(request=request), cancel_event=threading.Event())
+        with mock.patch.dict(sys.modules, {
+            "babeldoc.format.pdf.document_il.midend.il_translator": il_module,
+            "babeldoc.format.pdf.document_il.utils.paragraph_helper": helper_module,
+        }):
+            _run_translation_stage(translator, config, docs)
+        self.assertEqual(calls, [["Time {v1}", "failed"], ["failed"], ["failed"]])
+        self.assertEqual(placeholders, [["{v1}"]])
+        self.assertEqual([p.unicode for p in paragraphs], ["译:Time {v1}", "failed", "failed"])
+        self.assertEqual(translator.incomplete_count.value, 2)
 
 
 class WorkerProtocolTests(unittest.TestCase):
@@ -579,7 +706,7 @@ def _start_job_message(
 ) -> dict:
     return {
         "type": "START_JOB",
-        "protocol_version": 2,
+        "protocol_version": 3,
         "task_id": "task-1",
         "input_pdf": str(input_pdf),
         "output_dir": str(output_dir),
@@ -679,7 +806,7 @@ class WorkerStartupTests(unittest.TestCase):
 class WorkerSubprocessIntegrationTests(unittest.TestCase):
     def test_real_worker_subprocess_with_local_translation_responder(self):
         project_root = pathlib.Path(__file__).resolve().parents[2]
-        input_pdf = (
+        input_pdf = pathlib.Path(os.environ["LILT_PDF_INTEGRATION_INPUT"]) if os.environ.get("LILT_PDF_INTEGRATION_INPUT") else (
             project_root
             / "reference-projects"
             / "PDFMathTranslate-next"
@@ -721,9 +848,12 @@ class WorkerSubprocessIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = pathlib.Path(temp_dir) / "output"
+            job = _start_job_message(input_pdf, output_dir)
+            if os.environ.get("LILT_PDF_INTEGRATION_PAGES"):
+                job.setdefault("pdf_options", {})["pages"] = os.environ["LILT_PDF_INTEGRATION_PAGES"]
             worker_process.stdin.write(
                 json.dumps(
-                    _start_job_message(input_pdf, output_dir),
+                    job,
                     ensure_ascii=False,
                 )
                 + "\n"
@@ -812,6 +942,7 @@ class WorkerSubprocessIntegrationTests(unittest.TestCase):
             self.assertIn("DOCUMENT_PREFLIGHT_REQUEST", observed_types)
             self.assertIn("TRANSLATE_REQUEST", observed_types)
             self.assertEqual(terminal_event["type"], "FINISHED")
+            self.assertEqual(terminal_event.get("incomplete_count"), 0)
             output_pdf = pathlib.Path(terminal_event["output_pdf"])
             self.assertTrue(output_pdf.is_file())
             self.assertTrue(output_pdf.read_bytes().startswith(b"%PDF-"))

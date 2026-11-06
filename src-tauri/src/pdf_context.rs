@@ -16,6 +16,8 @@ pub struct DocumentContext {
     pub schema_version: u32,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
     #[serde(rename = "abstract", default)]
     pub abstract_text: Option<String>,
     #[serde(default)]
@@ -65,6 +67,7 @@ impl Default for DocumentContext {
         Self {
             schema_version: DOCUMENT_CONTEXT_SCHEMA_VERSION,
             title: None,
+            topic: None,
             abstract_text: None,
             document_type: None,
             domain: None,
@@ -118,6 +121,7 @@ impl DocumentContext {
         let mut context = DocumentContext {
             schema_version,
             title: bounded_optional_string(object, &["title"], MAX_CONTEXT_FIELD_CHARS),
+            topic: bounded_optional_string(object, &["topic"], MAX_CONTEXT_FIELD_CHARS),
             abstract_text: bounded_optional_string(
                 object,
                 &["abstract", "abstract_text", "summary"],
@@ -134,8 +138,8 @@ impl DocumentContext {
                 MAX_CONTEXT_LIST_ITEMS,
                 MAX_CONTEXT_ITEM_CHARS,
             ),
-            key_terms: parse_terms(object.get("key_terms").or_else(|| object.get("keyTerms"))),
-            abbreviations: parse_abbreviations(object.get("abbreviations")),
+            key_terms: Vec::new(),
+            abbreviations: Vec::new(),
             translation_notes: bounded_string_array(
                 object
                     .get("translation_notes")
@@ -244,98 +248,6 @@ fn bounded_string_array(
         .unwrap_or_default()
 }
 
-fn parse_terms(value: Option<&Value>) -> Vec<DocumentTerm> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let object = item.as_object()?;
-                    let source = object
-                        .get("source")
-                        .or_else(|| object.get("term"))
-                        .or_else(|| object.get("original"))
-                        .and_then(Value::as_str)?
-                        .trim()
-                        .chars()
-                        .take(MAX_CONTEXT_ITEM_CHARS)
-                        .collect::<String>();
-                    if source.is_empty() {
-                        return None;
-                    }
-                    Some(DocumentTerm {
-                        source,
-                        target: bounded_optional_string(
-                            object,
-                            &["target", "translation"],
-                            MAX_CONTEXT_ITEM_CHARS,
-                        ),
-                        source_kind: bounded_optional_string(
-                            object,
-                            &["source_kind", "kind"],
-                            MAX_CONTEXT_ITEM_CHARS,
-                        ),
-                        confidence: bounded_confidence(object.get("confidence")),
-                        note: bounded_optional_string(
-                            object,
-                            &["note", "reason"],
-                            MAX_CONTEXT_ITEM_CHARS,
-                        ),
-                    })
-                })
-                .take(MAX_CONTEXT_LIST_ITEMS)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn parse_abbreviations(value: Option<&Value>) -> Vec<DocumentAbbreviation> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let object = item.as_object()?;
-                    let abbreviation = object
-                        .get("abbreviation")
-                        .or_else(|| object.get("short"))
-                        .and_then(Value::as_str)?
-                        .trim()
-                        .chars()
-                        .take(MAX_CONTEXT_ITEM_CHARS)
-                        .collect::<String>();
-                    if abbreviation.is_empty() {
-                        return None;
-                    }
-                    Some(DocumentAbbreviation {
-                        abbreviation,
-                        expanded: bounded_optional_string(
-                            object,
-                            &["expanded", "expansion", "full_form"],
-                            MAX_CONTEXT_ITEM_CHARS,
-                        ),
-                        target: bounded_optional_string(
-                            object,
-                            &["target", "translation"],
-                            MAX_CONTEXT_ITEM_CHARS,
-                        ),
-                        confidence: bounded_confidence(object.get("confidence")),
-                    })
-                })
-                .take(MAX_CONTEXT_LIST_ITEMS)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn bounded_confidence(value: Option<&Value>) -> Option<f64> {
-    value
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{DOCUMENT_CONTEXT_SCHEMA_VERSION, DocumentContext, bounded_value, hash_value};
@@ -352,8 +264,8 @@ mod tests {
         .expect("context should normalize");
         assert_eq!(context.schema_version, DOCUMENT_CONTEXT_SCHEMA_VERSION);
         assert_eq!(context.abstract_text.as_deref(), Some("Summary"));
-        assert_eq!(context.key_terms[0].source, "cache");
-        assert_eq!(context.abbreviations[0].abbreviation, "API");
+        assert!(context.key_terms.is_empty());
+        assert!(context.abbreviations.is_empty());
         assert_eq!(context.hash().len(), 64);
     }
 
