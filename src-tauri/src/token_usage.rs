@@ -5,8 +5,8 @@ use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
 use crate::{
     AppState,
     contracts::{
-        ProviderTokenUsageBucket, ProviderTokenUsageBucketKind, ProviderTokenUsageResponse,
-        ProviderTokenUsageStats,
+        ProviderTokenUsageBucket, ProviderTokenUsageBucketKind, ProviderTokenUsageModelBuckets,
+        ProviderTokenUsageResponse, ProviderTokenUsageStats,
     },
     db,
     pdf_protocol::TokenUsage,
@@ -18,7 +18,6 @@ pub(crate) struct ProviderTokenUsageSample {
     pub recorded_at_ms: i64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
-    pub cache_read_tokens: Option<u64>,
 }
 
 pub(crate) fn record_provider_token_usage(
@@ -42,7 +41,6 @@ pub(crate) fn record_provider_token_usage(
                     recorded_at_ms: chrono::Utc::now().timestamp_millis(),
                     input_tokens: usage.and_then(|usage| usage.prompt_tokens),
                     output_tokens: usage.and_then(|usage| usage.completion_tokens),
-                    cache_read_tokens: usage.and_then(|usage| usage.cache_read_tokens),
                 },
             )
         });
@@ -73,6 +71,7 @@ pub(crate) fn aggregate_provider_token_usage(
         .map(|(start_ms, _)| (*start_ms, UsageAccumulator::default()))
         .collect::<HashMap<_, _>>();
     let mut total = UsageAccumulator::default();
+    let mut model_bucket_totals = HashMap::<String, HashMap<i64, UsageAccumulator>>::new();
 
     for sample in samples.iter().filter(|sample| {
         model_id.is_none_or(|selected| sample.model_id == selected)
@@ -85,7 +84,40 @@ pub(crate) fn aggregate_provider_token_usage(
             .ok_or_else(|| "Token 用量记录超出聚合范围".to_string())?;
         accumulator.add(sample);
         total.add(sample);
+        if model_id.is_none() {
+            model_bucket_totals
+                .entry(sample.model_id.clone())
+                .or_default()
+                .entry(start_ms)
+                .or_default()
+                .add(sample);
+        }
     }
+
+    let model_buckets = if model_id.is_none() {
+        models
+            .iter()
+            .map(|model_id| {
+                let mut model_totals = model_bucket_totals.remove(model_id).unwrap_or_default();
+                ProviderTokenUsageModelBuckets {
+                    model_id: model_id.clone(),
+                    buckets: windows
+                        .iter()
+                        .map(|(start_ms, end_ms)| ProviderTokenUsageBucket {
+                            start_ms: *start_ms,
+                            end_ms: *end_ms,
+                            stats: model_totals
+                                .remove(start_ms)
+                                .unwrap_or_default()
+                                .into_stats(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let buckets = windows
         .into_iter()
@@ -106,6 +138,7 @@ pub(crate) fn aggregate_provider_token_usage(
         bucket,
         model_id: model_id.map(str::to_string),
         models,
+        model_buckets,
         buckets,
         totals: total.into_stats(),
     })
@@ -120,12 +153,6 @@ struct UsageAccumulator {
     output_tokens: u64,
     output_known_count: u64,
     output_unknown_count: u64,
-    cache_read_tokens: u64,
-    cache_known_count: u64,
-    cache_known_read_tokens: u64,
-    cache_known_input_tokens: u64,
-    cache_paired_request_count: u64,
-    cache_detail_unknown_count: u64,
 }
 
 impl UsageAccumulator {
@@ -143,18 +170,6 @@ impl UsageAccumulator {
         } else {
             self.output_unknown_count = self.output_unknown_count.saturating_add(1);
         }
-        if let Some(tokens) = sample.cache_read_tokens {
-            self.cache_read_tokens = self.cache_read_tokens.saturating_add(tokens);
-            self.cache_known_count = self.cache_known_count.saturating_add(1);
-            if let Some(input_tokens) = sample.input_tokens {
-                self.cache_known_read_tokens = self.cache_known_read_tokens.saturating_add(tokens);
-                self.cache_known_input_tokens =
-                    self.cache_known_input_tokens.saturating_add(input_tokens);
-                self.cache_paired_request_count = self.cache_paired_request_count.saturating_add(1);
-            }
-        } else {
-            self.cache_detail_unknown_count = self.cache_detail_unknown_count.saturating_add(1);
-        }
     }
 
     fn into_stats(self) -> ProviderTokenUsageStats {
@@ -169,13 +184,8 @@ impl UsageAccumulator {
                 self.output_known_count,
                 self.request_count,
             ),
-            cache_read_tokens: (self.cache_known_count > 0).then_some(self.cache_read_tokens),
-            cache_known_read_tokens: self.cache_known_read_tokens,
-            cache_known_input_tokens: self.cache_known_input_tokens,
-            cache_paired_request_count: self.cache_paired_request_count,
             input_unknown_count: self.input_unknown_count,
             output_unknown_count: self.output_unknown_count,
-            cache_detail_unknown_count: self.cache_detail_unknown_count,
             request_count: self.request_count,
         }
     }
@@ -304,19 +314,17 @@ mod tests {
         recorded_at_ms: i64,
         input: Option<u64>,
         output: Option<u64>,
-        cache: Option<u64>,
     ) -> ProviderTokenUsageSample {
         ProviderTokenUsageSample {
             model_id: model_id.to_string(),
             recorded_at_ms,
             input_tokens: input,
             output_tokens: output,
-            cache_read_tokens: cache,
         }
     }
 
     #[test]
-    fn aggregate_keeps_unknown_cache_usage_and_filters_model() {
+    fn aggregate_filters_model_and_returns_model_buckets() {
         let from_ms = local_midnight(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .unwrap()
             .timestamp_millis();
@@ -331,11 +339,11 @@ mod tests {
             ProviderTokenUsageBucketKind::Day,
             vec!["model-a".to_string(), "model-old".to_string()],
             &[
-                sample("model-a", from_ms + 1, Some(100), Some(20), Some(25)),
-                sample("model-a", from_ms + 2, Some(50), Some(10), None),
-                sample("model-a", from_ms + 3, None, Some(5), Some(8)),
-                sample("model-b", from_ms + 3, Some(900), Some(90), Some(12)),
-                sample("model-a", from_ms - 1, Some(700), Some(70), Some(7)),
+                sample("model-a", from_ms + 1, Some(100), Some(20)),
+                sample("model-a", from_ms + 2, Some(50), Some(10)),
+                sample("model-a", from_ms + 3, None, Some(5)),
+                sample("model-b", from_ms + 3, Some(900), Some(90)),
+                sample("model-a", from_ms - 1, Some(700), Some(70)),
             ],
         )
         .unwrap();
@@ -346,14 +354,27 @@ mod tests {
         assert_eq!(response.totals.request_count, 3);
         assert_eq!(response.totals.input_tokens, Some(150));
         assert_eq!(response.totals.input_unknown_count, 1);
-        assert_eq!(response.totals.cache_read_tokens, Some(33));
-        assert_eq!(response.totals.cache_known_read_tokens, 25);
-        assert_eq!(response.totals.cache_known_input_tokens, 100);
-        assert_eq!(response.totals.cache_paired_request_count, 1);
-        assert_eq!(response.totals.cache_detail_unknown_count, 1);
         assert_eq!(response.buckets.len(), 1);
         assert_eq!(response.buckets[0].stats.request_count, 3);
-        assert_eq!(response.buckets[0].stats.cache_paired_request_count, 1);
+        assert!(response.model_buckets.is_empty());
+
+        let all_models = aggregate_provider_token_usage(
+            "provider-a",
+            None,
+            from_ms,
+            to_ms,
+            ProviderTokenUsageBucketKind::Day,
+            vec!["model-a".to_string(), "model-b".to_string()],
+            &[
+                sample("model-a", from_ms + 1, Some(100), Some(20)),
+                sample("model-b", from_ms + 2, Some(50), Some(10)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(all_models.model_buckets.len(), 2);
+        assert_eq!(all_models.model_buckets[0].model_id, "model-a");
+        assert_eq!(all_models.model_buckets[0].buckets[0].stats.input_tokens, Some(100));
+        assert_eq!(all_models.model_buckets[1].model_id, "model-b");
     }
 
     #[test]
@@ -371,7 +392,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.totals.input_tokens, Some(0));
-        assert_eq!(empty.totals.cache_read_tokens, None);
+        assert!(empty.model_buckets.is_empty());
 
         let unknown = aggregate_provider_token_usage(
             "provider-a",
@@ -380,14 +401,13 @@ mod tests {
             to_ms,
             ProviderTokenUsageBucketKind::Hour,
             Vec::new(),
-            &[sample("model-a", from_ms, None, None, None)],
+            &[sample("model-a", from_ms, None, None)],
         )
         .unwrap();
         assert_eq!(unknown.totals.input_tokens, None);
         assert_eq!(unknown.totals.output_tokens, None);
         assert_eq!(unknown.totals.input_unknown_count, 1);
-        assert_eq!(unknown.totals.cache_detail_unknown_count, 1);
-        assert_eq!(unknown.totals.cache_paired_request_count, 0);
+        assert_eq!(unknown.model_buckets.len(), 0);
 
         let paired_zero = aggregate_provider_token_usage(
             "provider-a",
@@ -396,11 +416,10 @@ mod tests {
             to_ms,
             ProviderTokenUsageBucketKind::Hour,
             Vec::new(),
-            &[sample("model-a", from_ms, Some(0), Some(0), Some(0))],
+            &[sample("model-a", from_ms, Some(0), Some(0))],
         )
         .unwrap();
-        assert_eq!(paired_zero.totals.cache_known_input_tokens, 0);
-        assert_eq!(paired_zero.totals.cache_known_read_tokens, 0);
-        assert_eq!(paired_zero.totals.cache_paired_request_count, 1);
+        assert_eq!(paired_zero.totals.input_tokens, Some(0));
+        assert_eq!(paired_zero.totals.output_tokens, Some(0));
     }
 }

@@ -49,7 +49,6 @@ pub struct ProviderTokenUsageRecord<'a> {
     pub recorded_at_ms: i64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
-    pub cache_read_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -360,7 +359,6 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 recorded_at_ms INTEGER NOT NULL,
                 input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
                 output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
-                cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
                 FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_provider_token_usage_provider_time
@@ -1640,8 +1638,8 @@ pub fn insert_provider_token_usage(
     connection
         .execute(
             "INSERT INTO provider_token_usage
-                (provider_id, model_id, request_id, recorded_at_ms, input_tokens, output_tokens, cache_read_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (provider_id, model_id, request_id, recorded_at_ms, input_tokens, output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 provider_id,
                 model_id,
@@ -1649,7 +1647,6 @@ pub fn insert_provider_token_usage(
                 record.recorded_at_ms,
                 token_count_to_db(record.input_tokens)?,
                 token_count_to_db(record.output_tokens)?,
-                token_count_to_db(record.cache_read_tokens)?,
             ],
         )
         .map_err(|error| format!("写入 Provider Token 用量失败：{error}"))?;
@@ -1689,7 +1686,7 @@ pub fn get_provider_token_usage_records(
 ) -> Result<Vec<ProviderTokenUsageSample>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT model_id, recorded_at_ms, input_tokens, output_tokens, cache_read_tokens
+            "SELECT model_id, recorded_at_ms, input_tokens, output_tokens
              FROM provider_token_usage
              WHERE provider_id = ?1 AND recorded_at_ms >= ?2 AND recorded_at_ms < ?3
                AND (?4 IS NULL OR model_id = ?4)
@@ -1703,20 +1700,18 @@ pub fn get_provider_token_usage_records(
                 row.get::<_, i64>(1)?,
                 row.get::<_, Option<i64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
             ))
         })
         .map_err(|error| format!("读取 Provider Token 用量失败：{error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("读取 Provider Token 用量失败：{error}"))?;
     rows.into_iter()
-        .map(|(model_id, recorded_at_ms, input, output, cache_read)| {
+        .map(|(model_id, recorded_at_ms, input, output)| {
             Ok(ProviderTokenUsageSample {
                 model_id,
                 recorded_at_ms,
                 input_tokens: token_count_from_db(input)?,
                 output_tokens: token_count_from_db(output)?,
-                cache_read_tokens: token_count_from_db(cache_read)?,
             })
         })
         .collect()
@@ -2646,7 +2641,6 @@ mod tests {
                 recorded_at_ms: 100,
                 input_tokens: Some(120),
                 output_tokens: Some(18),
-                cache_read_tokens: Some(30),
             },
         )
         .expect("known token usage should be inserted");
@@ -2659,7 +2653,6 @@ mod tests {
                 recorded_at_ms: 200,
                 input_tokens: None,
                 output_tokens: None,
-                cache_read_tokens: None,
             },
         )
         .expect("missing token fields should be retained as NULL");
@@ -2676,7 +2669,6 @@ mod tests {
         .unwrap();
         assert_eq!(included.len(), 1);
         assert_eq!(included[0].input_tokens, Some(120));
-        assert_eq!(included[0].cache_read_tokens, Some(30));
 
         let missing = get_provider_token_usage_records(
             &connection,
@@ -2688,7 +2680,6 @@ mod tests {
         .unwrap();
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].input_tokens, None);
-        assert_eq!(missing[0].cache_read_tokens, None);
     }
 
     #[test]

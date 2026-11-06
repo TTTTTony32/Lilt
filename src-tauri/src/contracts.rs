@@ -372,13 +372,8 @@ pub enum ProviderTokenUsageBucketKind {
 pub struct ProviderTokenUsageStats {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
-    pub cache_read_tokens: Option<u64>,
-    pub cache_known_read_tokens: u64,
-    pub cache_known_input_tokens: u64,
-    pub cache_paired_request_count: u64,
     pub input_unknown_count: u64,
     pub output_unknown_count: u64,
-    pub cache_detail_unknown_count: u64,
     pub request_count: u64,
 }
 
@@ -400,8 +395,16 @@ pub struct ProviderTokenUsageResponse {
     pub bucket: ProviderTokenUsageBucketKind,
     pub model_id: Option<String>,
     pub models: Vec<String>,
+    pub model_buckets: Vec<ProviderTokenUsageModelBuckets>,
     pub buckets: Vec<ProviderTokenUsageBucket>,
     pub totals: ProviderTokenUsageStats,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTokenUsageModelBuckets {
+    pub model_id: String,
+    pub buckets: Vec<ProviderTokenUsageBucket>,
 }
 
 #[derive(Debug, Clone, Serialize)]

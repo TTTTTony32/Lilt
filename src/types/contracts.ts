@@ -92,12 +92,12 @@ export interface ProviderTokenUsageBucket {
   outputTokens: number | null;
   inputUnknownCount: number;
   outputUnknownCount: number;
-  cacheReadTokens: number | null;
-  cacheKnownReadTokens: number;
-  cacheKnownInputTokens: number;
-  cachePairedRequestCount: number;
-  cacheDetailUnknownCount: number;
   requestCount: number;
+}
+
+export interface ProviderTokenUsageModelBuckets {
+  modelId: string;
+  buckets: ProviderTokenUsageBucket[];
 }
 
 export interface ProviderTokenUsageResponse {
@@ -108,6 +108,7 @@ export interface ProviderTokenUsageResponse {
   toMs: number;
   bucket: ProviderTokenUsageBucketSize;
   buckets: ProviderTokenUsageBucket[];
+  modelBuckets: ProviderTokenUsageModelBuckets[];
   totals: Omit<ProviderTokenUsageBucket, "startMs" | "endMs">;
 }
 

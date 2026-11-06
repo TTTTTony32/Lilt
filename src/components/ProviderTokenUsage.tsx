@@ -27,11 +27,11 @@ const PERIOD_OPTIONS: ReadonlyArray<{ value: ProviderTokenUsageBucketSize; label
 const CHART_WIDTH = 900;
 const CHART_HEIGHT = 248;
 const CHART_PADDING = { top: 16, right: 14, bottom: 42, left: 62 };
-const CHART_SERIES = [
-  { key: "inputTokens", label: "输入（含 CR）", color: "#7d9a82" },
-  { key: "cacheReadTokens", label: "CR", color: "#b0b978" },
+const IO_SERIES = [
+  { key: "inputTokens", label: "输入", color: "#7d9a82" },
   { key: "outputTokens", label: "输出", color: "#c78d73" },
 ] as const;
+const MODEL_COLORS = ["#718e77", "#c08c68", "#7895aa", "#b18191", "#9a945c", "#8173a5", "#689c93", "#aa7955"];
 
 function createRange(bucket: ProviderTokenUsageBucketSize, now: Date): TimeRange {
   const end = new Date(now.getTime());
@@ -96,21 +96,11 @@ function formatBucketTitle(bucket: ProviderTokenUsageBucket, period: ProviderTok
   return formatDateTime(bucket.startMs) + "–" + formatDateTime(lastIncludedMs);
 }
 
-function formatTokenCount(value: number | null, unknownCount = 0): string {
-  if (value === null) return unknownCount > 0 ? "未知" : "—";
-  const formatted = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value);
-  return unknownCount > 0 ? "≥" + formatted : formatted;
-}
-
 function formatSummaryTokenCount(value: number | null, unknownCount: number, requestCount: number): string {
   if (requestCount === 0) return "—";
-  return formatTokenCount(value, unknownCount);
-}
-
-function formatRate(cacheKnownReadTokens: number, cacheKnownInputTokens: number): string {
-  if (cacheKnownInputTokens <= 0) return "—";
-  const rate = (cacheKnownReadTokens / cacheKnownInputTokens) * 100;
-  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(rate) + "%";
+  if (value === null) return "未知";
+  const formatted = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value);
+  return unknownCount > 0 ? "≥" + formatted : formatted;
 }
 
 function formatChartRange(bucket: ProviderTokenUsageBucketSize): string {
@@ -132,26 +122,64 @@ function getErrorMessage(reason: unknown): string {
   return "暂时无法读取 Token 用量";
 }
 
-function Chart({ response, period }: { response: ProviderTokenUsageResponse; period: ProviderTokenUsageBucketSize }) {
+interface ChartSeries {
+  key: string;
+  label: string;
+  color: string;
+  values: number[];
+  unknownCounts: number[];
+}
+
+function Chart({
+  response,
+  period,
+  selectedStartMs,
+  onSelectBucket,
+}: {
+  response: ProviderTokenUsageResponse;
+  period: ProviderTokenUsageBucketSize;
+  selectedStartMs: number | null;
+  onSelectBucket: (bucket: ProviderTokenUsageBucket) => void;
+}) {
   const points = response.buckets;
   const plotWidth = CHART_WIDTH - CHART_PADDING.left - CHART_PADDING.right;
   const plotHeight = CHART_HEIGHT - CHART_PADDING.top - CHART_PADDING.bottom;
-  const knownValues = points.flatMap((point) => CHART_SERIES.map((series) => point[series.key]).filter((value): value is number => value !== null));
-  const maxValue = Math.max(1, ...knownValues);
+  const series: ChartSeries[] = response.modelId === null
+    ? response.models.map((modelId, modelIndex) => {
+      const model = response.modelBuckets.find((item) => item.modelId === modelId);
+      return {
+        key: modelId,
+        label: modelId,
+        color: MODEL_COLORS[modelIndex % MODEL_COLORS.length],
+        values: points.map((point) => {
+          const stats = model?.buckets.find((item) => item.startMs === point.startMs);
+          return (stats?.inputTokens ?? 0) + (stats?.outputTokens ?? 0);
+        }),
+        unknownCounts: points.map((point) => {
+          const stats = model?.buckets.find((item) => item.startMs === point.startMs);
+          return (stats?.inputUnknownCount ?? 0) + (stats?.outputUnknownCount ?? 0);
+        }),
+      };
+    })
+    : IO_SERIES.map((item) => ({
+      ...item,
+      values: points.map((point) => point[item.key] ?? 0),
+      unknownCounts: points.map((point) => item.key === "inputTokens" ? point.inputUnknownCount : point.outputUnknownCount),
+    }));
+  const maxValue = Math.max(1, ...points.map((_, pointIndex) => series.reduce((sum, item) => sum + item.values[pointIndex], 0)));
   const groupWidth = points.length > 0 ? plotWidth / points.length : plotWidth;
-  const barWidth = Math.max(2, Math.min(10, groupWidth * 0.18));
-  const barGap = Math.max(1, Math.min(4, groupWidth * 0.035));
-  const groupBarsWidth = CHART_SERIES.length * barWidth + (CHART_SERIES.length - 1) * barGap;
+  const barWidth = Math.max(3, Math.min(22, groupWidth * 0.58));
   const labelStep = Math.max(1, Math.ceil(points.length / 8));
   const ticks = [0, maxValue / 2, maxValue];
+  const numberFormat = new Intl.NumberFormat("zh-CN");
 
   return (
     <div className="provider-usage-chart-wrap">
       <svg
         className="provider-usage-chart"
         viewBox={"0 0 " + CHART_WIDTH + " " + CHART_HEIGHT}
-        role="img"
-        aria-label={formatChartRange(period) + "的输入、CR 和输出 Token 柱状图"}
+        role="group"
+        aria-label={formatChartRange(period) + (response.modelId === null ? "按模型" : "按输入和输出") + "堆叠的可点击 Token 柱状图"}
         preserveAspectRatio="none"
       >
         {ticks.map((tick, index) => {
@@ -163,35 +191,55 @@ function Chart({ response, period }: { response: ProviderTokenUsageResponse; per
             </g>
           );
         })}
-        {points.map((point, index) => {
-          const groupX = CHART_PADDING.left + index * groupWidth + (groupWidth - groupBarsWidth) / 2;
-          const xLabelY = CHART_HEIGHT - 14;
-          const showLabel = index % labelStep === 0 || index === points.length - 1;
+        {points.map((point, pointIndex) => {
+          const x = CHART_PADDING.left + pointIndex * groupWidth + (groupWidth - barWidth) / 2;
+          const showLabel = pointIndex % labelStep === 0 || pointIndex === points.length - 1;
+          let stackOffset = 0;
+          const total = series.reduce((sum, item) => sum + item.values[pointIndex], 0);
+          const unknownCount = series.reduce((sum, item) => sum + item.unknownCounts[pointIndex], 0);
+          const isSelected = point.startMs === selectedStartMs;
+          const bucketStartMs = Math.max(point.startMs, response.fromMs);
+          const selectedEndMs = Math.min(point.endMs, response.toMs);
           return (
-            <g key={point.startMs}>
-              {CHART_SERIES.map((series, seriesIndex) => {
-                const value = point[series.key];
-                if (value === null) return null;
+            <g
+              key={point.startMs}
+              className={"provider-usage-chart-column" + (isSelected ? " is-selected" : "")}
+              role="button"
+              tabIndex={0}
+              aria-pressed={isSelected}
+              aria-label={formatBucketTitle(point, period) + `：${numberFormat.format(total)} Token，${unknownCount} 项用量未知，点击查看详情`}
+              onClick={() => onSelectBucket({ ...point, startMs: bucketStartMs, endMs: selectedEndMs })}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelectBucket({ ...point, startMs: bucketStartMs, endMs: selectedEndMs });
+                }
+              }}
+            >
+              <rect className="provider-usage-column-hitbox" x={CHART_PADDING.left + pointIndex * groupWidth} y={CHART_PADDING.top} width={groupWidth} height={plotHeight} />
+              {series.map((item) => {
+                const value = item.values[pointIndex];
                 const barHeight = value > 0 ? Math.max(1, (value / maxValue) * plotHeight) : 0;
-                const x = groupX + seriesIndex * (barWidth + barGap);
-                const y = CHART_PADDING.top + plotHeight - barHeight;
+                stackOffset += barHeight;
+                if (value <= 0) return null;
+                const y = CHART_PADDING.top + plotHeight - stackOffset;
                 return (
                   <rect
-                    key={series.key}
+                    key={item.key}
                     className="provider-usage-chart-bar"
                     x={x}
                     y={y}
                     width={barWidth}
                     height={barHeight}
-                    rx={Math.min(2, barWidth / 2)}
-                    fill={series.color}
+                    fill={item.color}
                   >
-                    <title>{formatBucketTitle(point, period) + " · " + series.label + "：" + new Intl.NumberFormat("zh-CN").format(value) + " tokens"}</title>
+                    <title>{formatBucketTitle(point, period) + " · " + item.label + "：" + numberFormat.format(value) + " tokens" + (item.unknownCounts[pointIndex] > 0 ? "（已知小计）" : "")}</title>
                   </rect>
                 );
               })}
+              {isSelected && <rect className="provider-usage-column-outline" x={x - 2} y={CHART_PADDING.top + plotHeight - Math.max(1, (total / maxValue) * plotHeight) - 2} width={barWidth + 4} height={Math.max(3, (total / maxValue) * plotHeight + 4)} />}
               {showLabel && (
-                <text className="provider-usage-axis-label provider-usage-x-label" x={CHART_PADDING.left + index * groupWidth + groupWidth / 2} y={xLabelY} textAnchor="middle">
+                <text className="provider-usage-axis-label provider-usage-x-label" x={CHART_PADDING.left + pointIndex * groupWidth + groupWidth / 2} y={CHART_HEIGHT - 14} textAnchor="middle">
                   {formatAxisLabel(point, period)}
                 </text>
               )}
@@ -226,6 +274,7 @@ function SummaryMetric({
 export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUsageProps) {
   const [period, setPeriod] = useState<ProviderTokenUsageBucketSize>("day");
   const [modelId, setModelId] = useState<string | null>(null);
+  const [selectedBucket, setSelectedBucket] = useState<ProviderTokenUsageBucket | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [refreshNowMs, setRefreshNowMs] = useState(() => Date.now());
   const [chartResponse, setChartResponse] = useState<ProviderTokenUsageResponse | null>(null);
@@ -235,24 +284,26 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const chartRange = createRange(period, new Date(refreshNowMs));
+  const summaryFromMs = selectedBucket?.startMs ?? refreshNowMs - 24 * 60 * 60 * 1000;
+  const summaryToMs = selectedBucket?.endMs ?? refreshNowMs;
+  const summaryBucket = selectedBucket ? period : "hour";
 
   useEffect(() => {
     setModelId(null);
+    setSelectedBucket(null);
     setAvailableModels([]);
   }, [providerId]);
 
   useEffect(() => {
     let active = true;
-    const now = refreshNowMs;
-    const fromMs = now - 24 * 60 * 60 * 1000;
     setSummaryError(null);
     setSummaryLoading(true);
     void invokeCommand<ProviderTokenUsageResponse>("get_provider_token_usage", {
       providerId,
       modelId,
-      fromMs,
-      toMs: now,
-      bucket: "hour",
+      fromMs: summaryFromMs,
+      toMs: summaryToMs,
+      bucket: summaryBucket,
     }).then((response) => {
       if (active && response.providerId === providerId && response.modelId === modelId) {
         setSummaryResponse(response);
@@ -264,7 +315,7 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
       if (active) setSummaryLoading(false);
     });
     return () => { active = false; };
-  }, [modelId, providerId, refreshNowMs]);
+  }, [modelId, providerId, refreshNowMs, summaryBucket, summaryFromMs, summaryToMs]);
 
   useEffect(() => {
     let active = true;
@@ -289,7 +340,13 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
     return () => { active = false; };
   }, [chartRange.fromMs, chartRange.toMs, modelId, period, providerId]);
 
-  const currentSummaryResponse = summaryResponse?.providerId === providerId && summaryResponse.modelId === modelId ? summaryResponse : null;
+  const currentSummaryResponse = summaryResponse?.providerId === providerId
+    && summaryResponse.modelId === modelId
+    && summaryResponse.fromMs === summaryFromMs
+    && summaryResponse.toMs === summaryToMs
+    && summaryResponse.bucket === summaryBucket
+    ? summaryResponse
+    : null;
   const currentChartResponse = chartResponse?.providerId === providerId
     && chartResponse.modelId === modelId
     && chartResponse.bucket === period
@@ -303,16 +360,12 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
   const isChartLoading = chartLoading || (!currentChartResponse && !chartError);
   const summaryForDisplay = currentSummaryResponse ?? previousSummaryResponse;
   const summary = summaryForDisplay?.totals;
-  const summaryRangeLabel = summaryForDisplay
-    ? formatDateTime(summaryForDisplay.fromMs) + " 至 " + formatDateTime(summaryForDisplay.toMs)
-    : "滚动24小时";
+  const summaryRangeLabel = selectedBucket
+    ? formatBucketTitle(selectedBucket, period) + " · " + formatDateTime(summaryFromMs) + " 至 " + formatDateTime(summaryToMs)
+    : summaryForDisplay
+      ? formatDateTime(summaryForDisplay.fromMs) + " 至 " + formatDateTime(summaryForDisplay.toMs)
+      : "滚动24小时";
   const chartRequestCount = currentChartResponse?.totals.requestCount ?? 0;
-  const summaryCacheRate = formatRate(summary?.cacheKnownReadTokens ?? 0, summary?.cacheKnownInputTokens ?? 0);
-  const hasPairedCacheDetails = (summary?.cachePairedRequestCount ?? 0) > 0;
-  const uncachedInputTokens = hasPairedCacheDetails && summary
-    ? summary.cacheKnownInputTokens - summary.cacheKnownReadTokens
-    : null;
-  const uncachedInputUnknownCount = summary && (summary.inputUnknownCount > 0 || summary.cacheDetailUnknownCount > 0) ? 1 : 0;
 
   return (
     <section className="provider-token-usage" aria-labelledby="provider-token-usage-heading">
@@ -338,7 +391,10 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
         <select
           id="provider-usage-model"
           value={modelId ?? ""}
-          onChange={(event) => setModelId(event.target.value || null)}
+          onChange={(event) => {
+            setSelectedBucket(null);
+            setModelId(event.target.value || null);
+          }}
           disabled={availableModels.length === 0 && (summaryLoading || chartLoading)}
         >
           <option value="">全部模型</option>
@@ -348,7 +404,7 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
 
       <div className="provider-usage-summary-heading">
         <div>
-          <strong>最近24小时</strong>
+          <strong>{selectedBucket ? formatBucketTitle(selectedBucket, period) : "最近24小时"}</strong>
           <span>{summaryRangeLabel} · 本地时间</span>
         </div>
         {summary && <small>{new Intl.NumberFormat("zh-CN").format(summary.requestCount)} 次请求{isSummaryLoading ? " · 更新中" : ""}</small>}
@@ -359,48 +415,21 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
       ) : (
         <div className={isSummaryLoading && previousSummaryResponse ? "provider-usage-summary is-refreshing" : "provider-usage-summary"} aria-live="polite" aria-busy={isSummaryLoading}>
           <SummaryMetric
-            label="CR"
-            value={isSummaryLoading && !summary ? "…" : formatSummaryTokenCount(summary?.cacheReadTokens ?? null, summary?.cacheDetailUnknownCount ?? 0, summary?.requestCount ?? 0)}
-            description={summary?.cacheReadTokens === null && (summary?.cacheDetailUnknownCount ?? 0) > 0
-              ? "Provider 未返回缓存明细"
-              : summary?.cacheDetailUnknownCount ? "已知 CR 小计" : "缓存读取 Token"}
-            className="is-cache"
-          />
-          <SummaryMetric
             label="输入"
             value={isSummaryLoading && !summary ? "…" : formatSummaryTokenCount(summary?.inputTokens ?? null, summary?.inputUnknownCount ?? 0, summary?.requestCount ?? 0)}
-            description={summary?.inputUnknownCount ? "已知输入小计，含 CR" : "API 总输入，含 CR"}
+            description={summary?.inputUnknownCount ? "已知输入小计" : "输入 Token"}
             className="is-input"
           />
-          {(!isSummaryLoading || previousSummaryResponse) && hasPairedCacheDetails && (
-            <SummaryMetric
-              label="非缓存输入"
-              value={formatTokenCount(uncachedInputTokens, uncachedInputUnknownCount)}
-              description={uncachedInputUnknownCount > 0 ? "已知配对明细小计" : "已知输入 − CR"}
-              className="is-uncached-input"
-            />
-          )}
           <SummaryMetric
             label="输出"
             value={isSummaryLoading && !summary ? "…" : formatSummaryTokenCount(summary?.outputTokens ?? null, summary?.outputUnknownCount ?? 0, summary?.requestCount ?? 0)}
-            description="输出 Token"
+            description={summary?.outputUnknownCount ? "已知输出小计" : "输出 Token"}
             className="is-output"
-          />
-          <SummaryMetric
-            label="缓存率"
-            value={isSummaryLoading && !summary ? "…" : summaryCacheRate}
-            description={summary?.cacheDetailUnknownCount || summary?.inputUnknownCount ? "按两项明细均已知的请求计算" : "CR ÷ 已知输入"}
-            className="is-rate"
           />
         </div>
       )}
-      {!isSummaryLoading && summary && summary.cacheDetailUnknownCount > 0 && (
-        <p className="provider-usage-note" role="note">
-          {new Intl.NumberFormat("zh-CN").format(summary.cacheDetailUnknownCount)} 次请求缺少缓存明细，非缓存输入和缓存率仅按已知配对明细计算
-        </p>
-      )}
       {!isSummaryLoading && summary && summary.inputUnknownCount > 0 && (
-        <p className="provider-usage-note" role="note">{new Intl.NumberFormat("zh-CN").format(summary.inputUnknownCount)} 次请求缺少输入 Token，缓存率不计入这些请求</p>
+        <p className="provider-usage-note" role="note">{new Intl.NumberFormat("zh-CN").format(summary.inputUnknownCount)} 次请求缺少输入 Token，输入显示已知小计</p>
       )}
       {!isSummaryLoading && summary && summary.outputUnknownCount > 0 && (
         <p className="provider-usage-note" role="note">{new Intl.NumberFormat("zh-CN").format(summary.outputUnknownCount)} 次请求缺少输出 Token，输出值为已知小计</p>
@@ -418,7 +447,10 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
               key={option.value}
               className={period === option.value ? "is-active" : ""}
               aria-pressed={period === option.value}
-              onClick={() => setPeriod(option.value)}
+              onClick={() => {
+                setSelectedBucket(null);
+                setPeriod(option.value);
+              }}
             >
               {option.label}
             </button>
@@ -427,7 +459,9 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
       </div>
 
       <div className="provider-usage-legend" aria-hidden="true">
-        {CHART_SERIES.map((series) => <span key={series.key}><i style={{ backgroundColor: series.color }} />{series.label}</span>)}
+        {modelId === null
+          ? availableModels.map((model, index) => <span key={model}><i style={{ backgroundColor: MODEL_COLORS[index % MODEL_COLORS.length] }} />{model}</span>)
+          : IO_SERIES.map((series) => <span key={series.key}><i style={{ backgroundColor: series.color }} />{series.label}</span>)}
       </div>
       {chartError ? (
         <div className="provider-usage-error" role="alert">趋势读取失败：{chartError}</div>
@@ -438,19 +472,21 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
       ) : currentChartResponse || previousChartResponse ? (
         <div className="provider-usage-chart-stage" aria-busy={isChartLoading}>
           <div className={isChartLoading && previousChartResponse ? "provider-usage-chart-content is-refreshing" : "provider-usage-chart-content"}>
-            <Chart response={currentChartResponse ?? previousChartResponse!} period={(currentChartResponse ?? previousChartResponse!).bucket} />
-            <p className="provider-usage-chart-caption">输入包含 CR，柱形并列展示以便比较 · 数据按本地时间汇总</p>
+            <Chart
+              response={currentChartResponse ?? previousChartResponse!}
+              period={(currentChartResponse ?? previousChartResponse!).bucket}
+              selectedStartMs={selectedBucket?.startMs ?? null}
+              onSelectBucket={setSelectedBucket}
+            />
+            <p className="provider-usage-chart-caption">
+              {modelId === null ? "按模型堆叠输入 + 输出" : "按输入、输出堆叠"} · 点击柱查看该时间段的输入、输出和请求数
+            </p>
           </div>
           {isChartLoading && previousChartResponse && <div className="provider-usage-refresh-overlay" role="status"><LoaderCircle size={15} className="provider-usage-spinner" aria-hidden="true" />正在更新所选趋势</div>}
         </div>
       ) : null}
-      {!isChartLoading && currentChartResponse && currentChartResponse.totals.cacheDetailUnknownCount > 0 && (
-        <p className="provider-usage-note" role="note">
-          {new Intl.NumberFormat("zh-CN").format(currentChartResponse.totals.cacheDetailUnknownCount)} 次请求缺少缓存明细，趋势中的 CR 仅统计已知明细
-        </p>
-      )}
       {!isChartLoading && currentChartResponse && currentChartResponse.totals.inputUnknownCount > 0 && (
-        <p className="provider-usage-note" role="note">趋势中输入仅显示已知小计；{new Intl.NumberFormat("zh-CN").format(currentChartResponse.totals.inputUnknownCount)} 次请求不计入缓存率</p>
+        <p className="provider-usage-note" role="note">趋势中输入仅显示已知小计；{new Intl.NumberFormat("zh-CN").format(currentChartResponse.totals.inputUnknownCount)} 次请求缺少输入用量</p>
       )}
       {!isChartLoading && currentChartResponse && currentChartResponse.totals.outputUnknownCount > 0 && (
         <p className="provider-usage-note" role="note">趋势中输出仅显示已知小计</p>
