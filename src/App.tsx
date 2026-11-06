@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef, useState, type AnimationEvent as ReactAnimationEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type Ref } from "react";
+import { createPortal } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import { ArrowLeft, Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Pencil, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Pencil, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
 import openaiLogo from "./assets/openai.svg";
@@ -23,6 +24,7 @@ import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
 import { usePdfEngineRuntime, type PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
 import { summarizeUpdaterUpdate, type GitHubReleaseSummary } from "./lib/release-version";
 import { formatSelectionShortcut } from "./lib/selection-shortcut";
+import { createSettingsWorkspace, createWorkspacePrompt, createWorkspaceProvider, isSettingsWorkspaceDirty, workspaceSaveInput, type SettingsWorkspaceDraft, type WorkspaceProvider } from "./lib/settings-workspace";
 import {
   downloadActivityKey,
   downloadActivityReducer,
@@ -66,7 +68,6 @@ import {
   decodeParagraphLearningResult,
   decodeWordExampleCommandResult,
   decodeWordExampleEvent,
-  decodePrompt,
   decodeGlossaryExportResult,
   decodeGlossaryImportPreview,
   decodeGlossaryImportResult,
@@ -169,6 +170,7 @@ function toggleSelectionMode(mode: AppSettings["selectionMode"], option: Selecti
 }
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+type MainNavigationTab = Exclude<AppTab, "personal"> | "settings";
 type SettingsResourceModal = "dictionary" | "pdf-engine";
 type SettingsNavigationTarget = {
   sectionId: SettingsSectionId;
@@ -176,34 +178,6 @@ type SettingsNavigationTarget = {
   modal?: SettingsResourceModal;
 };
 const SETTINGS_CHROME_HEIGHT = 76;
-
-interface SettingsDraft {
-  providerId: string;
-  providerName: string;
-  baseUrl: string;
-  modelId: string;
-  thinkingEffort: ThinkingEffort;
-  apiProtocol: ApiProtocol;
-  apiKey: string;
-  settings: AppSettings;
-  selectionMode: AppSettings["selectionMode"];
-  selectionShortcut: string;
-}
-
-function createSettingsDraft(snapshot: AppSnapshot): SettingsDraft {
-  return {
-    providerId: snapshot.provider.id,
-    providerName: snapshot.provider.name,
-    baseUrl: snapshot.provider.baseUrl,
-    modelId: snapshot.provider.modelId,
-    thinkingEffort: snapshot.provider.thinkingEffort ?? "none",
-    apiProtocol: snapshot.provider.apiProtocol,
-    apiKey: "",
-    settings: snapshot.settings,
-    selectionMode: snapshot.settings.selectionMode,
-    selectionShortcut: snapshot.settings.selectionShortcut,
-  };
-}
 
 function formatTranslationSummary(summary: TranslationSummary): string {
   return `${(summary.durationMs / 1000).toFixed(2)}秒·${summary.cacheHit ? "缓存命中" : "未命中缓存"}`;
@@ -401,6 +375,8 @@ function App() {
   const [closeDialogMounted, setCloseDialogMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsWorkspaceMounted, setSettingsWorkspaceMounted] = useState(false);
+  const [settingsConfirmOpen, setSettingsConfirmOpen] = useState(false);
+  const [settingsConfirmMounted, setSettingsConfirmMounted] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyOverlayMounted, setHistoryOverlayMounted] = useState(false);
   const [dataTransferOpen, setDataTransferOpen] = useState(false);
@@ -438,6 +414,8 @@ function App() {
   const activePdfEngineOperationId = useRef<string | null>(null);
   const activeWordExampleRequestId = useRef<string | null>(null);
   const settingsWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const settingsViewRef = useRef<SettingsViewHandle | null>(null);
+  const pendingSettingsExitRef = useRef<AppTab | null>(null);
   const settingsOpenRef = useRef(settingsOpen);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
   const settingsReturnFocusIdRef = useRef<string | null>(null);
@@ -702,14 +680,36 @@ function App() {
     setSettingsOpen(true);
   }, [settingsOpen]);
 
-  const requestSettingsClose = useCallback(() => {
+  const finishSettingsExit = useCallback((target: AppTab | null) => {
     setSettingsNavigationTarget(null);
     setSettingsOpen(false);
+    if (target) setTab(target);
   }, []);
 
+  const requestSettingsClose = useCallback((target: AppTab | null = null) => {
+    if (settingsViewRef.current?.isSaving()) return;
+    if (settingsViewRef.current?.isDirty()) {
+      pendingSettingsExitRef.current = target;
+      setSettingsConfirmMounted(true);
+      setSettingsConfirmOpen(true);
+      return;
+    }
+    finishSettingsExit(target);
+  }, [finishSettingsExit]);
+
+  const changeMainNavigation = useCallback((target: MainNavigationTab) => {
+    if (target === "settings") {
+      openSettings();
+    } else if (settingsOpen) {
+      requestSettingsClose(target);
+    } else {
+      setTab(target);
+    }
+  }, [openSettings, requestSettingsClose, settingsOpen]);
+
   const openPdf = useCallback(() => {
-    if (settingsOpen) requestSettingsClose();
-    setTab("pdf");
+    if (settingsOpen) requestSettingsClose("pdf");
+    else setTab("pdf");
   }, [requestSettingsClose, settingsOpen]);
 
   const openSettingsAt = useCallback((target: SettingsNavigationTarget) => {
@@ -1757,9 +1757,12 @@ function App() {
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
         </div>
-        {!settingsOpen && <ModeSwitcher activeTab={tab === "personal" ? "dictionary" : tab} onChange={setTab} />}
+        <ModeSwitcher
+          activeTab={settingsOpen ? "settings" : tab === "personal" ? "dictionary" : tab}
+          onChange={changeMainNavigation}
+          onSettingsRef={(element) => { settingsToggleRef.current = element; }}
+        />
         <div className="chrome-actions" data-no-drag>
-          <button ref={settingsToggleRef} className={`chrome-icon-button ${settingsOpen ? "is-active" : ""}`} type="button" onClick={settingsOpen ? requestSettingsClose : openSettings} aria-label={settingsOpen ? "返回 Lilt" : "打开设置"} aria-expanded={settingsOpen} title={settingsOpen ? "返回 Lilt" : "设置"}>{settingsOpen ? <ArrowLeft size={16} /> : <Settings size={16} />}</button>
           <div className="window-controls" data-no-drag>
             <button className="window-control" type="button" onClick={minimizeMainWindow} aria-label="最小化窗口" title="最小化"><Minus size={14} /></button>
             <button className="window-control" type="button" onClick={() => void toggleMainWindowMaximized()} aria-label={mainWindowMaximized ? "还原窗口" : "最大化窗口"} title={mainWindowMaximized ? "还原" : "最大化"}>{mainWindowMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
@@ -1781,6 +1784,7 @@ function App() {
             }}
           >
             <SettingsView
+              ref={settingsViewRef}
               snapshot={snapshot}
               dictionaryProgress={dictionaryProgress}
               dictionaryEventsError={dictionaryEventsError}
@@ -1791,6 +1795,7 @@ function App() {
               onToast={showAppToast}
               onCheckForUpdates={() => void checkForUpdates("manual")}
               releaseCheckPending={releaseCheckPending}
+              onRequestClose={() => requestSettingsClose()}
             />
           </div>
         )}
@@ -1880,6 +1885,25 @@ function App() {
         )}
       </main>
       </div>
+      {settingsConfirmMounted && (
+        <SettingsUnsavedDialog
+          open={settingsConfirmOpen}
+          onCancel={() => setSettingsConfirmOpen(false)}
+          onClosed={() => setSettingsConfirmMounted(false)}
+          onDiscard={() => {
+            setSettingsConfirmOpen(false);
+            finishSettingsExit(pendingSettingsExitRef.current);
+            pendingSettingsExitRef.current = null;
+          }}
+          onSave={async () => {
+            if (!await settingsViewRef.current?.save()) return false;
+            setSettingsConfirmOpen(false);
+            finishSettingsExit(pendingSettingsExitRef.current);
+            pendingSettingsExitRef.current = null;
+            return true;
+          }}
+        />
+      )}
       {historyOverlayMounted && (
         <AnimatedOverlay
           className="history-overlay"
@@ -1967,6 +1991,55 @@ function App() {
         onResourceClick={handleDownloadActivityClick}
       />
     </div>
+  );
+}
+
+function SettingsUnsavedDialog({ open, onSave, onDiscard, onCancel, onClosed }: {
+  open: boolean;
+  onSave: () => Promise<boolean>;
+  onDiscard: () => void;
+  onCancel: () => void;
+  onClosed: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!open) return undefined;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || busy) return;
+      event.preventDefault();
+      onCancel();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [busy, onCancel, open]);
+  return (
+    <AnimatedOverlay
+      className="modal-backdrop"
+      open={open}
+      onClosed={() => {
+        onClosed();
+        if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus({ preventScroll: true });
+      }}
+      onBackdropClick={(event) => { if (!busy && event.target === event.currentTarget) onCancel(); }}
+    >
+      <div className="modal-card" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-unsaved-title" tabIndex={-1}>
+        <div className="modal-heading"><div><strong id="settings-unsaved-title">设置尚未保存</strong><span>要保存修改并返回吗</span></div></div>
+        <div className="form-actions modal-actions settings-confirm-actions">
+          <button className="secondary-button" type="button" onClick={onCancel} disabled={busy}>继续编辑</button>
+          <button className="secondary-button" type="button" onClick={onDiscard} disabled={busy}>放弃并返回</button>
+          <button className="primary-button" type="button" disabled={busy} onClick={() => {
+            setBusy(true);
+            void onSave().finally(() => setBusy(false));
+          }}>{busy ? "保存中…" : "保存并返回"}</button>
+        </div>
+      </div>
+    </AnimatedOverlay>
   );
 }
 
@@ -2387,9 +2460,9 @@ function ReleaseNoticeDialog({
   );
 }
 
-function ModeSwitcher({ activeTab, onChange }: { activeTab: AppTab; onChange: (tab: AppTab) => void }) {
+function ModeSwitcher({ activeTab, onChange, onSettingsRef }: { activeTab: MainNavigationTab; onChange: (tab: MainNavigationTab) => void; onSettingsRef: (button: HTMLButtonElement | null) => void }) {
   const switcherRef = useRef<HTMLElement | null>(null);
-  const buttonRefs = useRef<Partial<Record<AppTab, HTMLButtonElement | null>>>({});
+  const buttonRefs = useRef<Partial<Record<MainNavigationTab, HTMLButtonElement | null>>>({});
   const [indicator, setIndicator] = useState({ left: 0, width: 0, ready: false });
 
   const updateIndicator = useCallback(() => {
@@ -2424,8 +2497,9 @@ function ModeSwitcher({ activeTab, onChange }: { activeTab: AppTab; onChange: (t
     };
   }, [updateIndicator]);
 
-  const setButtonRef = (tab: AppTab) => (button: HTMLButtonElement | null) => {
+  const setButtonRef = (tab: MainNavigationTab) => (button: HTMLButtonElement | null) => {
     buttonRefs.current[tab] = button;
+    if (tab === "settings") onSettingsRef(button);
   };
 
   return (
@@ -2443,6 +2517,7 @@ function ModeSwitcher({ activeTab, onChange }: { activeTab: AppTab; onChange: (t
       <ModeButton buttonRef={setButtonRef("dictionary")} icon={<BookOpen size={15} />} label="词典" active={activeTab === "dictionary"} onClick={() => onChange("dictionary")} />
       <ModeButton buttonRef={setButtonRef("pdf")} icon={<FileType2 size={15} />} label="PDF" active={activeTab === "pdf"} onClick={() => onChange("pdf")} />
       <ModeButton buttonRef={setButtonRef("glossary")} icon={<FileText size={15} />} label="术语表" active={activeTab === "glossary"} onClick={() => onChange("glossary")} />
+      <ModeButton buttonRef={setButtonRef("settings")} icon={<Settings size={15} />} label="设置" active={activeTab === "settings"} onClick={() => onChange("settings")} />
     </nav>
   );
 }
@@ -2789,279 +2864,104 @@ function PromptManager({
   prompts,
   providerId,
   currentPromptId,
-  onChanged,
-  onToast,
+  referencedPromptIds,
+  onChange,
+  onCreate,
+  onDefault,
+  onRemove,
 }: {
   prompts: Prompt[];
   providerId: string;
   currentPromptId: string;
-  onChanged: () => Promise<void>;
-  onToast: ShowToast;
+  referencedPromptIds: Set<string>;
+  onChange: (id: string, patch: Partial<Pick<Prompt, "name" | "content" | "sourceLanguage" | "targetLanguage">>) => void;
+  onCreate: () => Prompt;
+  onDefault: (id: string) => void;
+  onRemove: (id: string) => void;
 }) {
-  type PromptDraft = { selectedId: string | null; name: string; content: string; sourceLanguage: string; targetLanguage: string };
-  const initialPrompt = prompts.find((prompt) => prompt.id === currentPromptId) ?? prompts[0] ?? null;
-  const [selectedId, setSelectedId] = useState<string | null>(initialPrompt?.id ?? null);
-  const [name, setName] = useState(initialPrompt?.name ?? "");
-  const [content, setContent] = useState(initialPrompt?.content ?? "");
-  const [sourceLanguage, setSourceLanguage] = useState(initialPrompt?.sourceLanguage ?? "auto");
-  const [targetLanguage, setTargetLanguage] = useState(initialPrompt?.targetLanguage ?? "zh-CN");
-  const [creating, setCreating] = useState(false);
-  const promptDraftRef = useRef<PromptDraft>({
-    selectedId: initialPrompt?.id ?? null,
-    name: initialPrompt?.name ?? "",
-    content: initialPrompt?.content ?? "",
-    sourceLanguage: initialPrompt?.sourceLanguage ?? "auto",
-    targetLanguage: initialPrompt?.targetLanguage ?? "zh-CN",
-  });
-  const promptSaveTimerRef = useRef<number | null>(null);
-  const promptSaveVersionRef = useRef(0);
-  const promptSavingRef = useRef(false);
-  const promptDirtyRef = useRef(false);
-  const promptDisposedRef = useRef(false);
-  const pendingSelectionIdRef = useRef<string | null>(null);
-  const queuedPromptSaveRef = useRef<{ draft: PromptDraft; version: number } | null>(null);
-
+  const [selectedId, setSelectedId] = useState<string | null>(currentPromptId);
+  const previousProviderRef = useRef(providerId);
   useEffect(() => {
-    if (promptDirtyRef.current) return;
-    const pendingSelectionId = pendingSelectionIdRef.current;
-    if (pendingSelectionId && !prompts.some((prompt) => prompt.id === pendingSelectionId)) return;
-    if (pendingSelectionId) pendingSelectionIdRef.current = null;
-    const selected = prompts.find((prompt) => prompt.id === selectedId)
-      ?? prompts.find((prompt) => prompt.id === currentPromptId)
-      ?? prompts[0]
-      ?? null;
-    if (!selected) {
-      setSelectedId(null);
-      setName("");
-      setContent("");
-      setSourceLanguage("auto");
-      setTargetLanguage("zh-CN");
-      promptDraftRef.current = { selectedId: null, name: "", content: "", sourceLanguage: "auto", targetLanguage: "zh-CN" };
-      return;
-    }
-    if (selected.id !== selectedId) setSelectedId(selected.id);
-    setName(selected.name);
-    setContent(selected.content);
-    setSourceLanguage(selected.sourceLanguage);
-    setTargetLanguage(selected.targetLanguage);
-    promptDraftRef.current = { selectedId: selected.id, name: selected.name, content: selected.content, sourceLanguage: selected.sourceLanguage, targetLanguage: selected.targetLanguage };
-  }, [currentPromptId, prompts, selectedId]);
-
-  const savePromptDraft = useCallback(async (draft: PromptDraft, version: number) => {
-    if (promptSavingRef.current) {
-      const queued = queuedPromptSaveRef.current;
-      if (!queued || version >= queued.version) queuedPromptSaveRef.current = { draft, version };
-      return;
-    }
-    if (!draft.selectedId || !draft.name.trim()) return;
-    promptSavingRef.current = true;
-    try {
-      const raw = await invokeCommand<unknown>("update_prompt", {
-        id: draft.selectedId,
-        name: draft.name,
-        content: draft.content,
-        sourceLanguage: draft.sourceLanguage,
-        targetLanguage: draft.targetLanguage,
-      });
-      const next = decodePrompt(raw);
-      if (!next) throw new Error("提示词命令返回了无法识别的结果");
-      if (version === promptSaveVersionRef.current) {
-        promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content, sourceLanguage: next.sourceLanguage, targetLanguage: next.targetLanguage };
-        promptDirtyRef.current = false;
-        if (!promptDisposedRef.current) {
-          setSelectedId(next.id);
-          setName(next.name);
-          setContent(next.content);
-          setSourceLanguage(next.sourceLanguage);
-          setTargetLanguage(next.targetLanguage);
-        }
-      }
-      await onChanged();
-    } catch (reason) {
-      if (version === promptSaveVersionRef.current && !promptDisposedRef.current) {
-        onToast(describeError(reason, "提示词自动保存失败"), "error");
-      }
-    } finally {
-      promptSavingRef.current = false;
-      const queued = queuedPromptSaveRef.current;
-      queuedPromptSaveRef.current = null;
-      if (queued) {
-        void savePromptDraft(queued.draft, queued.version);
-      } else if (version !== promptSaveVersionRef.current && promptDirtyRef.current) {
-        void savePromptDraft(promptDraftRef.current, promptSaveVersionRef.current);
-      }
-    }
-  }, [onChanged, onToast]);
-
-  const schedulePromptSave = useCallback(() => {
-    promptSaveVersionRef.current += 1;
-    if (promptSaveTimerRef.current !== null) window.clearTimeout(promptSaveTimerRef.current);
-    const version = promptSaveVersionRef.current;
-    const draft = promptDraftRef.current;
-    promptSaveTimerRef.current = window.setTimeout(() => {
-      promptSaveTimerRef.current = null;
-      void savePromptDraft(draft, version);
-    }, 650);
-  }, [savePromptDraft]);
-
-  const updatePromptDraft = (patch: Partial<{ name: string; content: string; sourceLanguage: string; targetLanguage: string }>) => {
-    const next = { ...promptDraftRef.current, ...patch };
-    promptDraftRef.current = next;
-    promptDirtyRef.current = true;
-    setName(next.name);
-    setContent(next.content);
-    setSourceLanguage(next.sourceLanguage);
-    setTargetLanguage(next.targetLanguage);
-    schedulePromptSave();
-  };
-
-  useEffect(() => () => {
-    promptDisposedRef.current = true;
-    if (promptSaveTimerRef.current !== null) {
-      window.clearTimeout(promptSaveTimerRef.current);
-      promptSaveTimerRef.current = null;
-      if (promptDirtyRef.current) void savePromptDraft(promptDraftRef.current, promptSaveVersionRef.current);
-    }
-  }, [savePromptDraft]);
-
-  const selectPrompt = (prompt: Prompt) => {
-    const pendingDraft = promptDraftRef.current;
-    const pendingVersion = promptSaveVersionRef.current;
-    if (promptSaveTimerRef.current !== null) {
-      window.clearTimeout(promptSaveTimerRef.current);
-      promptSaveTimerRef.current = null;
-    }
-    if (promptDirtyRef.current) void savePromptDraft(pendingDraft, pendingVersion);
-    promptSaveVersionRef.current += 1;
-    promptDirtyRef.current = false;
-    pendingSelectionIdRef.current = null;
-    promptDraftRef.current = { selectedId: prompt.id, name: prompt.name, content: prompt.content, sourceLanguage: prompt.sourceLanguage, targetLanguage: prompt.targetLanguage };
-    setSelectedId(prompt.id);
-    setName(prompt.name);
-    setContent(prompt.content);
-    setSourceLanguage(prompt.sourceLanguage);
-    setTargetLanguage(prompt.targetLanguage);
-  };
-
-  const createPrompt = async () => {
-    if (creating) return;
-    const pendingDraft = promptDraftRef.current;
-    const pendingVersion = promptSaveVersionRef.current;
-    if (promptSaveTimerRef.current !== null) {
-      window.clearTimeout(promptSaveTimerRef.current);
-      promptSaveTimerRef.current = null;
-    }
-    if (promptDirtyRef.current) void savePromptDraft(pendingDraft, pendingVersion);
-    promptSaveVersionRef.current += 1;
-    promptDirtyRef.current = false;
-    setCreating(true);
-    try {
-      const raw = await invokeCommand<unknown>("create_prompt");
-      const next = decodePrompt(raw);
-      if (!next) throw new Error("提示词命令返回了无法识别的结果。");
-      promptSaveVersionRef.current += 1;
-      promptDirtyRef.current = false;
-      pendingSelectionIdRef.current = next.id;
-      promptDraftRef.current = { selectedId: next.id, name: next.name, content: next.content, sourceLanguage: next.sourceLanguage, targetLanguage: next.targetLanguage };
-      setSelectedId(next.id);
-      setName(next.name);
-      setContent(next.content);
-      setSourceLanguage(next.sourceLanguage);
-      setTargetLanguage(next.targetLanguage);
-      await onChanged();
-      onToast(`已创建${next.name}`);
-    } catch (reason) {
-      onToast(describeError(reason, "创建提示词失败"), "error");
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const setDefault = async (prompt: Prompt) => {
-    try {
-      await invokeCommand("set_default_prompt", { providerId, id: prompt.id });
-      await onChanged();
-      onToast(`已将${prompt.name}设为默认提示词`);
-    } catch (reason) {
-      onToast(describeError(reason, "设置默认提示词失败"), "error");
-    }
-  };
-
-  const remove = async (prompt: Prompt) => {
-    if (prompt.isBuiltin || prompt.id === currentPromptId) return;
-    if (!window.confirm(`确定删除提示词「${prompt.name}」吗？`)) return;
-    try {
-      await invokeCommand("delete_prompt", { id: prompt.id });
-      await onChanged();
+    if (previousProviderRef.current !== providerId) {
+      previousProviderRef.current = providerId;
       setSelectedId(currentPromptId);
-      onToast("提示词已删除");
-    } catch (reason) {
-      onToast(describeError(reason, "删除提示词失败"), "error");
     }
-  };
+  }, [currentPromptId, providerId]);
+  const selected = prompts.find((prompt) => prompt.id === selectedId)
+    ?? prompts.find((prompt) => prompt.id === currentPromptId)
+    ?? prompts[0]
+    ?? null;
 
   return (
     <div className="prompt-manager-card">
       <div className="card-heading settings-section-heading"><div><strong>提示词</strong></div></div>
       <div className="prompt-manager-grid">
         <div className="prompt-list">
-          {prompts.map((prompt) => (
-            <div className={`prompt-list-item ${prompt.id === selectedId ? "is-active" : ""} ${prompt.id === currentPromptId ? "is-default" : ""}`} key={prompt.id}>
-              <button className="prompt-list-select" type="button" onClick={() => selectPrompt(prompt)} aria-pressed={prompt.id === selectedId}>
-                <span><strong>{prompt.name}</strong></span>
-              </button>
-              <div className="prompt-list-actions">
-                <button
-                  className="icon-button prompt-icon-button prompt-default-button"
-                  type="button"
-                  onClick={() => void setDefault(prompt)}
-                  disabled={prompt.id === currentPromptId}
-                  title={prompt.id === currentPromptId ? "当前已是默认提示词" : `将${prompt.name}设为默认提示词`}
-                  aria-label={prompt.id === currentPromptId ? "当前已是默认提示词" : `将${prompt.name}设为默认提示词`}
-                >
-                  <Check size={14} strokeWidth={2.2} aria-hidden="true" />
+          {prompts.map((prompt) => {
+            const inUse = referencedPromptIds.has(prompt.id);
+            return (
+              <div className={["prompt-list-item", prompt.id === selected?.id ? "is-active" : "", prompt.id === currentPromptId ? "is-default" : ""].join(" ")} key={prompt.id}>
+                <button className="prompt-list-select" type="button" onClick={() => setSelectedId(prompt.id)} aria-pressed={prompt.id === selected?.id}>
+                  <span><strong>{prompt.name}</strong></span>
                 </button>
-                <button
-                  className="icon-button danger-icon-button prompt-delete-button"
-                  type="button"
-                  onClick={() => void remove(prompt)}
-                  disabled={prompt.isBuiltin || prompt.id === currentPromptId}
-                  title={prompt.id === currentPromptId ? "当前默认提示词不可删除" : prompt.isBuiltin ? "内置提示词不可删除" : `删除${prompt.name}`}
-                  aria-label={prompt.id === currentPromptId ? "当前默认提示词不可删除" : prompt.isBuiltin ? "内置提示词不可删除" : `删除${prompt.name}`}
-                >
-                  <Trash2 size={14} aria-hidden="true" />
-                </button>
+                <div className="prompt-list-actions">
+                  <button
+                    className="icon-button prompt-icon-button prompt-default-button"
+                    type="button"
+                    onClick={() => onDefault(prompt.id)}
+                    disabled={prompt.id === currentPromptId}
+                    title={prompt.id === currentPromptId ? "当前已是默认提示词" : "将" + prompt.name + "设为默认提示词"}
+                    aria-label={prompt.id === currentPromptId ? "当前已是默认提示词" : "将" + prompt.name + "设为默认提示词"}
+                  >
+                    <Check size={14} strokeWidth={2.2} aria-hidden="true" />
+                  </button>
+                  <button
+                    className="icon-button danger-icon-button prompt-delete-button"
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm("确定删除提示词「" + prompt.name + "」吗？")) {
+                        onRemove(prompt.id);
+                        if (selected?.id === prompt.id) setSelectedId(currentPromptId);
+                      }
+                    }}
+                    disabled={prompt.isBuiltin || inUse}
+                    title={prompt.isBuiltin ? "内置提示词不可删除" : inUse ? "正在被供应商使用的提示词不可删除" : "删除" + prompt.name}
+                    aria-label={prompt.isBuiltin ? "内置提示词不可删除" : inUse ? "正在被供应商使用的提示词不可删除" : "删除" + prompt.name}
+                  >
+                    <Trash2 size={14} aria-hidden="true" />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
-          <button className="prompt-list-item prompt-list-create" type="button" onClick={() => void createPrompt()} disabled={creating}>
+            );
+          })}
+          <button className="prompt-list-item prompt-list-create" type="button" onClick={() => setSelectedId(onCreate().id)}>
             <span><strong>新增自定义提示词</strong><small>创建空白提示词</small></span>
             <em aria-hidden="true">＋</em>
           </button>
         </div>
         <div className="prompt-editor-panel">
-          <label>名称<input value={name} onChange={(event) => updatePromptDraft({ name: event.target.value })} disabled={!selectedId || creating} /></label>
+          <label>名称<input value={selected?.name ?? ""} onChange={(event) => selected && onChange(selected.id, { name: event.target.value })} disabled={!selected} /></label>
           <div className="prompt-language-fields">
             <SettingsSelectField
               label="源语言"
-              id={`prompt-source-language-${selectedId ?? "empty"}`}
+              id={"prompt-source-language-" + (selected?.id ?? "empty")}
               ariaLabel="提示词源语言"
-              value={sourceLanguage}
+              value={selected?.sourceLanguage ?? "auto"}
               options={SOURCE_LANGUAGE_OPTIONS.map(([label, value]) => ({ label, value }))}
-              onChange={(value) => updatePromptDraft({ sourceLanguage: value })}
-              disabled={!selectedId || creating}
+              onChange={(value) => selected && onChange(selected.id, { sourceLanguage: value })}
+              disabled={!selected}
             />
             <SettingsSelectField
               label="目标语言"
-              id={`prompt-target-language-${selectedId ?? "empty"}`}
+              id={"prompt-target-language-" + (selected?.id ?? "empty")}
               ariaLabel="提示词目标语言"
-              value={targetLanguage}
+              value={selected?.targetLanguage ?? "zh-CN"}
               options={LANGUAGE_OPTIONS.map(([label, value]) => ({ label, value }))}
-              onChange={(value) => updatePromptDraft({ targetLanguage: value })}
-              disabled={!selectedId || creating}
+              onChange={(value) => selected && onChange(selected.id, { targetLanguage: value })}
+              disabled={!selected}
             />
           </div>
-          <label>内容<textarea className="prompt-editor" value={content} onChange={(event) => updatePromptDraft({ content: event.target.value })} disabled={!selectedId || creating} /></label>
+          <label>内容<textarea className="prompt-editor" value={selected?.content ?? ""} onChange={(event) => selected && onChange(selected.id, { content: event.target.value })} disabled={!selected} /></label>
         </div>
       </div>
     </div>
@@ -3332,7 +3232,14 @@ function SettingsResourceModal({
   );
 }
 
+interface SettingsViewHandle {
+  isDirty: () => boolean;
+  isSaving: () => boolean;
+  save: () => Promise<boolean>;
+}
+
 function SettingsView({
+  ref,
   snapshot,
   dictionaryProgress,
   dictionaryEventsError,
@@ -3343,7 +3250,9 @@ function SettingsView({
   onToast,
   onCheckForUpdates,
   releaseCheckPending,
+  onRequestClose,
 }: {
+  ref: Ref<SettingsViewHandle>;
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
   dictionaryEventsError: string | null;
@@ -3354,6 +3263,7 @@ function SettingsView({
   onToast: ShowToast;
   onCheckForUpdates: () => void;
   releaseCheckPending: boolean;
+  onRequestClose: () => void;
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
   const settingsScrollRef = useRef<HTMLDivElement | null>(null);
@@ -3364,16 +3274,25 @@ function SettingsView({
   const [resourceModalOpen, setResourceModalOpen] = useState(false);
   const [resourceModalMounted, setResourceModalMounted] = useState(false);
   const resourceModalReturnFocusRef = useRef<HTMLElement | null>(null);
-  const [providerSwitching, setProviderSwitching] = useState(false);
-  const [providerId, setProviderId] = useState(snapshot.provider.id);
-  const [providerName, setProviderName] = useState(snapshot.provider.name);
+  const [workspace, setWorkspace] = useState(() => createSettingsWorkspace(snapshot));
+  const workspaceRef = useRef(workspace);
+  const originalWorkspaceRef = useRef(createSettingsWorkspace(snapshot));
+  const providerId = workspace.activeProviderId;
+  const selectedProvider = workspace.providers.find((provider) => provider.id === providerId) ?? workspace.providers[0] ?? { ...snapshot.provider, apiKey: "", fetchedModels: null };
+  const providerName = selectedProvider.name;
+  const baseUrl = selectedProvider.baseUrl;
+  const modelId = selectedProvider.modelId;
+  const thinkingEffort = selectedProvider.thinkingEffort;
+  const apiProtocol = selectedProvider.apiProtocol;
+  const apiKey = selectedProvider.apiKey;
+  const settings = workspace.settings;
+  const selectionMode = settings.selectionMode;
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [providerNameEdit, setProviderNameEdit] = useState(snapshot.provider.name);
   const [providerNameEditing, setProviderNameEditing] = useState(false);
-  const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
-  const [modelId, setModelId] = useState(snapshot.provider.modelId);
-  const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>(snapshot.provider.thinkingEffort ?? "none");
-  const [apiProtocol, setApiProtocol] = useState<ApiProtocol>(snapshot.provider.apiProtocol);
-  const [availableModels, setAvailableModels] = useState<ModelInfo[] | null>(null);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[] | null>(snapshot.models.length ? snapshot.models : null);
+  const providerModelsRef = useRef<Record<string, ModelInfo[]>>({ [snapshot.provider.id]: snapshot.models });
   const [modelInputEdited, setModelInputEdited] = useState(false);
   const [showAllModelSuggestions, setShowAllModelSuggestions] = useState(false);
   const [modelSuggestionsOpen, setModelSuggestionsOpen] = useState(false);
@@ -3390,23 +3309,13 @@ function SettingsView({
     ));
   }, [availableModels, modelId, modelInputEdited, showAllModelSuggestions]);
   const modelSuggestionsVisible = modelSuggestionsOpen && filteredModelOptions.length > 0;
-  const [apiKey, setApiKey] = useState("");
   const [providerTestPending, setProviderTestPending] = useState(false);
   const [providerTestResult, setProviderTestResult] = useState<{ providerId: string; kind: "success" | "error"; message: string } | null>(null);
-  const [settings, setSettings] = useState<AppSettings>(snapshot.settings);
-  const [selectionMode, setSelectionMode] = useState(snapshot.settings.selectionMode);
-  const [selectionShortcut, setSelectionShortcut] = useState(snapshot.settings.selectionShortcut);
   const [selectionShortcutListening, setSelectionShortcutListening] = useState(false);
+  const selectionShortcut = selectionShortcutListening ? "" : settings.selectionShortcut;
   const [selectionStatus, setSelectionStatus] = useState<SelectionRuntimeStatus | null>(null);
   const [cacheClearing, setCacheClearing] = useState(false);
-  const selectionShortcutBeforeListeningRef = useRef(snapshot.settings.selectionShortcut);
   const selectionShortcutListeningRef = useRef(false);
-  const settingsDraftRef = useRef<SettingsDraft>(createSettingsDraft(snapshot));
-  const saveTimerRef = useRef<number | null>(null);
-  const saveVersionRef = useRef(0);
-  const savingRef = useRef(false);
-  const savePromiseRef = useRef<Promise<void> | null>(null);
-  const disposedRef = useRef(false);
 
   useEffect(() => {
     if (!modelSuggestionsOpen) return undefined;
@@ -3427,208 +3336,139 @@ function SettingsView({
       ?.scrollIntoView({ block: "nearest" });
   }, [activeModelSuggestionIndex, modelSuggestionsVisible]);
 
-  const saveDraft = useCallback(async (draft: SettingsDraft, version: number) => {
-    if (savingRef.current) return savePromiseRef.current ?? Promise.resolve();
-    savingRef.current = true;
-    const savePromise = (async () => {
-      try {
-        const shortcut = draft.selectionShortcut.trim();
-        if (!draft.modelId.trim()) throw new Error("Model ID 不能为空");
-        if (!shortcut) throw new Error("快捷键不能为空");
-        await invokeCommand("save_provider_config", {
-          config: {
-            providerId: draft.providerId,
-            name: draft.providerName,
-            baseUrl: draft.baseUrl,
-            modelId: draft.modelId,
-            apiProtocol: draft.apiProtocol,
-            thinkingEffort: draft.thinkingEffort,
-            apiKey: draft.apiKey || null,
-          },
-        });
-        await invokeCommand("save_app_settings", {
-          historyRetention: draft.settings.historyRetention,
-          cacheEnabled: draft.settings.cacheEnabled,
-          cacheMaxBytes: draft.settings.cacheMaxBytes,
-          wordAiCacheEnabled: draft.settings.wordAiCacheEnabled,
-          paragraphExampleLookupEnabled: draft.settings.paragraphExampleLookupEnabled,
-          pdfPreflightPageLimit: draft.settings.pdfPreflightPageLimit,
-        });
-        await invokeCommand("configure_selection", {
-          mode: draft.selectionMode,
-          shortcut,
-        });
-        const rawStatus = await invokeCommand<unknown>("get_selection_status");
-        const nextStatus = decodeSelectionStatus(rawStatus);
-        if (!disposedRef.current && nextStatus) setSelectionStatus(nextStatus);
-        const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-        if (version === saveVersionRef.current && next.provider.id === draft.providerId) {
-          const nextDraft = { ...settingsDraftRef.current, apiKey: "" };
-          settingsDraftRef.current = nextDraft;
-          if (!disposedRef.current) setApiKey("");
-          onSaved(next);
-        }
-      } catch (reason) {
-        if (version === saveVersionRef.current && !disposedRef.current) {
-          onToast(describeError(reason, "设置自动保存失败"), "error");
-        }
-      } finally {
-        savingRef.current = false;
-        if (version !== saveVersionRef.current) {
-          if (saveTimerRef.current !== null) {
-            window.clearTimeout(saveTimerRef.current);
-            saveTimerRef.current = null;
-          }
-          void saveDraft(settingsDraftRef.current, saveVersionRef.current);
-        }
-      }
-    })();
-    savePromiseRef.current = savePromise;
-    return savePromise;
-  }, [onSaved, onToast]);
+  const updateWorkspace = useCallback((update: (current: SettingsWorkspaceDraft) => SettingsWorkspaceDraft) => {
+    const next = update(workspaceRef.current);
+    workspaceRef.current = next;
+    setWorkspace(next);
+  }, []);
 
-  const scheduleSave = useCallback((nextDraft: SettingsDraft) => {
-    settingsDraftRef.current = nextDraft;
-    saveVersionRef.current += 1;
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    const version = saveVersionRef.current;
-    saveTimerRef.current = window.setTimeout(() => {
-      saveTimerRef.current = null;
-      // A provider may be switched while this timer is pending. Resolve the
-      // profile from the latest draft when the debounce expires.
-      void saveDraft(settingsDraftRef.current, version);
-    }, 650);
-  }, [saveDraft]);
-
-  const updateDraft = useCallback((update: (current: SettingsDraft) => SettingsDraft) => {
-    const nextDraft = update(settingsDraftRef.current);
-    settingsDraftRef.current = nextDraft;
-    setProviderId(nextDraft.providerId);
-    setProviderName(nextDraft.providerName);
-    setBaseUrl(nextDraft.baseUrl);
-    setModelId(nextDraft.modelId);
-    setThinkingEffort(nextDraft.thinkingEffort);
-    setApiProtocol(nextDraft.apiProtocol);
-    setApiKey(nextDraft.apiKey);
-    setSettings(nextDraft.settings);
-    setSelectionMode(nextDraft.selectionMode);
-    setSelectionShortcut(nextDraft.selectionShortcut);
-    scheduleSave(nextDraft);
-  }, [scheduleSave]);
-
-  const updateProviderDraft = useCallback((patch: Partial<Pick<SettingsDraft, "providerName" | "baseUrl" | "modelId" | "thinkingEffort" | "apiProtocol" | "apiKey">>) => {
+  const updateProviderDraft = useCallback((patch: Partial<Pick<WorkspaceProvider, "name" | "baseUrl" | "modelId" | "thinkingEffort" | "apiProtocol" | "apiKey" | "promptId" | "fetchedModels">>) => {
     setProviderTestResult(null);
-    updateDraft((current) => ({ ...current, ...patch }));
-  }, [updateDraft]);
-
-  const flushPendingSave = useCallback(async () => {
-    while (true) {
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      if (savingRef.current && savePromiseRef.current) {
-        await savePromiseRef.current;
-        continue;
-      }
-      const version = saveVersionRef.current;
-      await saveDraft(settingsDraftRef.current, version);
-      if (version === saveVersionRef.current && !savingRef.current && saveTimerRef.current === null) return;
+    const selected = workspaceRef.current.providers.find((provider) => provider.id === workspaceRef.current.activeProviderId);
+    const connectionChanged = selected && ((patch.baseUrl !== undefined && patch.baseUrl !== selected.baseUrl) || (patch.apiKey !== undefined && patch.apiKey !== selected.apiKey));
+    if (selected && connectionChanged) {
+      delete providerModelsRef.current[selected.id];
+      setAvailableModels(null);
+      setModelSuggestionsOpen(false);
     }
-  }, [saveDraft]);
+    updateWorkspace((current) => ({
+      ...current,
+      providers: current.providers.map((provider) => provider.id === current.activeProviderId ? { ...provider, ...patch, ...(connectionChanged ? { fetchedModels: [] } : {}) } : provider),
+    }));
+  }, [updateWorkspace]);
 
-  const applyProviderSnapshot = useCallback((next: AppSnapshot) => {
-    const nextDraft = createSettingsDraft(next);
-    const currentDraft = settingsDraftRef.current;
-    nextDraft.settings = {
-      ...next.settings,
-      historyRetention: currentDraft.settings.historyRetention,
-      cacheEnabled: currentDraft.settings.cacheEnabled,
-      cacheMaxBytes: currentDraft.settings.cacheMaxBytes,
-      wordAiCacheEnabled: currentDraft.settings.wordAiCacheEnabled,
-      paragraphExampleLookupEnabled: currentDraft.settings.paragraphExampleLookupEnabled,
-      pdfPreflightPageLimit: currentDraft.settings.pdfPreflightPageLimit,
-    };
-    nextDraft.selectionMode = currentDraft.selectionMode;
-    nextDraft.selectionShortcut = currentDraft.selectionShortcut;
-    settingsDraftRef.current = nextDraft;
-    setProviderId(next.provider.id);
-    setProviderName(next.provider.name);
-    setProviderNameEdit(next.provider.name);
+  const updateAppSettingsDraft = useCallback((patch: Partial<AppSettings>) => {
+    updateWorkspace((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
+  }, [updateWorkspace]);
+
+  const updateSelectionDraft = useCallback((patch: Partial<Pick<AppSettings, "selectionMode" | "selectionShortcut">>) => {
+    updateAppSettingsDraft(patch);
+  }, [updateAppSettingsDraft]);
+
+  const saveWorkspace = useCallback(async (): Promise<boolean> => {
+    if (savingRef.current || providerTestPending) return false;
+    const draft = workspaceRef.current;
+    if (!isSettingsWorkspaceDirty(draft, originalWorkspaceRef.current)) return true;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await invokeCommand("save_settings_workspace", { input: workspaceSaveInput(draft, originalWorkspaceRef.current) });
+      let next: AppSnapshot;
+      let refreshed = true;
+      try {
+        next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      } catch {
+        refreshed = false;
+        const providers = draft.providers.map(({ apiKey: key, fetchedModels: _models, ...provider }) => ({
+          ...provider,
+          hasApiKey: provider.hasApiKey || Boolean(key.trim()),
+        }));
+        next = {
+          ...snapshot,
+          providers,
+          provider: providers.find((provider) => provider.id === draft.activeProviderId) ?? providers[0] ?? snapshot.provider,
+          prompts: draft.prompts,
+          settings: { ...snapshot.settings, ...draft.settings },
+        };
+      }
+      const clean = createSettingsWorkspace(next);
+      originalWorkspaceRef.current = clean;
+      workspaceRef.current = clean;
+      setWorkspace(clean);
+      setProviderNameEdit(next.provider.name);
+      providerModelsRef.current[next.provider.id] = next.models;
+      setAvailableModels(next.models.length ? next.models : null);
+      onSaved(next);
+      onToast(refreshed ? "设置已保存" : "设置已保存，刷新状态失败，请重新打开设置", refreshed ? "notice" : "error");
+      return true;
+    } catch (reason) {
+      onToast(describeError(reason, "保存设置失败"), "error");
+      return false;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }, [onSaved, onToast, providerTestPending, snapshot]);
+
+  useImperativeHandle(ref, () => ({
+    isDirty: () => isSettingsWorkspaceDirty(workspaceRef.current, originalWorkspaceRef.current),
+    isSaving: () => savingRef.current || providerTestPending,
+    save: saveWorkspace,
+  }), [providerTestPending, saveWorkspace]);
+
+  const switchProvider = useCallback((nextProviderId: string) => {
+    if (nextProviderId === workspaceRef.current.activeProviderId || providerTestPending || savingRef.current) return;
+    const nextProvider = workspaceRef.current.providers.find((provider) => provider.id === nextProviderId);
+    if (!nextProvider) return;
+    updateWorkspace((current) => ({ ...current, activeProviderId: nextProviderId }));
+    setProviderNameEdit(nextProvider.name);
     setProviderNameEditing(false);
-    setBaseUrl(next.provider.baseUrl);
-    setModelId(next.provider.modelId);
-    setThinkingEffort(next.provider.thinkingEffort ?? "none");
-    setApiProtocol(next.provider.apiProtocol);
-    setApiKey("");
-    setAvailableModels(next.models.length > 0 ? next.models : null);
+    setProviderTestResult(null);
     setModelInputEdited(false);
     setShowAllModelSuggestions(false);
     setModelSuggestionsOpen(false);
     setActiveModelSuggestionIndex(-1);
-    setSettings(nextDraft.settings);
-    setSelectionMode(nextDraft.selectionMode);
-    setSelectionShortcut(nextDraft.selectionShortcut);
-    onSaved(next);
-  }, [onSaved]);
-
-  const switchProvider = useCallback(async (nextProviderId: string) => {
-    if (nextProviderId === settingsDraftRef.current.providerId || providerSwitching) return;
-    setProviderTestResult(null);
-    setProviderSwitching(true);
-    try {
-      await flushPendingSave();
-      await invokeCommand("set_active_provider", { providerId: nextProviderId });
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      applyProviderSnapshot(next);
-    } catch (reason) {
-      onToast(describeError(reason, "切换供应商失败"), "error");
-    } finally {
-      setProviderSwitching(false);
+    const cached = nextProvider.fetchedModels ?? providerModelsRef.current[nextProviderId];
+    setAvailableModels(cached?.length ? cached : null);
+    if (!cached && originalWorkspaceRef.current.providers.some((provider) => provider.id === nextProviderId)) {
+      void invokeCommand<ModelInfo[]>("get_provider_models", { providerId: nextProviderId }).then((models) => {
+        const current = workspaceRef.current.providers.find((provider) => provider.id === nextProviderId);
+        if (!current || current.baseUrl !== nextProvider.baseUrl || current.apiKey !== nextProvider.apiKey || providerModelsRef.current[nextProviderId]) return;
+        providerModelsRef.current[nextProviderId] = models;
+        if (workspaceRef.current.activeProviderId === nextProviderId) setAvailableModels(models.length ? models : null);
+      }).catch(() => undefined);
     }
-  }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching]);
+  }, [providerTestPending, updateWorkspace]);
 
-  const createProvider = useCallback(async () => {
-    if (providerSwitching) return;
+  const createProvider = useCallback(() => {
+    if (providerTestPending || savingRef.current) return;
+    const provider = createWorkspaceProvider(workspaceRef.current, crypto.randomUUID());
+    updateWorkspace((current) => ({ ...current, activeProviderId: provider.id, providers: [...current.providers, provider] }));
+    setProviderNameEdit(provider.name);
+    setProviderNameEditing(false);
     setProviderTestResult(null);
-    setProviderSwitching(true);
-    try {
-      await flushPendingSave();
-      await invokeCommand("create_provider");
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      applyProviderSnapshot(next);
-    } catch (reason) {
-      onToast(describeError(reason, "新增供应商失败"), "error");
-    } finally {
-      setProviderSwitching(false);
-    }
-  }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching]);
+    setAvailableModels(null);
+    setModelInputEdited(false);
+    setModelSuggestionsOpen(false);
+  }, [providerTestPending, updateWorkspace]);
 
-  const deleteProvider = useCallback(async (targetProviderId: string) => {
-    const targetProvider = snapshot.providers.find((provider) => provider.id === targetProviderId);
-    if (providerSwitching || !targetProvider || targetProvider.isBuiltin) return;
-    if (!window.confirm(`删除自定义供应商「${targetProvider.name}」？其配置和模型列表将被移除`)) return;
+  const deleteProvider = useCallback((targetProviderId: string) => {
+    const target = workspaceRef.current.providers.find((provider) => provider.id === targetProviderId);
+    if (!target || target.isBuiltin || providerTestPending || savingRef.current) return;
+    if (!window.confirm("删除自定义供应商「" + target.name + "」？其配置和模型列表将在保存后移除")) return;
+    const remaining = workspaceRef.current.providers.filter((provider) => provider.id !== targetProviderId);
+    const nextActive = workspaceRef.current.activeProviderId === targetProviderId
+      ? (remaining.find((provider) => provider.id === "openai") ?? remaining[0])?.id
+      : workspaceRef.current.activeProviderId;
+    if (!nextActive) return;
+    updateWorkspace((current) => ({ ...current, providers: remaining, activeProviderId: nextActive }));
+    setProviderNameEdit(remaining.find((provider) => provider.id === nextActive)?.name ?? "");
+    setProviderNameEditing(false);
     setProviderTestResult(null);
-    setProviderSwitching(true);
-    try {
-      await flushPendingSave();
-      await invokeCommand("delete_provider", { providerId: targetProviderId });
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      applyProviderSnapshot(next);
-    } catch (reason) {
-      onToast(describeError(reason, "删除供应商失败"), "error");
-    } finally {
-      setProviderSwitching(false);
-    }
-  }, [applyProviderSnapshot, flushPendingSave, onToast, providerSwitching, snapshot.providers]);
-
-  const updateAppSettingsDraft = useCallback((patch: Partial<AppSettings>) => {
-    updateDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
-  }, [updateDraft]);
-
-  const updateSelectionDraft = useCallback((patch: Partial<Pick<SettingsDraft, "selectionMode" | "selectionShortcut">>) => {
-    updateDraft((current) => ({ ...current, ...patch }));
-  }, [updateDraft]);
+    const cached = providerModelsRef.current[nextActive];
+    setAvailableModels(cached?.length ? cached : null);
+    setModelSuggestionsOpen(false);
+  }, [providerTestPending, updateWorkspace]);
 
   const clearCache = useCallback(async () => {
     if (cacheClearing) return;
@@ -3646,17 +3486,14 @@ function SettingsView({
   }, [cacheClearing, onSaved, onToast]);
 
   const startSelectionShortcutListening = useCallback(() => {
-    selectionShortcutBeforeListeningRef.current = selectionShortcut;
     selectionShortcutListeningRef.current = true;
     setSelectionShortcutListening(true);
-    setSelectionShortcut("");
-  }, [selectionShortcut]);
+  }, []);
 
   const cancelSelectionShortcutListening = useCallback(() => {
     if (!selectionShortcutListeningRef.current) return;
     selectionShortcutListeningRef.current = false;
     setSelectionShortcutListening(false);
-    setSelectionShortcut(selectionShortcutBeforeListeningRef.current);
   }, []);
 
   const handleSelectionShortcutKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -3791,17 +3628,6 @@ function SettingsView({
   }, []);
 
   useEffect(() => {
-    return () => {
-      disposedRef.current = true;
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-        void saveDraft(settingsDraftRef.current, saveVersionRef.current);
-      }
-    };
-  }, [saveDraft]);
-
-  useEffect(() => {
     let disposed = false;
     const loadStatus = async () => {
       try {
@@ -3848,22 +3674,32 @@ function SettingsView({
   }, [onToast, pdfEngine.error, pdfEngine.eventsError, resourceModal]);
 
   const fetchModels = async () => {
-    const requestedProviderId = providerId;
+    const requested = workspaceRef.current.providers.find((provider) => provider.id === workspaceRef.current.activeProviderId);
+    if (!requested) return;
+    const original = originalWorkspaceRef.current.providers.find((provider) => provider.id === requested.id);
+    const preview = !original || original.baseUrl !== requested.baseUrl || Boolean(requested.apiKey.trim());
     try {
       const models = await invokeCommand<ModelInfo[]>("fetch_models", {
-        providerId: requestedProviderId,
-        baseUrl: baseUrl.trim() || null,
-        apiKey: apiKey.trim() || null,
+        providerId: requested.id,
+        baseUrl: requested.baseUrl.trim(),
+        apiKey: requested.apiKey.trim() || null,
+        preview,
       });
-      if (requestedProviderId !== settingsDraftRef.current.providerId) return;
-      const hasModels = models.length > 0;
-      setAvailableModels(hasModels ? models : null);
+      const current = workspaceRef.current.providers.find((provider) => provider.id === requested.id);
+      if (!current || current.baseUrl !== requested.baseUrl || current.apiKey !== requested.apiKey) return;
+      providerModelsRef.current[requested.id] = models;
+      updateWorkspace((current) => ({
+        ...current,
+        providers: current.providers.map((provider) => provider.id === requested.id ? { ...provider, fetchedModels: models } : provider),
+      }));
+      if (requested.id !== workspaceRef.current.activeProviderId) return;
+      setAvailableModels(models.length ? models : null);
       setShowAllModelSuggestions(false);
       setModelSuggestionsOpen(false);
       setActiveModelSuggestionIndex(-1);
-      onToast(`模型列表已更新，共 ${models.length} 个模型`);
+      onToast("模型列表已更新，共 " + models.length + " 个模型");
     } catch (reason) {
-      if (requestedProviderId !== settingsDraftRef.current.providerId) return;
+      if (requested.id !== workspaceRef.current.activeProviderId) return;
       setAvailableModels(null);
       setShowAllModelSuggestions(false);
       setModelSuggestionsOpen(false);
@@ -3873,62 +3709,37 @@ function SettingsView({
   };
 
   const testProvider = async () => {
-    if (providerSwitching || providerTestPending) return;
-    const requestedProviderId = settingsDraftRef.current.providerId;
+    if (providerTestPending || savingRef.current) return;
+    const requested = workspaceRef.current.providers.find((provider) => provider.id === workspaceRef.current.activeProviderId);
+    if (!requested) return;
     setProviderTestPending(true);
     setProviderTestResult(null);
     try {
-      await flushPendingSave();
-      if (requestedProviderId !== settingsDraftRef.current.providerId) return;
-      const current = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      const savedProvider = current.providers.find((provider) => provider.id === requestedProviderId);
-      const draft = settingsDraftRef.current;
-      const normalizedDraftBaseUrl = draft.baseUrl.trim().replace(/\/+$/, "");
-      if (draft.apiKey.trim()) throw new Error("当前 API Key 尚未保存，请稍后重试");
-      if (
-        current.provider.id !== requestedProviderId
-        || !savedProvider
-        || savedProvider.name !== draft.providerName.trim()
-        || savedProvider.baseUrl !== normalizedDraftBaseUrl
-        || savedProvider.modelId !== draft.modelId.trim()
-        || savedProvider.apiProtocol !== draft.apiProtocol
-        || savedProvider.thinkingEffort !== draft.thinkingEffort
-      ) {
-        throw new Error("当前供应商配置尚未保存，请稍后重试");
-      }
-      const reply = await invokeCommand<string>("test_provider", { providerId: requestedProviderId });
-      if (requestedProviderId === settingsDraftRef.current.providerId) {
-        setProviderTestResult({ providerId: requestedProviderId, kind: "success", message: reply });
+      const reply = await invokeCommand<string>("test_provider", {
+        providerId: requested.id,
+        draft: {
+          baseUrl: requested.baseUrl,
+          modelId: requested.modelId,
+          thinkingEffort: requested.thinkingEffort,
+          apiProtocol: requested.apiProtocol,
+          apiKey: requested.apiKey.trim() || null,
+        },
+      });
+      if (requested.id === workspaceRef.current.activeProviderId) {
+        setProviderTestResult({ providerId: requested.id, kind: "success", message: reply });
       }
     } catch (reason) {
-      if (requestedProviderId === settingsDraftRef.current.providerId) {
-        setProviderTestResult({ providerId: requestedProviderId, kind: "error", message: describeError(reason, "模型测试失败") });
+      if (requested.id === workspaceRef.current.activeProviderId) {
+        setProviderTestResult({ providerId: requested.id, kind: "error", message: describeError(reason, "模型测试失败") });
       }
     } finally {
       setProviderTestPending(false);
     }
   };
 
-  const refreshAfterPromptChange = useCallback(async () => {
-    const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-    onSaved(next);
-  }, [onSaved]);
-
-  const resetCloseBehavior = async () => {
-    try {
-      await invokeCommand("reset_close_behavior");
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
-      const nextDraft = { ...settingsDraftRef.current, settings: { ...settingsDraftRef.current.settings, closeBehavior: next.settings.closeBehavior } };
-      settingsDraftRef.current = nextDraft;
-      setSettings(nextDraft.settings);
-      onSaved(next);
-      onToast("关闭行为已恢复为每次询问");
-    } catch (reason) {
-      onToast(describeError(reason, "恢复关闭行为失败"), "error");
-    }
+  const resetCloseBehavior = () => {
+    updateAppSettingsDraft({ closeBehavior: "ask" });
   };
-
-  const selectedProvider = snapshot.providers.find((provider) => provider.id === providerId) ?? snapshot.provider;
   const cacheMaxMb = Math.min(MAX_CACHE_SIZE_MB, Math.max(MIN_CACHE_SIZE_MB, Math.round(settings.cacheMaxBytes / (1024 * 1024))));
   const cacheRangePercent = ((cacheMaxMb - MIN_CACHE_SIZE_MB) / (MAX_CACHE_SIZE_MB - MIN_CACHE_SIZE_MB)) * 100;
   return (
@@ -3958,12 +3769,12 @@ function SettingsView({
       </aside>
 
       <div className="settings-content">
-        <div className="settings-content-scroll" ref={settingsScrollRef} inert={providerSwitching}>
+        <div className="settings-content-scroll" ref={settingsScrollRef} inert={saving}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
           <div className="card-heading"><div><strong>LLM 提供商</strong></div></div>
           <div className="provider-manager-grid">
             <div className="provider-list" role="group" aria-label="供应商列表">
-              {snapshot.providers.map((provider) => (
+              {workspace.providers.map((provider) => (
                 <div className={`prompt-list-item provider-list-item ${provider.id === providerId ? "is-active" : ""}`} key={provider.id}>
                   <button className="prompt-list-select provider-list-select" type="button" onClick={() => void switchProvider(provider.id)} aria-pressed={provider.id === providerId}>
                     <ProviderLogo providerId={provider.id} />
@@ -3999,7 +3810,7 @@ function SettingsView({
                           setProviderNameEditing(false);
                           return;
                         }
-                        updateProviderDraft({ providerName: providerNameEdit.trim() || selectedProvider.name });
+                        updateProviderDraft({ name: providerNameEdit.trim() || selectedProvider.name });
                         setProviderNameEditing(false);
                       }}
                       onKeyDown={(event) => {
@@ -4165,7 +3976,20 @@ function SettingsView({
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>
-            <PromptManager prompts={snapshot.prompts} providerId={providerId} currentPromptId={snapshot.provider.promptId} onChanged={refreshAfterPromptChange} onToast={onToast} />
+            <PromptManager
+              prompts={workspace.prompts}
+              providerId={providerId}
+              currentPromptId={selectedProvider.promptId}
+              referencedPromptIds={new Set(workspace.providers.map((provider) => provider.promptId))}
+              onChange={(id, patch) => updateWorkspace((current) => ({ ...current, prompts: current.prompts.map((prompt) => prompt.id === id ? { ...prompt, ...patch } : prompt) }))}
+              onCreate={() => {
+                const prompt = createWorkspacePrompt(workspaceRef.current, crypto.randomUUID());
+                updateWorkspace((current) => ({ ...current, prompts: [...current.prompts, prompt] }));
+                return prompt;
+              }}
+              onDefault={(id) => updateProviderDraft({ promptId: id })}
+              onRemove={(id) => updateWorkspace((current) => ({ ...current, prompts: current.prompts.filter((prompt) => prompt.id !== id) }))}
+            />
           </div>
 
         <div className="settings-section" id="settings-section-selection" data-settings-section="selection" ref={(element) => { settingsSectionRefs.current.selection = element; }}>
@@ -4268,7 +4092,7 @@ function SettingsView({
 
         <div className="settings-section" id="settings-section-behavior" data-settings-section="behavior" ref={(element) => { settingsSectionRefs.current.behavior = element; }}>
           <div className="card-heading"><div><strong>关闭行为</strong></div></div>
-          <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong></span><button className="secondary-button" type="button" onClick={() => void resetCloseBehavior()} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
+          <div className="setting-line"><span><strong>{settings.closeBehavior === "ask" ? "每次询问" : settings.closeBehavior === "tray" ? "缩小到系统托盘" : "退出程序"}</strong></span><button className="secondary-button" type="button" onClick={resetCloseBehavior} disabled={settings.closeBehavior === "ask"}>恢复每次询问</button></div>
         </div>
 
         <div className="settings-section settings-about-section" id="settings-section-about" data-settings-section="about" ref={(element) => { settingsSectionRefs.current.about = element; }}>
@@ -4284,8 +4108,12 @@ function SettingsView({
           </div>
         </div>
         </div>
+        <div className="settings-footer">
+          <button className="secondary-button" type="button" onClick={onRequestClose} disabled={saving || providerTestPending}>返回</button>
+          <button className="primary-button" type="button" onClick={() => void saveWorkspace()} disabled={saving || providerTestPending || !isSettingsWorkspaceDirty(workspace, originalWorkspaceRef.current)}>{saving ? "保存中…" : "保存"}</button>
+        </div>
       </div>
-      {resourceModalMounted && resourceModal && (
+      {resourceModalMounted && resourceModal && createPortal(
         <SettingsResourceModal
           kind={resourceModal}
           open={resourceModalOpen}
@@ -4307,7 +4135,8 @@ function SettingsView({
               onPrepareEngine={() => void pdfEngine.prepare()}
             />
           )}
-        </SettingsResourceModal>
+        </SettingsResourceModal>,
+        document.body,
       )}
     </section>
   );

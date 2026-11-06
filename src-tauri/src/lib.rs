@@ -15,6 +15,7 @@ pub mod pdf_worker;
 mod provider;
 mod secrets;
 mod selection;
+mod settings_workspace;
 #[cfg(test)]
 mod test_support;
 mod translation_core;
@@ -311,6 +312,8 @@ pub fn run() {
             report_startup_stage,
             get_app_snapshot,
             save_provider_config,
+            save_settings_workspace,
+            get_provider_models,
             fetch_models,
             test_provider,
             set_active_provider,
@@ -720,6 +723,28 @@ struct SaveProviderConfigInput {
 }
 
 #[tauri::command]
+fn save_settings_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: settings_workspace::WorkspaceInput,
+) -> Result<(), String> {
+    settings_workspace::save(&app, state.inner(), input)
+}
+
+#[tauri::command]
+fn get_provider_models(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Vec<ModelInfo>, String> {
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    db::get_provider_by_id(&connection, &provider_id)?;
+    db::list_models(&connection, &provider_id)
+}
+
+#[tauri::command]
 fn save_provider_config(
     state: State<'_, AppState>,
     config: SaveProviderConfigInput,
@@ -763,26 +788,40 @@ fn save_provider_config(
     )
 }
 
+fn resolve_models_base_url<'a>(
+    draft: Option<&'a str>,
+    saved: Option<&'a str>,
+) -> Result<&'a str, String> {
+    match draft.map(str::trim) {
+        Some("") => Err("Base URL 不能为空".to_string()),
+        Some(value) => Ok(value),
+        None => saved.ok_or_else(|| "Base URL 不能为空".to_string()),
+    }
+}
+
 #[tauri::command]
 async fn fetch_models(
     state: State<'_, AppState>,
     provider_id: String,
     base_url: Option<String>,
     api_key: Option<String>,
+    preview: Option<bool>,
 ) -> Result<Vec<ModelInfo>, String> {
-    let (saved_base_url, provider_id) = {
+    let saved_provider = {
         let connection = state
             .database
             .lock()
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
-        let provider = db::get_provider_by_id(&connection, &provider_id)?;
-        (provider.base_url, provider.id)
+        db::list_providers(&connection)?
+            .into_iter()
+            .find(|provider| provider.id == provider_id)
     };
-    let base_url = base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&saved_base_url);
+    let base_url = resolve_models_base_url(
+        base_url.as_deref(),
+        saved_provider
+            .as_ref()
+            .map(|provider| provider.base_url.as_str()),
+    )?;
     let base_url = match provider::normalize_base_url(base_url) {
         Ok(value) => value,
         Err(error) => {
@@ -826,16 +865,18 @@ async fn fetch_models(
             ));
             error.to_string()
         })?;
-    let connection = state
-        .database
-        .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    db::replace_models(&connection, &provider_id, &models).map_err(|error| {
-        diagnostics::error(format!(
-            "command.fetch_models.persist_failed reason={error}"
-        ));
-        error
-    })?;
+    if !preview.unwrap_or(false) && saved_provider.is_some() {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::replace_models(&connection, &provider_id, &models).map_err(|error| {
+            diagnostics::error(format!(
+                "command.fetch_models.persist_failed reason={error}"
+            ));
+            error
+        })?;
+    }
     diagnostics::info(format!(
         "command.fetch_models.completed model_count={}",
         models.len()
@@ -843,36 +884,72 @@ async fn fetch_models(
     Ok(models)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTestDraft {
+    base_url: String,
+    model_id: String,
+    thinking_effort: ThinkingEffort,
+    api_protocol: ApiProtocol,
+    api_key: Option<String>,
+}
+
 #[tauri::command]
-async fn test_provider(state: State<'_, AppState>, provider_id: String) -> Result<String, String> {
+async fn test_provider(
+    state: State<'_, AppState>,
+    provider_id: String,
+    draft: Option<ProviderTestDraft>,
+) -> Result<String, String> {
     let provider_id = provider_id.trim().to_string();
-    let provider_config = {
+    let (base_url, model_id, thinking_effort, api_protocol, draft_key) = if let Some(draft) = draft
+    {
+        (
+            draft.base_url,
+            draft.model_id,
+            draft.thinking_effort,
+            draft.api_protocol,
+            draft.api_key,
+        )
+    } else {
         let connection = state
             .database
             .lock()
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
-        db::get_provider_by_id(&connection, &provider_id)?
+        let saved = db::get_provider_by_id(&connection, &provider_id)?;
+        (
+            saved.base_url,
+            saved.model_id,
+            saved.thinking_effort,
+            saved.api_protocol,
+            None,
+        )
     };
-    let base_url = provider::normalize_base_url(&provider_config.base_url)
-        .map_err(|error| error.to_string())?;
-    let model_id = provider_config.model_id.trim();
+    let base_url = provider::normalize_base_url(&base_url).map_err(|error| error.to_string())?;
+    let model_id = model_id.trim();
     if model_id.is_empty() {
         return Err("Model ID 不能为空".to_string());
     }
-    let api_key = match secrets::load_api_key(&provider_config.id) {
-        Ok(Some(value)) => value,
-        Ok(None) => return Err("尚未配置 API Key".to_string()),
-        Err(error) => return Err(error),
+    let api_key = match draft_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value.to_string(),
+        None => match secrets::load_api_key(&provider_id) {
+            Ok(Some(value)) => value,
+            Ok(None) => return Err("尚未配置 API Key".to_string()),
+            Err(error) => return Err(error),
+        },
     };
 
     let request_id = Uuid::new_v4().to_string();
     diagnostics::info(format!(
         "command.test_provider.start request_id={} provider_id={} origin={} model={} protocol={}",
         request_id,
-        provider_config.id,
+        provider_id,
         provider::safe_endpoint_origin(&base_url),
         model_id,
-        provider_config.api_protocol.as_str()
+        api_protocol.as_str()
     ));
     let cancellation = CancellationToken::new();
     let result = provider::stream_chat_completion_with_usage(
@@ -885,8 +962,8 @@ async fn test_provider(state: State<'_, AppState>, provider_id: String) -> Resul
             user_text: "请仅回复 OK。",
             cancel: &cancellation,
             operation: "provider_test",
-            thinking_effort: &provider_config.thinking_effort,
-            api_protocol: provider_config.api_protocol,
+            thinking_effort: &thinking_effort,
+            api_protocol,
         },
         |_| Ok(()),
     )
@@ -4059,7 +4136,7 @@ mod tests {
         WordAiCacheKeyInput, WordExampleDelta, WordExampleProtocolParser, build_system_prompt,
         cancel_request, make_ai_dictionary_cache_key, make_cache_key, make_learning_cache_key,
         make_pdf_cache_key, make_word_ai_cache_key, parse_ai_dictionary_protocol,
-        unregister_request,
+        resolve_models_base_url, unregister_request,
     };
     use crate::contracts::{ApiProtocol, GlossaryTerm};
     use crate::translation_core::TranslationMode;
@@ -4081,6 +4158,23 @@ mod tests {
             target_language: "zh-CN",
             source_text,
         })
+    }
+
+    #[test]
+    fn empty_draft_url_never_falls_back_to_saved_provider() {
+        assert!(resolve_models_base_url(Some("  "), Some("https://saved.example")).is_err());
+        assert_eq!(
+            resolve_models_base_url(None, Some("https://saved.example")).unwrap(),
+            "https://saved.example"
+        );
+        assert_eq!(
+            resolve_models_base_url(
+                Some(" https://draft.example "),
+                Some("https://saved.example")
+            )
+            .unwrap(),
+            "https://draft.example"
+        );
     }
 
     #[test]
