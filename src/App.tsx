@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import { Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Pencil, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
+import { Check, ChevronDown, Copy, Database, ExternalLink, FileText, FileType2, History, Info, Languages, LoaderCircle, Pencil, Save, Settings, Square, WandSparkles, BookOpen, Upload, X, Maximize2, Minimize2, Minus, Trash2, Download } from "lucide-react";
 import packageJson from "../package.json";
 import liltLogo from "../source/lilt_logo.svg";
 import openaiLogo from "./assets/openai.svg";
@@ -1795,7 +1795,6 @@ function App() {
               onToast={showAppToast}
               onCheckForUpdates={() => void checkForUpdates("manual")}
               releaseCheckPending={releaseCheckPending}
-              onRequestClose={() => requestSettingsClose()}
             />
           </div>
         )}
@@ -3250,7 +3249,6 @@ function SettingsView({
   onToast,
   onCheckForUpdates,
   releaseCheckPending,
-  onRequestClose,
 }: {
   ref: Ref<SettingsViewHandle>;
   snapshot: AppSnapshot;
@@ -3263,7 +3261,6 @@ function SettingsView({
   onToast: ShowToast;
   onCheckForUpdates: () => void;
   releaseCheckPending: boolean;
-  onRequestClose: () => void;
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("provider");
   const settingsScrollRef = useRef<HTMLDivElement | null>(null);
@@ -3766,6 +3763,9 @@ function SettingsView({
             );
           })}
         </nav>
+        <div className="settings-footer">
+          <button className="primary-button" type="button" onClick={() => void saveWorkspace()} disabled={saving || providerTestPending || !isSettingsWorkspaceDirty(workspace, originalWorkspaceRef.current)}><Save size={15} aria-hidden="true" />{saving ? "保存中…" : "保存"}</button>
+        </div>
       </aside>
 
       <div className="settings-content">
@@ -4107,10 +4107,6 @@ function SettingsView({
             <div className="about-info-row"><span>开发者</span><span>Tony32 · <a href={`mailto:${DEVELOPER_EMAIL}`}>{DEVELOPER_EMAIL}</a></span></div>
           </div>
         </div>
-        </div>
-        <div className="settings-footer">
-          <button className="secondary-button" type="button" onClick={onRequestClose} disabled={saving || providerTestPending}>返回</button>
-          <button className="primary-button" type="button" onClick={() => void saveWorkspace()} disabled={saving || providerTestPending || !isSettingsWorkspaceDirty(workspace, originalWorkspaceRef.current)}>{saving ? "保存中…" : "保存"}</button>
         </div>
       </div>
       {resourceModalMounted && resourceModal && createPortal(
