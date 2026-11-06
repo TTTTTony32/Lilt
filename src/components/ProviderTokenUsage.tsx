@@ -150,7 +150,7 @@ function Chart({
       return {
         key: modelId,
         label: modelId,
-        color: MODEL_COLORS[modelIndex % MODEL_COLORS.length],
+        color: MODEL_COLORS[modelIndex % MODEL_COLORS.length] ?? "#718e77",
         values: points.map((point) => {
           const stats = model?.buckets.find((item) => item.startMs === point.startMs);
           return (stats?.inputTokens ?? 0) + (stats?.outputTokens ?? 0);
@@ -166,7 +166,7 @@ function Chart({
       values: points.map((point) => point[item.key] ?? 0),
       unknownCounts: points.map((point) => item.key === "inputTokens" ? point.inputUnknownCount : point.outputUnknownCount),
     }));
-  const maxValue = Math.max(1, ...points.map((_, pointIndex) => series.reduce((sum, item) => sum + item.values[pointIndex], 0)));
+  const maxValue = Math.max(1, ...points.map((_, pointIndex) => series.reduce((sum, item) => sum + (item.values[pointIndex] ?? 0), 0)));
   const groupWidth = points.length > 0 ? plotWidth / points.length : plotWidth;
   const barWidth = Math.max(3, Math.min(22, groupWidth * 0.58));
   const labelStep = Math.max(1, Math.ceil(points.length / 8));
@@ -195,8 +195,8 @@ function Chart({
           const x = CHART_PADDING.left + pointIndex * groupWidth + (groupWidth - barWidth) / 2;
           const showLabel = pointIndex % labelStep === 0 || pointIndex === points.length - 1;
           let stackOffset = 0;
-          const total = series.reduce((sum, item) => sum + item.values[pointIndex], 0);
-          const unknownCount = series.reduce((sum, item) => sum + item.unknownCounts[pointIndex], 0);
+          const total = series.reduce((sum, item) => sum + (item.values[pointIndex] ?? 0), 0);
+          const unknownCount = series.reduce((sum, item) => sum + (item.unknownCounts[pointIndex] ?? 0), 0);
           const isSelected = point.startMs === selectedStartMs;
           const bucketStartMs = Math.max(point.startMs, response.fromMs);
           const selectedEndMs = Math.min(point.endMs, response.toMs);
@@ -218,7 +218,7 @@ function Chart({
             >
               <rect className="provider-usage-column-hitbox" x={CHART_PADDING.left + pointIndex * groupWidth} y={CHART_PADDING.top} width={groupWidth} height={plotHeight} />
               {series.map((item) => {
-                const value = item.values[pointIndex];
+                const value = item.values[pointIndex] ?? 0;
                 const barHeight = value > 0 ? Math.max(1, (value / maxValue) * plotHeight) : 0;
                 stackOffset += barHeight;
                 if (value <= 0) return null;
@@ -233,7 +233,7 @@ function Chart({
                     height={barHeight}
                     fill={item.color}
                   >
-                    <title>{formatBucketTitle(point, period) + " · " + item.label + "：" + numberFormat.format(value) + " tokens" + (item.unknownCounts[pointIndex] > 0 ? "（已知小计）" : "")}</title>
+                    <title>{formatBucketTitle(point, period) + " · " + item.label + "：" + numberFormat.format(value) + " tokens" + ((item.unknownCounts[pointIndex] ?? 0) > 0 ? "（已知小计）" : "")}</title>
                   </rect>
                 );
               })}
