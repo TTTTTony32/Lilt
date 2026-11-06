@@ -3791,6 +3791,7 @@ function SettingsView({
       <div className="settings-content">
         <div className="settings-content-scroll" ref={settingsScrollRef} inert={saving}>
           <div className="settings-section" id="settings-section-provider" data-settings-section="provider" ref={(element) => { settingsSectionRefs.current.provider = element; }}>
+          <ProviderTokenUsage providerId={providerId} providerName={providerName} />
           <div className="card-heading"><div><strong>LLM 提供商</strong></div></div>
           <div className="provider-manager-grid">
             <div className="provider-list" role="group" aria-label="供应商列表">
@@ -3993,7 +3994,6 @@ function SettingsView({
               )}
             </div>
           </div>
-          <ProviderTokenUsage providerId={providerId} providerName={providerName} />
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>

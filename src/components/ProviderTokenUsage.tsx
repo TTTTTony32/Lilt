@@ -245,7 +245,6 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
     let active = true;
     const now = refreshNowMs;
     const fromMs = now - 24 * 60 * 60 * 1000;
-    setSummaryResponse(null);
     setSummaryError(null);
     setSummaryLoading(true);
     void invokeCommand<ProviderTokenUsageResponse>("get_provider_token_usage", {
@@ -269,7 +268,6 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
 
   useEffect(() => {
     let active = true;
-    setChartResponse(null);
     setChartError(null);
     setChartLoading(true);
     void invokeCommand<ProviderTokenUsageResponse>("get_provider_token_usage", {
@@ -299,11 +297,14 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
     && chartResponse.toMs === chartRange.toMs
     ? chartResponse
     : null;
+  const previousSummaryResponse = !currentSummaryResponse && summaryResponse?.providerId === providerId ? summaryResponse : null;
+  const previousChartResponse = !currentChartResponse && chartResponse?.providerId === providerId ? chartResponse : null;
   const isSummaryLoading = summaryLoading || (!currentSummaryResponse && !summaryError);
   const isChartLoading = chartLoading || (!currentChartResponse && !chartError);
-  const summary = currentSummaryResponse?.totals;
-  const summaryRangeLabel = currentSummaryResponse
-    ? formatDateTime(currentSummaryResponse.fromMs) + " 至 " + formatDateTime(currentSummaryResponse.toMs)
+  const summaryForDisplay = currentSummaryResponse ?? previousSummaryResponse;
+  const summary = summaryForDisplay?.totals;
+  const summaryRangeLabel = summaryForDisplay
+    ? formatDateTime(summaryForDisplay.fromMs) + " 至 " + formatDateTime(summaryForDisplay.toMs)
     : "滚动24小时";
   const chartRequestCount = currentChartResponse?.totals.requestCount ?? 0;
   const summaryCacheRate = formatRate(summary?.cacheKnownReadTokens ?? 0, summary?.cacheKnownInputTokens ?? 0);
@@ -350,26 +351,28 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
           <strong>最近24小时</strong>
           <span>{summaryRangeLabel} · 本地时间</span>
         </div>
-        {summary && <small>{new Intl.NumberFormat("zh-CN").format(summary.requestCount)} 次请求</small>}
+        {summary && <small>{new Intl.NumberFormat("zh-CN").format(summary.requestCount)} 次请求{isSummaryLoading ? " · 更新中" : ""}</small>}
       </div>
 
       {summaryError ? (
         <div className="provider-usage-error" role="alert">用量摘要读取失败：{summaryError}</div>
       ) : (
-        <div className="provider-usage-summary" aria-live="polite">
+        <div className={isSummaryLoading && previousSummaryResponse ? "provider-usage-summary is-refreshing" : "provider-usage-summary"} aria-live="polite" aria-busy={isSummaryLoading}>
           <SummaryMetric
             label="CR"
-            value={isSummaryLoading ? "…" : formatSummaryTokenCount(summary?.cacheReadTokens ?? null, summary?.cacheDetailUnknownCount ?? 0, summary?.requestCount ?? 0)}
-            description={summary?.cacheDetailUnknownCount ? "已知 CR 小计" : "缓存读取 Token"}
+            value={isSummaryLoading && !summary ? "…" : formatSummaryTokenCount(summary?.cacheReadTokens ?? null, summary?.cacheDetailUnknownCount ?? 0, summary?.requestCount ?? 0)}
+            description={summary?.cacheReadTokens === null && (summary?.cacheDetailUnknownCount ?? 0) > 0
+              ? "Provider 未返回缓存明细"
+              : summary?.cacheDetailUnknownCount ? "已知 CR 小计" : "缓存读取 Token"}
             className="is-cache"
           />
           <SummaryMetric
             label="输入"
-            value={isSummaryLoading ? "…" : formatSummaryTokenCount(summary?.inputTokens ?? null, summary?.inputUnknownCount ?? 0, summary?.requestCount ?? 0)}
+            value={isSummaryLoading && !summary ? "…" : formatSummaryTokenCount(summary?.inputTokens ?? null, summary?.inputUnknownCount ?? 0, summary?.requestCount ?? 0)}
             description={summary?.inputUnknownCount ? "已知输入小计，含 CR" : "API 总输入，含 CR"}
             className="is-input"
           />
-          {!isSummaryLoading && hasPairedCacheDetails && (
+          {(!isSummaryLoading || previousSummaryResponse) && hasPairedCacheDetails && (
             <SummaryMetric
               label="非缓存输入"
               value={formatTokenCount(uncachedInputTokens, uncachedInputUnknownCount)}
@@ -379,13 +382,13 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
           )}
           <SummaryMetric
             label="输出"
-            value={isSummaryLoading ? "…" : formatSummaryTokenCount(summary?.outputTokens ?? null, summary?.outputUnknownCount ?? 0, summary?.requestCount ?? 0)}
+            value={isSummaryLoading && !summary ? "…" : formatSummaryTokenCount(summary?.outputTokens ?? null, summary?.outputUnknownCount ?? 0, summary?.requestCount ?? 0)}
             description="输出 Token"
             className="is-output"
           />
           <SummaryMetric
             label="缓存率"
-            value={isSummaryLoading ? "…" : summaryCacheRate}
+            value={isSummaryLoading && !summary ? "…" : summaryCacheRate}
             description={summary?.cacheDetailUnknownCount || summary?.inputUnknownCount ? "按两项明细均已知的请求计算" : "CR ÷ 已知输入"}
             className="is-rate"
           />
@@ -428,15 +431,18 @@ export function ProviderTokenUsage({ providerId, providerName }: ProviderTokenUs
       </div>
       {chartError ? (
         <div className="provider-usage-error" role="alert">趋势读取失败：{chartError}</div>
-      ) : isChartLoading ? (
+      ) : isChartLoading && !previousChartResponse ? (
         <div className="provider-usage-loading" role="status"><LoaderCircle size={16} className="provider-usage-spinner" aria-hidden="true" />正在读取用量趋势</div>
       ) : currentChartResponse && chartRequestCount === 0 ? (
         <div className="provider-usage-empty">所选时间范围内暂无调用记录</div>
-      ) : currentChartResponse ? (
-        <>
-          <Chart response={currentChartResponse} period={period} />
-          <p className="provider-usage-chart-caption">输入包含 CR，柱形并列展示以便比较 · 数据按本地时间汇总</p>
-        </>
+      ) : currentChartResponse || previousChartResponse ? (
+        <div className="provider-usage-chart-stage" aria-busy={isChartLoading}>
+          <div className={isChartLoading && previousChartResponse ? "provider-usage-chart-content is-refreshing" : "provider-usage-chart-content"}>
+            <Chart response={currentChartResponse ?? previousChartResponse!} period={(currentChartResponse ?? previousChartResponse!).bucket} />
+            <p className="provider-usage-chart-caption">输入包含 CR，柱形并列展示以便比较 · 数据按本地时间汇总</p>
+          </div>
+          {isChartLoading && previousChartResponse && <div className="provider-usage-refresh-overlay" role="status"><LoaderCircle size={15} className="provider-usage-spinner" aria-hidden="true" />正在更新所选趋势</div>}
+        </div>
       ) : null}
       {!isChartLoading && currentChartResponse && currentChartResponse.totals.cacheDetailUnknownCount > 0 && (
         <p className="provider-usage-note" role="note">
