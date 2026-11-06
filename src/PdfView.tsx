@@ -1,7 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type UIEvent } from "react";
+import { createPortal } from "react-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FileType2, FolderOpen, History, Upload } from "lucide-react";
+import { FileType2, FolderOpen, History, Trash2, Upload } from "lucide-react";
+import { AnimatedOverlay } from "./components/AnimatedOverlay";
 import { describeError } from "./lib/errors";
 import { type PdfFile, validatePdfPath } from "./lib/pdf";
 import { invokeCommand, listenTo } from "./lib/tauri";
@@ -42,6 +44,52 @@ const EMPTY_PATH_ERROR = "未找到 PDF 文件路径，请重试。";
 const PDF_TRANSLATION_START_TIMEOUT_MS = 30_000;
 const PDF_TRANSLATION_CANCEL_TIMEOUT_MS = 10_000;
 const PDF_HISTORY_PAGE_SIZE = 20;
+const PDF_HISTORY_SKIP_CONFIRM_KEY = "lilt.pdf.history.skip-delete-confirmation";
+
+function readSkipDeleteConfirmation(): boolean {
+  try { return window.localStorage.getItem(PDF_HISTORY_SKIP_CONFIRM_KEY) === "1"; }
+  catch { return false; }
+}
+
+function PdfHistoryDeleteDialog({ entry, open, busy, error, onCancel, onConfirm, onClosed }: {
+  entry: PdfTranslationHistoryEntry;
+  open: boolean;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: (remember: boolean) => void;
+  onClosed: () => void;
+}) {
+  const [remember, setRemember] = useState(false);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) { event.preventDefault(); onCancel(); }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => { window.cancelAnimationFrame(frame); document.removeEventListener("keydown", handleKey); };
+  }, [open, busy, onCancel]);
+  return createPortal(
+    <AnimatedOverlay className="modal-backdrop" open={open} onClosed={() => {
+      onClosed();
+      if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus({ preventScroll: true });
+    }} onBackdropClick={(event) => { if (!busy && event.target === event.currentTarget) onCancel(); }}>
+      <div className="modal-card pdf-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="pdf-history-delete-title" ref={dialogRef} tabIndex={-1}>
+        <div className="modal-heading"><div><strong id="pdf-history-delete-title">删除历史任务</strong><span>删除后，本地译文和任务文件将一并删除，原始 PDF 不受影响<br />确定删除吗</span></div></div>
+        <p className="pdf-delete-file-name">{entry.sourceFileName ?? entry.outputFileName}</p>
+        <label className="pdf-delete-remember"><input type="checkbox" checked={remember} disabled={busy} onChange={(event) => setRemember(event.target.checked)} />记住选择，下次删除不再询问</label>
+        {error && <p className="error-message" role="alert">{error}</p>}
+        <div className="form-actions modal-actions">
+          <button className="secondary-button" type="button" disabled={busy} onClick={onCancel}>取消</button>
+          <button className="primary-button pdf-delete-confirm" type="button" disabled={busy} onClick={() => onConfirm(remember)}>{busy ? "删除中…" : "确认删除"}</button>
+        </div>
+      </div>
+    </AnimatedOverlay>, document.body,
+  );
+}
 
 function emptyPdfJob(): PdfJobUiState {
   return {
@@ -139,6 +187,7 @@ function pdfHistoryDateTime(timestamp: number | null): string | undefined {
 
 interface PdfViewProps {
   active: boolean;
+  visible: boolean;
   pdfEngine: PdfEngineRuntime;
   pdfPreflightEnabled: boolean;
   pdfPreflightPageLimit: number;
@@ -154,6 +203,7 @@ export type PdfTranslationFloatingState = FloatingProgressCardData;
 
 export default function PdfView({
   active,
+  visible,
   pdfEngine,
   pdfPreflightEnabled,
   pdfPreflightPageLimit,
@@ -171,6 +221,12 @@ export default function PdfView({
   const [pdfHistoryLoading, setPdfHistoryLoading] = useState(true);
   const [pdfHistoryError, setPdfHistoryError] = useState<string | null>(null);
   const [pdfHistoryVisibleCount, setPdfHistoryVisibleCount] = useState(PDF_HISTORY_PAGE_SIZE);
+  const [skipDeleteConfirmation, setSkipDeleteConfirmation] = useState(readSkipDeleteConfirmation);
+  const [historyDeleteEntry, setHistoryDeleteEntry] = useState<PdfTranslationHistoryEntry | null>(null);
+  const [historyDeleteOpen, setHistoryDeleteOpen] = useState(false);
+  const [historyDeleteBusy, setHistoryDeleteBusy] = useState(false);
+  const [historyDeleteError, setHistoryDeleteError] = useState<string | null>(null);
+  const historyDeleteBusyRef = useRef(false);
 
   const {
     status: engineStatus,
@@ -776,6 +832,52 @@ export default function PdfView({
     }
   }, []);
 
+  const deleteHistory = useCallback(async (entry: PdfTranslationHistoryEntry, remember: boolean, fromDialog: boolean) => {
+    if (historyDeleteBusyRef.current) return;
+    historyDeleteBusyRef.current = true;
+    setHistoryDeleteBusy(true);
+    setHistoryDeleteError(null);
+    try {
+      await invokeCommand("delete_pdf_translation_history", { taskId: entry.taskId });
+      if (disposedRef.current) return;
+      setPdfHistory((current) => current.filter((item) => item.taskId !== entry.taskId));
+      setHistoryDeleteOpen(false);
+      if (remember) {
+        try {
+          window.localStorage.setItem(PDF_HISTORY_SKIP_CONFIRM_KEY, "1");
+          setSkipDeleteConfirmation(true);
+        } catch {
+          setError("任务已删除，但无法记住确认设置");
+        }
+      }
+      void refreshPdfTranslationHistory();
+    } catch (reason) {
+      const message = describeError(reason, "删除 PDF 任务失败");
+      if (fromDialog) setHistoryDeleteError(message);
+      else setError(message);
+    } finally {
+      historyDeleteBusyRef.current = false;
+      if (!disposedRef.current) setHistoryDeleteBusy(false);
+    }
+  }, [refreshPdfTranslationHistory]);
+
+  const requestHistoryDelete = useCallback((entry: PdfTranslationHistoryEntry) => {
+    if (skipDeleteConfirmation) {
+      void deleteHistory(entry, false, false);
+      return;
+    }
+    setHistoryDeleteError(null);
+    setHistoryDeleteEntry(entry);
+    setHistoryDeleteOpen(true);
+  }, [deleteHistory, skipDeleteConfirmation]);
+
+  const restoreDeleteConfirmation = useCallback(() => {
+    try {
+      window.localStorage.removeItem(PDF_HISTORY_SKIP_CONFIRM_KEY);
+      setSkipDeleteConfirmation(false);
+    } catch { setError("恢复删除确认失败"); }
+  }, []);
+
   const pdfHistoryListRef = useRef<HTMLDivElement | null>(null);
   const pdfHistoryLoadingMoreRef = useRef(false);
 
@@ -832,7 +934,7 @@ export default function PdfView({
 
   return (
     <>
-      <section className={`page-section pdf-page ${selectedFile ? "pdf-reader-page" : ""} ${active ? "" : "pdf-page-persisted-inactive"}`} aria-hidden={!active}>
+      <section className={`page-section pdf-page ${selectedFile ? "pdf-reader-page" : ""} ${visible ? "" : "pdf-page-persisted-inactive"}`} aria-hidden={!active}>
       {!selectedFile && (
         <div className="page-heading">
           <div className="page-title-block">
@@ -899,6 +1001,7 @@ export default function PdfView({
             <div className="pdf-history-heading">
               <History size={16} aria-hidden="true" />
               <h2 id="pdf-history-title">历史任务</h2>
+              {skipDeleteConfirmation && <button className="pdf-history-restore-confirm" type="button" onClick={restoreDeleteConfirmation}>恢复删除确认</button>}
             </div>
             {pdfHistoryLoading ? (
               <p className="pdf-history-state" role="status">正在读取历史任务</p>
@@ -929,14 +1032,11 @@ export default function PdfView({
                     entry.pageCount === null ? null : `${entry.pageCount} 页`,
                   ].filter((part): part is string => Boolean(part));
                   return (
-                    <button
+                    <div
                       className="pdf-history-item"
                       key={entry.taskId}
-                      type="button"
-                      onClick={() => void openOutputDirectory(entry.outputPdf)}
-                      aria-label={`打开 ${entry.outputFileName} 所在文件夹`}
                     >
-                      <span className="pdf-history-icon" aria-hidden="true"><FolderOpen size={16} /></span>
+                      <span className="pdf-history-icon" aria-hidden="true"><FileType2 size={16} /></span>
                       <span className="pdf-history-copy">
                         <strong>{entry.sourceFileName ?? entry.outputFileName}</strong>
                         <small>{detail.join(" · ")}</small>
@@ -945,7 +1045,11 @@ export default function PdfView({
                         <span>{entry.legacy ? "文件修改时间" : "完成时间"}</span>
                         {formatPdfHistoryTime(entry.completedAtUnixMs)}
                       </time>
-                    </button>
+                      <div className="pdf-history-actions">
+                        <button className="pdf-history-action" type="button" onClick={() => void openOutputDirectory(entry.outputPdf)} aria-label={`打开 ${entry.outputFileName} 所在文件夹`} title="打开文件夹"><FolderOpen size={15} /><span>文件夹</span></button>
+                        <button className="pdf-history-action pdf-history-action-delete" type="button" disabled={historyDeleteBusy} onClick={() => requestHistoryDelete(entry)} aria-label={`删除 ${entry.sourceFileName ?? entry.outputFileName} 任务`} title="删除任务"><Trash2 size={15} /><span>删除</span></button>
+                      </div>
+                    </div>
                   );
                 })}
                 {pdfHistoryVisibleCount < pdfHistory.length && (
@@ -958,6 +1062,7 @@ export default function PdfView({
         </>
       )}
       </section>
+      {historyDeleteEntry && <PdfHistoryDeleteDialog key={historyDeleteEntry.taskId} entry={historyDeleteEntry} open={historyDeleteOpen} busy={historyDeleteBusy} error={historyDeleteError} onCancel={() => setHistoryDeleteOpen(false)} onConfirm={(remember) => void deleteHistory(historyDeleteEntry, remember, true)} onClosed={() => setHistoryDeleteEntry(null)} />}
     </>
   );
 }

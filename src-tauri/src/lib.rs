@@ -359,6 +359,7 @@ pub fn run() {
             clear_dictionary_history,
             pdf::read_pdf_bytes,
             pdf::reveal_pdf_file,
+            pdf_jobs::delete_pdf_translation_history,
             pdf_engine::get_pdf_engine_status,
             pdf_engine::prepare_pdf_engine,
             pdf_jobs::start_pdf_translation,

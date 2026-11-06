@@ -111,7 +111,8 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .main-content.bounded-list-main-content { overflow-y: hidden; overscroll-behavior: none; }
 .main-content.pdf-main-content { overflow-y: hidden; overscroll-behavior: none; }
 .pdf-persistent-host { min-width: 0; min-height: 0; }
-.pdf-persistent-host.is-active { position: relative; z-index: 1; width: 100%; height: 100%; }
+.pdf-persistent-host.is-active { position: relative; z-index: 1; width: 100%; height: 100%; animation: page-enter var(--motion-standard-duration) var(--motion-ease) both; }
+.pdf-persistent-host.is-exiting { position: absolute; z-index: 2; top: var(--page-block-start); right: var(--page-inline-padding); bottom: var(--page-block-end); left: var(--page-inline-padding); pointer-events: none; animation: page-exit var(--motion-standard-duration) var(--motion-ease) both; }
 .pdf-persistent-host.is-inactive { position: absolute; z-index: 5; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .pdf-page-persisted-inactive { visibility: hidden; pointer-events: none; }
 .bounded-list-main-content .page-transition-stack,
@@ -375,9 +376,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-history-heading { min-height: 25px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; color: #718473; }
 .pdf-history-heading h2 { margin: 0; color: #526456; font-size: 12px; font-weight: 600; }
 .pdf-history-list { display: grid; gap: 7px; }
-.pdf-history-item { width: 100%; min-width: 0; min-height: 58px; padding: 9px 11px; display: flex; align-items: center; gap: 10px; border: 1px solid #e0e3da; border-radius: 7px; color: #59685c; background: #fffefb; text-align: left; cursor: pointer; transition: border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
-.pdf-history-item:hover { border-color: #b9cbb8; background: #f5f8f2; box-shadow: 0 3px 10px rgba(48, 61, 50, .06); }
-.pdf-history-item:focus-visible { outline: 2px solid rgba(101, 137, 108, .48); outline-offset: 2px; }
+.pdf-history-item { width: 100%; min-width: 0; min-height: 58px; padding: 9px 11px; display: flex; align-items: center; gap: 10px; border: 1px solid #e0e3da; border-radius: 7px; color: #59685c; background: #fffefb; text-align: left; }
 .pdf-history-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 7px; color: #6e8a72; background: #edf3ea; }
 .pdf-history-copy { min-width: 0; flex: 1 1 auto; }
 .pdf-history-copy strong, .pdf-history-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -385,6 +384,19 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-history-copy small { margin-top: 4px; color: #96998f; font-size: 10px; }
 .pdf-history-time { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; color: #999d94; font-size: 10px; white-space: nowrap; }
 .pdf-history-time > span { color: #afb1aa; font-size: 9px; }
+.pdf-history-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; }
+.pdf-history-action { min-height: 32px; padding: 5px 7px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 6px; color: #718473; background: transparent; font-size: 10px; }
+.pdf-history-action:hover:not(:disabled) { color: #4f6c56; background: #edf3ea; }
+.pdf-history-action-delete:hover:not(:disabled) { color: #a25e53; background: #f5e9e6; }
+.pdf-history-action:focus-visible, .pdf-history-restore-confirm:focus-visible { outline: 2px solid rgba(101, 137, 108, .48); outline-offset: 2px; }
+.pdf-history-action:disabled { cursor: wait; opacity: .55; }
+.pdf-history-restore-confirm { margin-left: auto; padding: 3px 4px; border: 0; color: #718473; background: transparent; font-size: 10px; text-decoration: underline; text-underline-offset: 2px; }
+.pdf-history-restore-confirm:hover { color: #4f6c56; }
+.pdf-delete-file-name { overflow: hidden; margin: 18px 0 12px; color: #536456; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-delete-remember { display: flex; align-items: center; gap: 8px; color: #69766b; font-size: 11px; }
+.pdf-delete-remember input { accent-color: #718c74; }
+.primary-button.pdf-delete-confirm { border-color: #a65349; background: #b95f53; color: #fff; }
+.primary-button.pdf-delete-confirm:hover:not(:disabled) { border-color: #90453d; background: #a65046; }
 .pdf-history-state { margin: 0; padding: 11px 12px; border: 1px dashed #e0e3da; border-radius: 7px; color: #92978e; background: rgba(255, 255, 251, .5); font-size: 11px; text-align: center; }
 .pdf-history-state.error-message { color: #a25e53; }
 .pdf-reader-page { max-width: none; height: 100%; min-height: 0; display: flex; flex-direction: column; }

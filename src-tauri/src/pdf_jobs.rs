@@ -402,6 +402,57 @@ pub fn list_pdf_translation_history(
     Ok(history)
 }
 
+#[tauri::command]
+pub fn delete_pdf_translation_history(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<(), String> {
+    let jobs = state
+        .pdf_jobs
+        .lock()
+        .map_err(|_| "PDF 任务状态锁已损坏".to_string())?;
+    if jobs.contains_key(&task_id) {
+        return Err("任务正在运行，无法删除".to_string());
+    }
+    delete_pdf_history_entry(&state.data_dir, &task_id)
+}
+
+fn delete_pdf_history_entry(data_dir: &Path, task_id: &str) -> Result<(), String> {
+    let id = Uuid::parse_str(task_id).map_err(|_| "PDF 任务标识无效".to_string())?;
+    if id.hyphenated().to_string() != task_id {
+        return Err("PDF 任务标识无效".to_string());
+    }
+    let data_root = data_dir
+        .canonicalize()
+        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    let history_root = data_dir
+        .join("pdf_jobs")
+        .canonicalize()
+        .map_err(|error| format!("读取 PDF 任务目录失败：{error}"))?;
+    if !history_root.starts_with(&data_root) || !history_root.is_dir() {
+        return Err("PDF 任务目录无效".to_string());
+    }
+    let task_dir = history_root.join(task_id);
+    let metadata =
+        fs::symlink_metadata(&task_dir).map_err(|error| format!("读取 PDF 任务失败：{error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err("PDF 任务目录无效".to_string());
+    }
+    let task_dir = task_dir
+        .canonicalize()
+        .map_err(|error| format!("解析 PDF 任务目录失败：{error}"))?;
+    if task_dir.parent() != Some(history_root.as_path()) {
+        return Err("PDF 任务目录无效".to_string());
+    }
+    if read_pdf_translation_history_manifest(&task_dir, task_id)
+        .or_else(|| recover_pdf_translation_history(&task_dir, task_id))
+        .is_none()
+    {
+        return Err("PDF 历史任务不存在".to_string());
+    }
+    fs::remove_dir_all(&task_dir).map_err(|error| format!("删除 PDF 任务文件失败：{error}"))
+}
+
 pub(crate) fn shutdown_for_update(state: &AppState) {
     let handles = match state.pdf_jobs.lock() {
         Ok(jobs) => jobs.values().cloned().collect::<Vec<_>>(),
@@ -2153,10 +2204,10 @@ mod tests {
     use super::{
         PdfPreflightCompletedEvent, PreflightKey, PreflightRegistry,
         build_partial_translation_response, build_translation_response, commit_pdf_persistence,
-        constrained_abbreviation_pairs, normalize_pdf_options, normalize_pdf_page_range,
-        quality_warnings, request_source_text, translate_pdf_preflight_with_api_key,
-        translate_pdf_request_inner, translate_pdf_request_with_api_key, validate_input_pdf,
-        validate_output_pdf,
+        constrained_abbreviation_pairs, delete_pdf_history_entry, normalize_pdf_options,
+        normalize_pdf_page_range, quality_warnings, request_source_text,
+        translate_pdf_preflight_with_api_key, translate_pdf_request_inner,
+        translate_pdf_request_with_api_key, validate_input_pdf, validate_output_pdf,
     };
     use crate::AppState;
     use crate::StartupRuntime;
@@ -2180,6 +2231,24 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn deleting_pdf_history_removes_only_the_selected_task_directory() {
+        let temp = TestTempDir::new();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let task_dir = temp.path().join("pdf_jobs").join(&task_id);
+        let output_dir = task_dir.join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("translated.dual.pdf"), b"%PDF-test").unwrap();
+        let original = temp.path().join("original.pdf");
+        std::fs::write(&original, b"original").unwrap();
+
+        delete_pdf_history_entry(temp.path(), &task_id).unwrap();
+        assert!(!task_dir.exists());
+        assert_eq!(std::fs::read(&original).unwrap(), b"original");
+        assert!(delete_pdf_history_entry(temp.path(), "../original.pdf").is_err());
+        assert!(original.exists());
+    }
 
     #[test]
     fn preflight_registry_matches_task_and_request_and_blocks_late_claims() {

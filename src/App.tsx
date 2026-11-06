@@ -374,6 +374,20 @@ function App() {
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [closeDialogMounted, setCloseDialogMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pdfPageExiting, setPdfPageExiting] = useState(false);
+  const pdfPageWasActiveRef = useRef(false);
+  const pdfPageActive = !settingsOpen && tab === "pdf";
+  useLayoutEffect(() => {
+    if (pdfPageActive) {
+      pdfPageWasActiveRef.current = true;
+      setPdfPageExiting(false);
+    } else if (pdfPageWasActiveRef.current) {
+      pdfPageWasActiveRef.current = false;
+      setPdfPageExiting(!reducedMotion);
+    } else if (reducedMotion) {
+      setPdfPageExiting(false);
+    }
+  }, [pdfPageActive, reducedMotion]);
   const [settingsWorkspaceMounted, setSettingsWorkspaceMounted] = useState(false);
   const [settingsConfirmOpen, setSettingsConfirmOpen] = useState(false);
   const [settingsConfirmMounted, setSettingsConfirmMounted] = useState(false);
@@ -1799,9 +1813,13 @@ function App() {
           </div>
         )}
       <main inert={settingsOpen} className={`main-content ${tab === "translate" ? "translate-main-content" : ""} ${usesBoundedListLayout ? "bounded-list-main-content" : ""} ${usesInternalScrollLayout ? "pdf-main-content" : ""}`}>
-        <div className={`pdf-persistent-host ${!settingsOpen && tab === "pdf" ? "is-active" : "is-inactive"}`}>
+        <div className={`pdf-persistent-host ${pdfPageActive ? "is-active" : pdfPageExiting ? "is-exiting" : "is-inactive"}`}
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget && !pdfPageActive) setPdfPageExiting(false);
+          }}>
           <PdfView
-            active={!settingsOpen && tab === "pdf"}
+            active={pdfPageActive}
+            visible={pdfPageActive || pdfPageExiting}
             pdfEngine={pdfEngine}
             pdfPreflightEnabled={snapshot.settings.pdfPreflightEnabled}
             pdfPreflightPageLimit={snapshot.settings.pdfPreflightPageLimit}
