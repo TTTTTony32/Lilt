@@ -27,10 +27,17 @@ from worker import (
     encode_message,
     _make_translation_batches,
     _run_translation_stage,
+    _token_usage,
 )
 
 
 class TranslationStageTests(unittest.TestCase):
+    def test_token_usage_keeps_cache_read_tokens(self):
+        self.assertEqual(
+            _token_usage({"prompt_tokens": 80, "completion_tokens": 12, "cache_read_tokens": 24}),
+            {"prompt_tokens": 80, "completion_tokens": 12, "cache_read_tokens": 24},
+        )
+
     def test_batch_size_uses_token_budget_and_keeps_long_paragraphs_intact(self):
         class Tokenizer:
             def encode_ordinary(self, text):

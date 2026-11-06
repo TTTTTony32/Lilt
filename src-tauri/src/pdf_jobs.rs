@@ -1186,6 +1186,7 @@ async fn translate_pdf_preflight_inner(
         "{}\n\n你正在执行 PDF 主题预检。只返回 JSON 对象，字段为 schema_version、title、topic、domain。只描述文章主题和领域，不要提取术语或缩写；无法确认的字段使用 null。",
         prepared.system_prompt
     );
+    let persist_usage = matches!(&stream_backend, PdfPreflightStreamBackend::SharedCore);
     let translated = stream_backend
         .stream(
             crate::translation_core::StreamRequest {
@@ -1209,7 +1210,18 @@ async fn translate_pdf_preflight_inner(
         )
         .await;
     let translated = match translated {
-        Ok(value) => value,
+        Ok(value) => {
+            if persist_usage {
+                crate::token_usage::record_provider_token_usage(
+                    state,
+                    &prepared.provider.id,
+                    &prepared.provider.model_id,
+                    &request.preflight_request_id,
+                    value.token_usage.as_ref(),
+                );
+            }
+            value
+        }
         Err(crate::provider::ProviderError::Cancelled) => {
             return DocumentPreflightResponseMessage {
                 task_id,
@@ -1439,7 +1451,16 @@ async fn translate_pdf_request_inner(
     )
     .await;
     let translated = match translated {
-        Ok(value) => value,
+        Ok(value) => {
+            crate::token_usage::record_provider_token_usage(
+                state,
+                &prepared.provider.id,
+                &prepared.provider.model_id,
+                &translation_request_id,
+                value.token_usage.as_ref(),
+            );
+            value
+        }
         Err(crate::provider::ProviderError::Cancelled) => {
             return PdfTranslationRequestResult {
                 response: TranslateResponseMessage {
@@ -2635,6 +2656,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(4),
                 total_tokens: Some(14),
+                cache_read_tokens: None,
             })
         );
     }

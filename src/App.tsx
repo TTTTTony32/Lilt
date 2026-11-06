@@ -20,6 +20,7 @@ import { AnimatedOverlay } from "./components/AnimatedOverlay";
 import { usePrefersReducedMotion } from "./components/usePrefersReducedMotion";
 import { DownloadActivityStack } from "./components/DownloadActivityStack";
 import { ResourceDownloadDialog, type ResourceDownloadDialogStatus } from "./components/ResourceDownloadDialog";
+import { ProviderTokenUsage } from "./components/ProviderTokenUsage";
 import SegmentedSourceEditor from "./components/SegmentedSourceEditor";
 import { usePdfEngineRuntime, type PdfEngineRuntime } from "./lib/usePdfEngineRuntime";
 import { summarizeUpdaterUpdate, type GitHubReleaseSummary } from "./lib/release-version";
@@ -3992,6 +3993,7 @@ function SettingsView({
               )}
             </div>
           </div>
+          <ProviderTokenUsage providerId={providerId} providerName={providerName} />
           </div>
 
           <div className="settings-section" id="settings-section-prompt" data-settings-section="prompt" ref={(element) => { settingsSectionRefs.current.prompt = element; }}>

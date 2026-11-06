@@ -49,13 +49,6 @@ pub struct StreamRequest<'a> {
 pub struct TranslationCore;
 
 impl TranslationCore {
-    pub async fn stream<F>(request: StreamRequest<'_>, on_delta: F) -> Result<String, ProviderError>
-    where
-        F: FnMut(String) -> Result<(), ProviderError>,
-    {
-        Ok(Self::stream_with_usage(request, on_delta).await?.content)
-    }
-
     pub async fn stream_with_usage<F>(
         request: StreamRequest<'_>,
         on_delta: F,

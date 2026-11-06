@@ -585,6 +585,7 @@ fn parse_responses_token_usage(value: &Value) -> Option<crate::pdf_protocol::Tok
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        cache_read_tokens: parse_cache_read_tokens(value),
     })
 }
 
@@ -680,7 +681,20 @@ fn parse_token_usage(value: &Value) -> Option<crate::pdf_protocol::TokenUsage> {
         prompt_tokens: value.get("prompt_tokens").and_then(Value::as_u64),
         completion_tokens: value.get("completion_tokens").and_then(Value::as_u64),
         total_tokens: value.get("total_tokens").and_then(Value::as_u64),
+        cache_read_tokens: parse_cache_read_tokens(value),
     })
+}
+
+fn parse_cache_read_tokens(value: &Value) -> Option<u64> {
+    [
+        value.get("prompt_cache_hit_tokens"),
+        value.get("cache_read_tokens"),
+        value.get("cache_read_input_tokens"),
+        value.pointer("/prompt_tokens_details/cached_tokens"),
+        value.pointer("/input_tokens_details/cached_tokens"),
+    ]
+    .into_iter()
+    .find_map(|candidate| candidate.and_then(Value::as_u64))
 }
 
 fn client() -> Client {
@@ -770,7 +784,8 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 mod tests {
     use super::{
         ChatStreamRequest, ProviderError, ProviderStreamActivity, normalize_base_url,
-        parse_model_payload, parse_sse_details, parse_sse_line, stream_chat_completion_with_usage,
+        parse_model_payload, parse_responses_token_usage, parse_sse_details, parse_sse_line,
+        parse_token_usage, stream_chat_completion_with_usage,
         stream_chat_completion_with_usage_and_activity,
     };
     use crate::contracts::{ApiProtocol, ThinkingEffort};
@@ -828,6 +843,38 @@ mod tests {
             parse_model_payload(&json!({"models": []})),
             Err(ProviderError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn parses_cache_read_token_shapes_without_subtracting_them_from_input() {
+        let openai = parse_token_usage(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 25}
+        }))
+        .unwrap();
+        assert_eq!(openai.prompt_tokens, Some(100));
+        assert_eq!(openai.cache_read_tokens, Some(25));
+
+        let responses = parse_responses_token_usage(&json!({
+            "input_tokens": 80,
+            "output_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 12}
+        }))
+        .unwrap();
+        assert_eq!(responses.prompt_tokens, Some(80));
+        assert_eq!(responses.cache_read_tokens, Some(12));
+
+        let deepseek = parse_token_usage(&json!({
+            "prompt_tokens": 40,
+            "completion_tokens": 10,
+            "prompt_cache_hit_tokens": 30,
+            "prompt_cache_miss_tokens": 10
+        }))
+        .unwrap();
+        assert_eq!(deepseek.prompt_tokens, Some(40));
+        assert_eq!(deepseek.cache_read_tokens, Some(30));
     }
 
     #[tokio::test]
@@ -947,6 +994,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(4),
                 total_tokens: Some(14),
+                cache_read_tokens: None,
             })
         );
         assert_eq!(deltas, vec!["本地", " Provider"]);
@@ -1091,6 +1139,7 @@ mod tests {
                 prompt_tokens: Some(8),
                 completion_tokens: Some(3),
                 total_tokens: Some(11),
+                cache_read_tokens: None,
             })
         );
     }

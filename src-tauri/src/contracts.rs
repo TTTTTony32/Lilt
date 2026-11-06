@@ -358,6 +358,52 @@ pub struct CacheStats {
     pub max_bytes: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderTokenUsageBucketKind {
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTokenUsageStats {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_known_read_tokens: u64,
+    pub cache_known_input_tokens: u64,
+    pub cache_paired_request_count: u64,
+    pub input_unknown_count: u64,
+    pub output_unknown_count: u64,
+    pub cache_detail_unknown_count: u64,
+    pub request_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTokenUsageBucket {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    #[serde(flatten)]
+    pub stats: ProviderTokenUsageStats,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTokenUsageResponse {
+    pub provider_id: String,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub bucket: ProviderTokenUsageBucketKind,
+    pub model_id: Option<String>,
+    pub models: Vec<String>,
+    pub buckets: Vec<ProviderTokenUsageBucket>,
+    pub totals: ProviderTokenUsageStats,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {

@@ -659,6 +659,50 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .provider-test-result strong { display: block; margin-bottom: 7px; font-size: 11px; }
 .provider-test-result pre { max-height: 220px; margin: 0; overflow: auto; color: #59665b; font: inherit; font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .provider-test-result.is-error pre { color: #86584f; }
+.provider-token-usage { min-width: 0; margin-top: 28px; padding-top: 23px; border-top: 1px solid #e3e4dc; }
+.provider-usage-header, .provider-usage-summary-heading, .provider-usage-trend-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.provider-usage-header h3 { margin: 0; color: #4e5e51; font-size: 14px; font-weight: 600; }
+.provider-usage-header p { margin: 5px 0 0; color: #969d94; font-size: 10px; overflow-wrap: anywhere; }
+.provider-usage-refresh { width: 32px; height: 32px; min-height: 32px; flex: 0 0 auto; padding: 0; display: grid; place-items: center; border: 1px solid #dce2d9; border-radius: 7px; color: #718473; background: #f8f9f5; }
+.provider-usage-refresh:hover:not(:disabled) { border-color: #c8d6c7; color: #4e6a55; background: #eff4ec; }
+.provider-usage-refresh:disabled { opacity: .7; }
+.provider-usage-spinner { animation: spin .9s linear infinite; }
+.provider-usage-model-filter { min-width: 0; margin: 15px 0 20px; display: flex; align-items: center; gap: 9px; color: #7c8178; font-size: 11px; }
+.provider-usage-model-filter select { width: min(340px, 100%); min-width: 0; height: 34px; min-height: 34px; margin: 0; padding: 0 10px; border: 1px solid #deded5; border-radius: 6px; color: #4e5e51; background: #fffefb; font-size: 11px; }
+.provider-usage-model-filter select:focus-visible { outline: 2px solid rgba(131, 169, 142, .45); outline-offset: 1px; }
+.provider-usage-summary-heading { margin: 0 0 10px; }
+.provider-usage-summary-heading > div, .provider-usage-trend-heading > div:first-child { min-width: 0; display: grid; gap: 4px; }
+.provider-usage-summary-heading strong, .provider-usage-trend-heading strong { color: #5a665b; font-size: 11px; font-weight: 600; }
+.provider-usage-summary-heading span, .provider-usage-trend-heading span { color: #989e95; font-size: 10px; }
+.provider-usage-summary-heading > small { flex: 0 0 auto; color: #9ba097; font-size: 10px; }
+.provider-usage-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.provider-usage-metric { min-width: 0; min-height: 86px; padding: 11px 12px; display: grid; align-content: start; gap: 5px; border: 1px solid #e1e4dc; border-radius: 8px; background: #fafbf8; }
+.provider-usage-metric > span { color: #818b80; font-size: 10px; }
+.provider-usage-metric > strong { overflow: hidden; color: #536b57; font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.provider-usage-metric > small { color: #9ba097; font-size: 9px; line-height: 1.45; }
+.provider-usage-metric.is-cache { background: #f4f7ec; }
+.provider-usage-metric.is-input { background: #f1f6f1; }
+.provider-usage-metric.is-uncached-input { background: #f5f5ed; }
+.provider-usage-metric.is-output { background: #fbf3ee; }
+.provider-usage-metric.is-rate { background: #f7f7ef; }
+.provider-usage-note { margin: 8px 0 0; color: #9a806a; font-size: 10px; line-height: 1.55; }
+.provider-usage-trend-heading { margin-top: 26px; align-items: flex-end; }
+.provider-usage-periods { flex: 0 0 auto; padding: 3px; display: flex; gap: 2px; border: 1px solid #e1e4dc; border-radius: 7px; background: #f8f9f5; }
+.provider-usage-periods button { min-width: 34px; min-height: 26px; padding: 0 7px; border: 0; border-radius: 5px; color: #8c958b; background: transparent; font-size: 10px; }
+.provider-usage-periods button:hover { color: #506a55; background: #eef3eb; }
+.provider-usage-periods button.is-active { color: #4b6354; background: #e6eee3; box-shadow: inset 0 0 0 1px #d5e0d2; }
+.provider-usage-legend { margin: 15px 0 2px; display: flex; flex-wrap: wrap; gap: 14px; color: #848c83; font-size: 9px; }
+.provider-usage-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.provider-usage-legend i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 2px; }
+.provider-usage-chart-wrap { width: 100%; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #d8ddd5 transparent; }
+.provider-usage-chart { width: 100%; min-width: 620px; height: auto; display: block; overflow: visible; }
+.provider-usage-grid-line { stroke: #e8ebe5; stroke-width: 1; }
+.provider-usage-axis-label { fill: #9aa197; font-family: inherit; font-size: 10px; }
+.provider-usage-x-label { font-size: 9px; }
+.provider-usage-chart-bar { opacity: .92; }
+.provider-usage-chart-caption { margin: 4px 0 0; color: #a0a49c; font-size: 9px; }
+.provider-usage-loading, .provider-usage-empty { min-height: 128px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #989f96; font-size: 11px; }
+.provider-usage-error { margin: 12px 0; padding: 10px 12px; border: 1px solid #ead4cf; border-radius: 7px; color: #925e55; background: #fbf3f1; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .personal-dictionary-open { min-width: 0; padding: 0; display: flex; align-items: center; gap: 9px; border: 0; color: #667166; background: transparent; text-align: left; }
 .personal-dictionary-open:hover { color: #38513f; }
 .personal-dictionary-open > span { min-width: 0; }
@@ -1042,4 +1086,19 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 
 @media (max-width: 1000px) {
   .translation-panel { height: max(300px, 40vh); }
+}
+
+@media (max-width: 700px) {
+  .provider-usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-usage-model-filter { align-items: flex-start; flex-direction: column; }
+  .provider-usage-model-filter select { width: 100%; }
+  .provider-usage-trend-heading { align-items: flex-start; flex-direction: column; }
+  .provider-usage-periods { align-self: stretch; justify-content: space-between; }
+  .provider-usage-periods button { flex: 1 1 0; }
+}
+
+@media (max-width: 420px) {
+  .provider-usage-summary-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .provider-usage-metric { padding: 9px; }
+  .provider-usage-metric > strong { font-size: 17px; }
 }

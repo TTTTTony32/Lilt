@@ -83,6 +83,34 @@ export interface ProviderConfig {
   isBuiltin: boolean;
 }
 
+export type ProviderTokenUsageBucketSize = "hour" | "day" | "week" | "month";
+
+export interface ProviderTokenUsageBucket {
+  startMs: number;
+  endMs: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  inputUnknownCount: number;
+  outputUnknownCount: number;
+  cacheReadTokens: number | null;
+  cacheKnownReadTokens: number;
+  cacheKnownInputTokens: number;
+  cachePairedRequestCount: number;
+  cacheDetailUnknownCount: number;
+  requestCount: number;
+}
+
+export interface ProviderTokenUsageResponse {
+  providerId: string;
+  modelId: string | null;
+  models: string[];
+  fromMs: number;
+  toMs: number;
+  bucket: ProviderTokenUsageBucketSize;
+  buckets: ProviderTokenUsageBucket[];
+  totals: Omit<ProviderTokenUsageBucket, "startMs" | "endMs">;
+}
+
 export type ApiProtocol = "chat_completions" | "responses";
 
 export type ThinkingEffort = "none" | "low" | "medium" | "high";

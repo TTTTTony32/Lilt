@@ -286,6 +286,8 @@ pub struct TokenUsage {
     pub completion_tokens: Option<u64>,
     #[serde(default)]
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -497,6 +499,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(4),
                 total_tokens: Some(14),
+                cache_read_tokens: Some(3),
             }),
             cache_hit: true,
             warnings: vec!["使用缓存".to_string()],
@@ -705,6 +708,7 @@ mod tests {
                 prompt_tokens: Some(8),
                 completion_tokens: Some(5),
                 total_tokens: Some(13),
+                cache_read_tokens: Some(2),
             },
         });
         let decoded = decode_worker_message(

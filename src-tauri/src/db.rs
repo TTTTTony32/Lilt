@@ -14,6 +14,7 @@ use crate::contracts::{
     SelectionMode, ThinkingEffort, parse_selection_window_dimension,
 };
 use crate::glossary::GlossaryImportTerm;
+use crate::token_usage::ProviderTokenUsageSample;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -39,6 +40,16 @@ pub struct CacheRecord<'a> {
     pub provider: &'a ProviderRecord,
     pub prompt_id: &'a str,
     pub glossary_version: i64,
+}
+
+pub struct ProviderTokenUsageRecord<'a> {
+    pub provider_id: &'a str,
+    pub model_id: &'a str,
+    pub request_id: &'a str,
+    pub recorded_at_ms: i64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +351,22 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
                 compressed_bytes INTEGER NOT NULL,
                 database_bytes INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS provider_token_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                recorded_at_ms INTEGER NOT NULL,
+                input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+                output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+                cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
+                FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_token_usage_provider_time
+                ON provider_token_usage(provider_id, recorded_at_ms, id);
+            CREATE INDEX IF NOT EXISTS idx_provider_token_usage_provider_model_time
+                ON provider_token_usage(provider_id, model_id, recorded_at_ms, id);
             ",
         )
         .map_err(|error| format!("数据库迁移失败：{error}"))?;
@@ -1600,6 +1627,108 @@ pub fn get_cache_stats(connection: &Connection, max_bytes: i64) -> Result<CacheS
     })
 }
 
+pub fn insert_provider_token_usage(
+    connection: &Connection,
+    record: &ProviderTokenUsageRecord<'_>,
+) -> Result<(), String> {
+    let provider_id = record.provider_id.trim();
+    let model_id = record.model_id.trim();
+    let request_id = record.request_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() || request_id.is_empty() {
+        return Err("Provider Token 用量记录缺少标识".to_string());
+    }
+    connection
+        .execute(
+            "INSERT INTO provider_token_usage
+                (provider_id, model_id, request_id, recorded_at_ms, input_tokens, output_tokens, cache_read_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                provider_id,
+                model_id,
+                request_id,
+                record.recorded_at_ms,
+                token_count_to_db(record.input_tokens)?,
+                token_count_to_db(record.output_tokens)?,
+                token_count_to_db(record.cache_read_tokens)?,
+            ],
+        )
+        .map_err(|error| format!("写入 Provider Token 用量失败：{error}"))?;
+    Ok(())
+}
+
+fn token_count_to_db(tokens: Option<u64>) -> Result<Option<i64>, String> {
+    tokens
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| "Provider Token 用量超出数据库范围".to_string())
+}
+
+pub fn get_provider_token_usage_models(
+    connection: &Connection,
+    provider_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT model_id FROM provider_token_usage
+             WHERE provider_id = ?1 ORDER BY model_id COLLATE NOCASE",
+        )
+        .map_err(|error| format!("读取 Provider Token 模型列表失败：{error}"))?;
+    statement
+        .query_map(params![provider_id], |row| row.get(0))
+        .map_err(|error| format!("读取 Provider Token 模型列表失败：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取 Provider Token 模型列表失败：{error}"))
+}
+
+pub fn get_provider_token_usage_records(
+    connection: &Connection,
+    provider_id: &str,
+    model_id: Option<&str>,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<ProviderTokenUsageSample>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT model_id, recorded_at_ms, input_tokens, output_tokens, cache_read_tokens
+             FROM provider_token_usage
+             WHERE provider_id = ?1 AND recorded_at_ms >= ?2 AND recorded_at_ms < ?3
+               AND (?4 IS NULL OR model_id = ?4)
+             ORDER BY recorded_at_ms, id",
+        )
+        .map_err(|error| format!("读取 Provider Token 用量失败：{error}"))?;
+    let rows = statement
+        .query_map(params![provider_id, from_ms, to_ms, model_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .map_err(|error| format!("读取 Provider Token 用量失败：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取 Provider Token 用量失败：{error}"))?;
+    rows.into_iter()
+        .map(|(model_id, recorded_at_ms, input, output, cache_read)| {
+            Ok(ProviderTokenUsageSample {
+                model_id,
+                recorded_at_ms,
+                input_tokens: token_count_from_db(input)?,
+                output_tokens: token_count_from_db(output)?,
+                cache_read_tokens: token_count_from_db(cache_read)?,
+            })
+        })
+        .collect()
+}
+
+fn token_count_from_db(tokens: Option<i64>) -> Result<Option<u64>, String> {
+    tokens
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| "Provider Token 用量数据库记录为负数".to_string())
+}
+
 pub fn prune_cache(connection: &Connection, max_bytes: i64) -> Result<(), String> {
     loop {
         let usage = connection
@@ -2502,6 +2631,64 @@ mod tests {
             )
             .unwrap()
             == 1);
+    }
+
+    #[test]
+    fn provider_token_usage_keeps_unknown_fields_and_historical_models() {
+        let connection = test_connection();
+        let provider = create_provider(&connection).expect("custom provider should be created");
+        insert_provider_token_usage(
+            &connection,
+            &ProviderTokenUsageRecord {
+                provider_id: &provider.id,
+                model_id: "model-new",
+                request_id: "request-1",
+                recorded_at_ms: 100,
+                input_tokens: Some(120),
+                output_tokens: Some(18),
+                cache_read_tokens: Some(30),
+            },
+        )
+        .expect("known token usage should be inserted");
+        insert_provider_token_usage(
+            &connection,
+            &ProviderTokenUsageRecord {
+                provider_id: &provider.id,
+                model_id: "model-old",
+                request_id: "request-2",
+                recorded_at_ms: 200,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+            },
+        )
+        .expect("missing token fields should be retained as NULL");
+
+        let models = get_provider_token_usage_models(&connection, &provider.id).unwrap();
+        assert_eq!(models, ["model-new", "model-old"]);
+        let included = get_provider_token_usage_records(
+            &connection,
+            &provider.id,
+            Some("model-new"),
+            100,
+            200,
+        )
+        .unwrap();
+        assert_eq!(included.len(), 1);
+        assert_eq!(included[0].input_tokens, Some(120));
+        assert_eq!(included[0].cache_read_tokens, Some(30));
+
+        let missing = get_provider_token_usage_records(
+            &connection,
+            &provider.id,
+            Some("model-old"),
+            200,
+            201,
+        )
+        .unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].input_tokens, None);
+        assert_eq!(missing[0].cache_read_tokens, None);
     }
 
     #[test]

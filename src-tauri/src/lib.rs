@@ -18,6 +18,7 @@ mod selection;
 mod settings_workspace;
 #[cfg(test)]
 mod test_support;
+mod token_usage;
 mod translation_core;
 #[cfg(desktop)]
 mod tray;
@@ -30,12 +31,13 @@ use contracts::{
     GlossaryImportPreview, GlossaryImportPreviewTerm, GlossaryImportResult, GlossaryTerm,
     MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
     MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
-    PersonalDictionaryExportResult, Prompt, ProviderConfig, SelectionMode, SelectionRequestPayload,
-    SelectionRuntimeStatus, SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort,
-    TranslationCancelled, TranslationCommandResult, TranslationCompleted, TranslationDelta,
-    TranslationFailed, TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION,
-    WordExampleCancelled, WordExampleCommandResult, WordExampleCompleted, WordExampleFailed,
-    WordExamplePosDelta, WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
+    PersonalDictionaryExportResult, Prompt, ProviderConfig, ProviderTokenUsageBucketKind,
+    ProviderTokenUsageResponse, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
+    SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort, TranslationCancelled,
+    TranslationCommandResult, TranslationCompleted, TranslationDelta, TranslationFailed,
+    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
+    WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
 };
 use rusqlite::Connection;
@@ -314,6 +316,7 @@ pub fn run() {
             save_provider_config,
             save_settings_workspace,
             get_provider_models,
+            get_provider_token_usage,
             fetch_models,
             test_provider,
             set_active_provider,
@@ -977,6 +980,13 @@ async fn test_provider(
         ));
         error.to_string()
     })?;
+    token_usage::record_provider_token_usage(
+        state.inner(),
+        &provider_id,
+        model_id,
+        &request_id,
+        result.token_usage.as_ref(),
+    );
     if result.content.trim().is_empty() {
         return Err("模型测试没有收到回复".to_string());
     }
@@ -995,6 +1005,45 @@ fn set_active_provider(state: State<'_, AppState>, provider_id: String) -> Resul
         .lock()
         .map_err(|_| "应用数据库锁已损坏".to_string())?;
     db::set_active_provider(&connection, provider_id.trim())
+}
+
+#[tauri::command]
+fn get_provider_token_usage(
+    state: State<'_, AppState>,
+    provider_id: String,
+    from_ms: i64,
+    to_ms: i64,
+    bucket: ProviderTokenUsageBucketKind,
+    model_id: Option<String>,
+) -> Result<ProviderTokenUsageResponse, String> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        return Err("Provider ID 不能为空".to_string());
+    }
+    if from_ms >= to_ms {
+        return Err("Token 用量查询范围无效".to_string());
+    }
+    let model_id = model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let connection = state
+        .database
+        .lock()
+        .map_err(|_| "应用数据库锁已损坏".to_string())?;
+    let models = db::get_provider_token_usage_models(&connection, provider_id)?;
+    let records =
+        db::get_provider_token_usage_records(&connection, provider_id, model_id, from_ms, to_ms)?;
+    drop(connection);
+    token_usage::aggregate_provider_token_usage(
+        provider_id,
+        model_id,
+        from_ms,
+        to_ms,
+        bucket,
+        models,
+        &records,
+    )
 }
 
 #[tauri::command]
@@ -1418,7 +1467,7 @@ async fn translate_impl(
         request_id, prepared.provider.id, prepared.provider.model_id
     ));
     let learning_mode = prepared.learning_mode;
-    let translated = TranslationCore::stream(
+    let translated = TranslationCore::stream_with_usage(
         CoreStreamRequest {
             request_id: &request_id,
             base_url: &prepared.provider.base_url,
@@ -1449,7 +1498,16 @@ async fn translate_impl(
     unregister_request(&state, &request_id);
 
     let translated = match translated {
-        Ok(value) => value,
+        Ok(value) => {
+            token_usage::record_provider_token_usage(
+                &state,
+                &prepared.provider.id,
+                &prepared.provider.model_id,
+                &request_id,
+                value.token_usage.as_ref(),
+            );
+            value.content
+        }
         Err(provider::ProviderError::Cancelled) => {
             diagnostics::info(format!(
                 "command.translate.cancelled request_id={}",
@@ -2612,7 +2670,7 @@ async fn query_ai_dictionary(
         Err(error) => return Err(error),
     };
     let cancellation = CancellationToken::new();
-    let streamed = TranslationCore::stream(
+    let streamed = TranslationCore::stream_with_usage(
         CoreStreamRequest {
             request_id,
             base_url: &provider.base_url,
@@ -2629,6 +2687,14 @@ async fn query_ai_dictionary(
     )
     .await
     .map_err(|error| error.to_string())?;
+    token_usage::record_provider_token_usage(
+        state,
+        &provider.id,
+        &provider.model_id,
+        request_id,
+        streamed.token_usage.as_ref(),
+    );
+    let streamed = streamed.content;
     let parsed = parse_ai_dictionary_protocol(&streamed, &cache_key)?;
     let entry = match parsed {
         ParsedAiDictionary::Invalid { insight } => {
@@ -3523,7 +3589,7 @@ async fn generate_word_example_impl(
         prepared.canonical_word, prepared.word, prepared.example.source_text
     );
     let mut parser = WordExampleProtocolParser::default();
-    let streamed = TranslationCore::stream(
+    let streamed = TranslationCore::stream_with_usage(
         CoreStreamRequest {
             request_id: &request_id,
             base_url: &prepared.provider.base_url,
@@ -3564,7 +3630,16 @@ async fn generate_word_example_impl(
     )
     .await;
     let streamed = match streamed {
-        Ok(value) => value,
+        Ok(value) => {
+            token_usage::record_provider_token_usage(
+                &state,
+                &prepared.provider.id,
+                &prepared.provider.model_id,
+                &request_id,
+                value.token_usage.as_ref(),
+            );
+            value
+        }
         Err(provider::ProviderError::Cancelled) => {
             unregister_request(&state, &request_id);
             app.emit(
@@ -3587,7 +3662,7 @@ async fn generate_word_example_impl(
             diagnostics::error(format!(
                 "command.word_example.protocol_failed request_id={} raw_chars={} reason={error}",
                 request_id,
-                streamed.chars().count()
+                streamed.content.chars().count()
             ));
             unregister_request(&state, &request_id);
             return emit_word_failed(&app, &request_id, &error.to_string());

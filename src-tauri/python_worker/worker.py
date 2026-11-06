@@ -756,7 +756,9 @@ class LiltTranslator:
         self.token_count.inc(usage.get("total_tokens", 0))
         self.prompt_token_count.inc(usage.get("prompt_tokens", 0))
         self.completion_token_count.inc(usage.get("completion_tokens", 0))
-        self.cache_hit_prompt_token_count.inc(usage.get("cache_hit_prompt_tokens", 0))
+        self.cache_hit_prompt_token_count.inc(
+            usage.get("cache_read_tokens", usage.get("cache_hit_prompt_tokens", 0))
+        )
 
 
 class BabelDocWorker:
@@ -1682,7 +1684,7 @@ def _token_usage(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, int] = {}
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cache_hit_prompt_tokens"):
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cache_read_tokens", "cache_hit_prompt_tokens"):
         item = value.get(key)
         if isinstance(item, int) and item >= 0:
             result[key] = item
