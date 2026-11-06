@@ -20,12 +20,14 @@ export function AnimatedOverlay({
   const [phase, setPhase] = useState<OverlayPhase>(open ? "opening" : "closing");
   const closeNotifiedRef = useRef(false);
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
 
   const notifyClosed = useCallback(() => {
     if (closeNotifiedRef.current) return;
     closeNotifiedRef.current = true;
-    onClosed();
-  }, [onClosed]);
+    onClosedRef.current();
+  }, []);
 
   useEffect(() => {
     if (open) {

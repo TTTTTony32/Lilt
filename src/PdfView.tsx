@@ -78,7 +78,7 @@ function PdfHistoryDeleteDialog({ entry, open, busy, error, onCancel, onConfirm,
       if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus({ preventScroll: true });
     }} onBackdropClick={(event) => { if (!busy && event.target === event.currentTarget) onCancel(); }}>
       <div className="modal-card pdf-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="pdf-history-delete-title" ref={dialogRef} tabIndex={-1}>
-        <div className="modal-heading"><div><strong id="pdf-history-delete-title">删除历史任务</strong><span>删除后，本地译文和任务文件将一并删除，原始 PDF 不受影响<br />确定删除吗</span></div></div>
+        <div className="modal-heading"><div><strong id="pdf-history-delete-title">删除历史任务</strong><span>删除后，本地译文和任务文件将一并删除，原始 PDF 不受影响</span></div></div>
         <p className="pdf-delete-file-name">{entry.sourceFileName ?? entry.outputFileName}</p>
         <label className="pdf-delete-remember"><input type="checkbox" checked={remember} disabled={busy} onChange={(event) => setRemember(event.target.checked)} />记住选择，下次删除不再询问</label>
         {error && <p className="error-message" role="alert">{error}</p>}
@@ -850,7 +850,6 @@ export default function PdfView({
           setError("任务已删除，但无法记住确认设置");
         }
       }
-      void refreshPdfTranslationHistory();
     } catch (reason) {
       const message = describeError(reason, "删除 PDF 任务失败");
       if (fromDialog) setHistoryDeleteError(message);
@@ -859,7 +858,7 @@ export default function PdfView({
       historyDeleteBusyRef.current = false;
       if (!disposedRef.current) setHistoryDeleteBusy(false);
     }
-  }, [refreshPdfTranslationHistory]);
+  }, []);
 
   const requestHistoryDelete = useCallback((entry: PdfTranslationHistoryEntry) => {
     if (skipDeleteConfirmation) {
@@ -1046,8 +1045,8 @@ export default function PdfView({
                         {formatPdfHistoryTime(entry.completedAtUnixMs)}
                       </time>
                       <div className="pdf-history-actions">
-                        <button className="pdf-history-action" type="button" onClick={() => void openOutputDirectory(entry.outputPdf)} aria-label={`打开 ${entry.outputFileName} 所在文件夹`} title="打开文件夹"><FolderOpen size={15} /><span>文件夹</span></button>
-                        <button className="pdf-history-action pdf-history-action-delete" type="button" disabled={historyDeleteBusy} onClick={() => requestHistoryDelete(entry)} aria-label={`删除 ${entry.sourceFileName ?? entry.outputFileName} 任务`} title="删除任务"><Trash2 size={15} /><span>删除</span></button>
+                        <button className="pdf-history-action" type="button" onClick={() => void openOutputDirectory(entry.outputPdf)} aria-label={`打开 ${entry.outputFileName} 所在文件夹`} title="打开文件夹"><FolderOpen size={15} /></button>
+                        <button className="pdf-history-action pdf-history-action-delete" type="button" disabled={historyDeleteBusy} onClick={() => requestHistoryDelete(entry)} aria-label={`删除 ${entry.sourceFileName ?? entry.outputFileName} 任务`} title="删除任务"><Trash2 size={15} /></button>
                       </div>
                     </div>
                   );

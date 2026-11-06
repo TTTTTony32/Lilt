@@ -394,7 +394,7 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .pdf-history-restore-confirm:hover { color: #4f6c56; }
 .pdf-delete-file-name { overflow: hidden; margin: 18px 0 12px; color: #536456; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .pdf-delete-remember { display: flex; align-items: center; gap: 8px; color: #69766b; font-size: 11px; }
-.pdf-delete-remember input { accent-color: #718c74; }
+.pdf-delete-remember input { width: 12px; height: 12px; margin: 0; flex: 0 0 auto; accent-color: #718c74; }
 .primary-button.pdf-delete-confirm { border-color: #a65349; background: #b95f53; color: #fff; }
 .primary-button.pdf-delete-confirm:hover:not(:disabled) { border-color: #90453d; background: #a65046; }
 .pdf-history-state { margin: 0; padding: 11px 12px; border: 1px dashed #e0e3da; border-radius: 7px; color: #92978e; background: rgba(255, 255, 251, .5); font-size: 11px; text-align: center; }
