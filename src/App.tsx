@@ -1738,7 +1738,7 @@ function App() {
   return (
     <div className="app-shell">
       <div className="main-surface">
-      <header className={`app-chrome ${settingsOpen ? "is-settings-open" : ""}`} onMouseDown={handleTitlebarMouseDown}>
+      <header className={`app-chrome ${settingsOpen ? "is-settings-open" : tab === "dictionary" ? "has-scroll-blur" : ""}`} onMouseDown={handleTitlebarMouseDown}>
         <div className="brand-lockup">
           <img className="brand-logo" src={liltLogo} alt="" />
           <span className="brand-name">Lilt</span>
