@@ -1,3 +1,4 @@
+mod ai_dictionary;
 mod contracts;
 mod db;
 mod diagnostics;
@@ -24,18 +25,18 @@ mod translation_core;
 mod tray;
 
 use contracts::{
-    AI_DICTIONARY_PROTOCOL_VERSION, ApiProtocol, AppSnapshot, CloseBehavior,
-    DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult, DictionaryInvalidInsight,
-    DictionaryLookupCandidate, DictionaryLookupCommandResult, DictionaryMatchType,
-    DictionaryProperNounInsight, DictionarySource, DictionaryState, GlossaryExportResult,
-    GlossaryImportPreview, GlossaryImportPreviewTerm, GlossaryImportResult, GlossaryTerm,
-    MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH, MIN_SELECTION_WINDOW_HEIGHT,
-    MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample, PersonalDictionaryEntry,
-    PersonalDictionaryExportResult, Prompt, ProviderConfig, ProviderTokenUsageBucketKind,
-    ProviderTokenUsageResponse, SelectionMode, SelectionRequestPayload, SelectionRuntimeStatus,
-    SelectionSettingsResult, SelectionTriggerNotice, ThinkingEffort, TranslationCancelled,
-    TranslationCommandResult, TranslationCompleted, TranslationDelta, TranslationFailed,
-    TranslationRequest, TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
+    ApiProtocol, AppSnapshot, CloseBehavior, DICTIONARY_HISTORY_LIMIT, DictionaryCommandResult,
+    DictionaryInvalidInsight, DictionaryLookupCandidate, DictionaryLookupCommandResult,
+    DictionaryMatchType, DictionaryProperNounInsight, DictionarySource, DictionaryState,
+    GlossaryExportResult, GlossaryImportPreview, GlossaryImportPreviewTerm, GlossaryImportResult,
+    GlossaryTerm, MAX_SELECTION_WINDOW_HEIGHT, MAX_SELECTION_WINDOW_WIDTH,
+    MIN_SELECTION_WINDOW_HEIGHT, MIN_SELECTION_WINDOW_WIDTH, ModelInfo, ParagraphExample,
+    PersonalDictionaryEntry, PersonalDictionaryExportResult, Prompt, ProviderConfig,
+    ProviderTokenUsageBucketKind, ProviderTokenUsageResponse, SelectionMode,
+    SelectionRequestPayload, SelectionRuntimeStatus, SelectionSettingsResult,
+    SelectionTriggerNotice, ThinkingEffort, TranslationCancelled, TranslationCommandResult,
+    TranslationCompleted, TranslationDelta, TranslationFailed, TranslationRequest,
+    TranslationStarted, WORD_EXAMPLE_PROTOCOL_VERSION, WordExampleCancelled,
     WordExampleCommandResult, WordExampleCompleted, WordExampleFailed, WordExamplePosDelta,
     WordExampleRequest, WordExampleStarted, WordExampleTranslationDelta,
     clamp_selection_window_dimension,
@@ -144,6 +145,8 @@ pub struct AppState {
     pub(crate) dictionary_update: Arc<Mutex<Option<String>>>,
     pub(crate) dictionary_store: Arc<Mutex<dictionary::DictionaryStore>>,
     pub(crate) dictionary_initialising: Arc<AtomicBool>,
+    dictionary_initialisation_error: Arc<Mutex<Option<String>>>,
+    ai_dictionary_store: Arc<Mutex<ai_dictionary::AiDictionaryStore>>,
     pub(crate) ai_dictionary_requests: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
     pub(crate) selection: selection::SelectionService,
     pub(crate) pdf_jobs: Arc<Mutex<HashMap<String, pdf_jobs::PdfJobHandle>>>,
@@ -154,7 +157,14 @@ impl AppState {
     fn new(connection: Connection, data_dir: PathBuf, startup: Arc<StartupRuntime>) -> Self {
         let cancellations = Arc::new(Mutex::new(HashMap::new()));
         let selection = selection::SelectionService::new(cancellations.clone());
-        let dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
+        let mut dictionary_store = dictionary::DictionaryStore::new(data_dir.join("dictionary"));
+        let installation = db::get_dictionary_installation(&connection).unwrap_or_else(|error| {
+            diagnostics::error(format!("dictionary.installation.read_failed error={error}"));
+            None
+        });
+        dictionary_store.set_installation_identity(installation);
+        let ai_dictionary_store =
+            ai_dictionary::AiDictionaryStore::new(data_dir.join("dictionary"));
         diagnostics::info("dictionary.store.deferred source=startup");
         Self {
             database: Arc::new(Mutex::new(connection)),
@@ -165,6 +175,8 @@ impl AppState {
             dictionary_update: Arc::new(Mutex::new(None)),
             dictionary_store: Arc::new(Mutex::new(dictionary_store)),
             dictionary_initialising: Arc::new(AtomicBool::new(false)),
+            dictionary_initialisation_error: Arc::new(Mutex::new(None)),
+            ai_dictionary_store: Arc::new(Mutex::new(ai_dictionary_store)),
             ai_dictionary_requests: Arc::new(Mutex::new(HashMap::new())),
             selection,
             pdf_jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -304,7 +316,8 @@ pub fn run() {
                 selection_shortcut,
             );
             startup.log("selection.scheduled", "main");
-            schedule_dictionary_initialisation(state.clone());
+            schedule_dictionary_initialisation(state.clone(), app.handle().clone());
+            schedule_ai_dictionary_initialisation(state.clone());
             schedule_pending_example_indexes(state);
             startup.log("background.scheduled", "main");
             startup.log("setup.completed", "main");
@@ -609,27 +622,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
         read_snapshot_data(&connection)?
     };
-    let updating = state
-        .dictionary_update
-        .lock()
-        .map_err(|_| "词典更新状态锁已损坏".to_string())?
-        .is_some();
-    let mut dictionary = if state.dictionary_initialising.load(Ordering::Acquire) {
-        dictionary::deferred_state(
-            &state.dictionary_dir(),
-            snapshot_data.dictionary_installation.as_ref(),
-        )
-    } else {
-        state
-            .dictionary_store
-            .lock()
-            .map_err(|_| "词典存储锁已损坏".to_string())?
-            .state(snapshot_data.dictionary_installation.as_ref())
-    };
-    if updating {
-        dictionary.status = contracts::DictionaryStatus::Updating;
-        dictionary.error = None;
-    }
+    let dictionary = read_dictionary_state(&state, snapshot_data.dictionary_installation.as_ref())?;
     Ok(AppSnapshot {
         settings: snapshot_data.settings,
         provider: snapshot_data.provider,
@@ -1920,7 +1913,7 @@ fn schedule_selection_initialisation(
     });
 }
 
-fn schedule_dictionary_initialisation(state: AppState) {
+fn schedule_dictionary_initialisation(state: AppState, app: AppHandle) {
     state.dictionary_initialising.store(true, Ordering::Release);
     tauri::async_runtime::spawn(async move {
         let first_paint = state.startup.gate.wait(STARTUP_BACKGROUND_WAIT).await;
@@ -1942,20 +1935,73 @@ fn schedule_dictionary_initialisation(state: AppState) {
                 .map_err(|error| error.to_string())
         })
         .await;
-        state
-            .dictionary_initialising
-            .store(false, Ordering::Release);
-        match result {
-            Ok(Ok(())) => diagnostics::info("dictionary.store.ready source=startup"),
+        let failure = match result {
+            Ok(Ok(())) => {
+                diagnostics::info("dictionary.store.ready source=startup");
+                None
+            }
             Ok(Err(error)) if error == "词典未安装，请在设置中下载词典" => {
                 diagnostics::info("dictionary.store.not_installed source=startup");
+                None
             }
-            Ok(Err(error)) => diagnostics::error(format!(
-                "dictionary.store.failed source=startup error={error}"
-            )),
-            Err(error) => diagnostics::error(format!(
-                "dictionary.store.worker_failed source=startup error={error}"
-            )),
+            Ok(Err(error)) => {
+                diagnostics::error(format!(
+                    "dictionary.store.failed source=startup error={error}"
+                ));
+                Some(error)
+            }
+            Err(error) => {
+                diagnostics::error(format!(
+                    "dictionary.store.worker_failed source=startup error={error}"
+                ));
+                Some(format!("词典初始化任务失败：{error}"))
+            }
+        };
+        complete_dictionary_initialisation(&state, failure);
+        if let Err(error) = app.emit("dictionary_state_changed", ()) {
+            diagnostics::error(format!("dictionary.state_event.failed error={error}"));
+        }
+    });
+}
+
+fn complete_dictionary_initialisation(state: &AppState, failure: Option<String>) {
+    if failure.is_some() {
+        let mut store = state.dictionary_store.lock().unwrap_or_else(|poisoned| {
+            state.dictionary_store.clear_poison();
+            poisoned.into_inner()
+        });
+        store.close();
+    }
+    *state
+        .dictionary_initialisation_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = failure;
+    state
+        .dictionary_initialising
+        .store(false, Ordering::Release);
+}
+
+fn with_ai_dictionary<T>(
+    state: &AppState,
+    operation: impl FnOnce(&ai_dictionary::AiDictionaryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut store = state
+        .ai_dictionary_store
+        .lock()
+        .map_err(|_| "AI 词典存储锁已损坏".to_string())?;
+    store.initialise(&state.database)?;
+    operation(&store)
+}
+
+fn schedule_ai_dictionary_initialisation(state: AppState) {
+    tauri::async_runtime::spawn(async move {
+        state.startup.gate.wait(STARTUP_BACKGROUND_WAIT).await;
+        match tauri::async_runtime::spawn_blocking(move || with_ai_dictionary(&state, |_| Ok(())))
+            .await
+        {
+            Ok(Ok(())) => diagnostics::info("dictionary.ai.ready source=startup"),
+            Ok(Err(error)) => diagnostics::error(format!("dictionary.ai.failed error={error}")),
+            Err(error) => diagnostics::error(format!("dictionary.ai.worker_failed error={error}")),
         }
     });
 }
@@ -2561,36 +2607,6 @@ enum AiDictionaryLookup {
     },
 }
 
-#[derive(Clone, Copy)]
-struct AiDictionaryCacheKeyInput<'a> {
-    normalized_word: &'a str,
-    source_language: &'a str,
-    definition_language: &'a str,
-    provider_id: &'a str,
-    base_url: &'a str,
-    model_id: &'a str,
-    api_protocol: ApiProtocol,
-    thinking_effort: &'a str,
-    protocol_version: &'a str,
-}
-
-fn make_ai_dictionary_cache_key(input: &AiDictionaryCacheKeyInput<'_>) -> String {
-    let canonical = format!(
-        "word={}\nsource_language={}\ndefinition_language={}\nprovider={}\nbase_url={}\nmodel={}\napi_protocol={}\nthinking={}\nprotocol={}",
-        input.normalized_word,
-        input.source_language,
-        input.definition_language,
-        input.provider_id,
-        input.base_url,
-        input.model_id,
-        input.api_protocol.as_str(),
-        input.thinking_effort,
-        input.protocol_version,
-    );
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("{digest:x}")
-}
-
 async fn query_ai_dictionary(
     state: &AppState,
     request_id: &str,
@@ -2601,32 +2617,7 @@ async fn query_ai_dictionary(
         return Err("查询词形不能为空".to_string());
     }
 
-    let (mut provider, cache_max_bytes) = {
-        let connection = state
-            .database
-            .lock()
-            .map_err(|_| "应用数据库锁已损坏".to_string())?;
-        let settings = db::get_settings(&connection)?;
-        let provider = db::get_provider(&connection)?;
-        (provider, settings.cache_max_bytes)
-    };
-    provider.base_url =
-        provider::normalize_base_url(&provider.base_url).map_err(|error| error.to_string())?;
-    let cache_key = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
-        normalized_word: &normalized_word,
-        source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
-        definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
-        provider_id: &provider.id,
-        base_url: &provider.base_url,
-        model_id: &provider.model_id,
-        api_protocol: provider.api_protocol,
-        thinking_effort: provider.thinking_effort.as_str(),
-        protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
-    });
-
-    if let Some(lookup) =
-        load_ai_dictionary_cache(state, &cache_key, display_word, &normalized_word, &provider)?
-    {
+    if let Some(lookup) = load_ai_dictionary_entry(state, display_word)? {
         diagnostics::info(format!(
             "command.dictionary.ai_cache.hit request_id={request_id}"
         ));
@@ -2636,25 +2627,10 @@ async fn query_ai_dictionary(
         });
     }
 
-    let request_lock = {
-        let mut requests = state
-            .ai_dictionary_requests
-            .lock()
-            .map_err(|_| "AI 词典请求锁已损坏".to_string())?;
-        requests.retain(|_, request_lock| request_lock.strong_count() > 0);
-        if let Some(request_lock) = requests.get(&cache_key).and_then(Weak::upgrade) {
-            request_lock
-        } else {
-            let request_lock = Arc::new(tokio::sync::Mutex::new(()));
-            requests.insert(cache_key.clone(), Arc::downgrade(&request_lock));
-            request_lock
-        }
-    };
+    let request_lock = ai_dictionary_request_lock(state, &normalized_word)?;
     let _request_guard = request_lock.lock().await;
 
-    if let Some(lookup) =
-        load_ai_dictionary_cache(state, &cache_key, display_word, &normalized_word, &provider)?
-    {
+    if let Some(lookup) = load_ai_dictionary_entry(state, display_word)? {
         diagnostics::info(format!(
             "command.dictionary.ai_cache.hit_after_wait request_id={request_id}"
         ));
@@ -2664,6 +2640,15 @@ async fn query_ai_dictionary(
         });
     }
 
+    let mut provider = {
+        let connection = state
+            .database
+            .lock()
+            .map_err(|_| "应用数据库锁已损坏".to_string())?;
+        db::get_provider(&connection)?
+    };
+    provider.base_url =
+        provider::normalize_base_url(&provider.base_url).map_err(|error| error.to_string())?;
     let api_key = match secrets::load_api_key(&provider.id) {
         Ok(Some(value)) => value,
         Ok(None) => return Err("尚未配置 API Key，请在设置中保存 Provider".to_string()),
@@ -2695,41 +2680,18 @@ async fn query_ai_dictionary(
         streamed.token_usage.as_ref(),
     );
     let streamed = streamed.content;
-    let parsed = parse_ai_dictionary_protocol(&streamed, &cache_key)?;
+    let parsed = parse_ai_dictionary_protocol(&streamed, &normalized_word)?;
     let entry = match parsed {
         ParsedAiDictionary::Invalid { insight } => {
             return Ok(AiDictionaryLookup::Invalid { insight });
         }
         ParsedAiDictionary::Valid(entry) => entry,
     };
-    let canonical_word = entry
-        .get("headword")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "AI 词典条目缺少规范词头".to_string())?
-        .to_string();
-    let entry_json =
-        serde_json::to_string(&entry).map_err(|error| format!("AI 词典条目无法序列化：{error}"))?;
-
-    let connection = state
-        .database
-        .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    let cache = db::AiDictionaryCacheWrite {
-        cache_key: &cache_key,
-        normalized_word: &normalized_word,
-        lookup_word: display_word,
-        canonical_word: &canonical_word,
-        source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
-        definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
-        entry_json: &entry_json,
-        provider: &provider,
-        protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
-    };
-    db::save_ai_dictionary_cache(&connection, &cache)
-        .and_then(|_| db::prune_cache(&connection, cache_max_bytes))?;
+    with_ai_dictionary(state, |store| store.save(display_word, entry.clone()))?;
 
     diagnostics::info(format!(
-        "command.dictionary.ai.generated request_id={request_id}"
+        "command.dictionary.ai.generated request_id={request_id} protocol={}",
+        contracts::AI_DICTIONARY_PROTOCOL_VERSION
     ));
     Ok(AiDictionaryLookup::Found {
         lookup: build_ai_dictionary_lookup(display_word, &normalized_word, entry),
@@ -2737,74 +2699,38 @@ async fn query_ai_dictionary(
     })
 }
 
-fn load_ai_dictionary_cache(
+fn ai_dictionary_request_lock(
     state: &AppState,
-    cache_key: &str,
-    display_word: &str,
-    normalized_word: &str,
-    provider: &contracts::ProviderRecord,
-) -> Result<Option<contracts::DictionaryLookupResult>, String> {
-    let connection = state
-        .database
+    word: &str,
+) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+    let normalized_word = dictionary::normalize_headword(word);
+    let mut requests = state
+        .ai_dictionary_requests
         .lock()
-        .map_err(|_| "应用数据库锁已损坏".to_string())?;
-    let Some(record) = db::find_ai_dictionary_cache(&connection, cache_key)? else {
-        return Ok(None);
-    };
-    match decode_ai_dictionary_cache_record(
-        cache_key,
-        display_word,
-        normalized_word,
-        provider,
-        &record,
-    ) {
-        Ok(lookup) => Ok(Some(lookup)),
-        Err(error) => {
-            diagnostics::warn(format!(
-                "command.dictionary.ai_cache.invalid cache_key={cache_key} reason={error}"
-            ));
-            db::delete_ai_dictionary_cache(&connection, cache_key)?;
-            Ok(None)
-        }
+        .map_err(|_| "AI 词典请求锁已损坏".to_string())?;
+    requests.retain(|_, request_lock| request_lock.strong_count() > 0);
+    if let Some(request_lock) = requests.get(&normalized_word).and_then(Weak::upgrade) {
+        Ok(request_lock)
+    } else {
+        let request_lock = Arc::new(tokio::sync::Mutex::new(()));
+        requests.insert(normalized_word, Arc::downgrade(&request_lock));
+        Ok(request_lock)
     }
 }
 
-fn decode_ai_dictionary_cache_record(
-    cache_key: &str,
+fn load_ai_dictionary_entry(
+    state: &AppState,
     display_word: &str,
-    normalized_word: &str,
-    provider: &contracts::ProviderRecord,
-    record: &db::AiDictionaryCacheRecord,
-) -> Result<contracts::DictionaryLookupResult, String> {
-    if record.lookup_word.trim().is_empty()
-        || dictionary::normalize_headword(&record.lookup_word) != normalized_word
-        || record.normalized_word != normalized_word
-        || record.source_language != AI_DICTIONARY_SOURCE_LANGUAGE
-        || record.definition_language != AI_DICTIONARY_DEFINITION_LANGUAGE
-        || record.provider_id != provider.id
-        || record.base_url != provider.base_url
-        || record.model_id != provider.model_id
-        || record.thinking_effort != provider.thinking_effort.as_str()
-        || record.api_protocol != provider.api_protocol.as_str()
-        || record.protocol_version != AI_DICTIONARY_PROTOCOL_VERSION
-    {
-        return Err("AI 词典缓存身份不匹配".to_string());
-    }
-    let raw: Value = serde_json::from_str(&record.entry_json)
-        .map_err(|error| format!("AI 词典缓存 JSON 无法解析：{error}"))?;
-    let entry = normalize_ai_dictionary_entry(raw, cache_key)?;
-    let canonical_word = entry
-        .get("headword")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "AI 词典缓存缺少规范词头".to_string())?;
-    if record.canonical_word != canonical_word {
-        return Err("AI 词典缓存规范词头不一致".to_string());
-    }
-    Ok(build_ai_dictionary_lookup(
-        display_word,
-        normalized_word,
-        entry,
-    ))
+) -> Result<Option<contracts::DictionaryLookupResult>, String> {
+    with_ai_dictionary(state, |store| {
+        Ok(store.find(display_word)?.map(|record| {
+            build_ai_dictionary_lookup(
+                display_word,
+                &dictionary::normalize_headword(display_word),
+                record.entry,
+            )
+        }))
+    })
 }
 
 fn build_ai_dictionary_lookup(
@@ -3746,6 +3672,9 @@ fn prepare_word_example(
     source: DictionarySource,
 ) -> Result<PreparedWordExample, String> {
     let normalized_word = dictionary::normalize_headword(word);
+    if source == DictionarySource::Ai {
+        validate_ai_dictionary_example(state, word, canonical_word)?;
+    }
     let (settings, provider, prompt, glossary_terms, glossary_version, example) = {
         let connection = state
             .database
@@ -3758,33 +3687,6 @@ fn prepare_word_example(
         let prompt = db::get_prompt(&connection, &provider.prompt_id)?;
         let glossary_terms = db::list_glossary_terms(&connection)?;
         let glossary_version = db::glossary_version(&connection)?;
-        if source == DictionarySource::Ai {
-            let cache_key = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
-                normalized_word: &normalized_word,
-                source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
-                definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
-                provider_id: &provider.id,
-                base_url: &provider.base_url,
-                model_id: &provider.model_id,
-                api_protocol: provider.api_protocol,
-                thinking_effort: provider.thinking_effort.as_str(),
-                protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
-            });
-            let record = db::find_ai_dictionary_cache(&connection, &cache_key)?
-                .ok_or_else(|| "AI 词典缓存已经失效，请重新查询词典".to_string())?;
-            let cached_lookup = decode_ai_dictionary_cache_record(
-                &cache_key,
-                word,
-                &normalized_word,
-                &provider,
-                &record,
-            )?;
-            if dictionary::normalize_headword(&cached_lookup.canonical_word)
-                != dictionary::normalize_headword(canonical_word)
-            {
-                return Err("AI 词典缓存规范词头与例句请求不匹配".to_string());
-            }
-        }
         let example = db::find_example_by_id_for_word(&connection, example_id, &normalized_word)?
             .ok_or_else(|| "例句索引已经失效，请重新查询词典".to_string())?;
         (
@@ -4092,6 +3994,21 @@ fn flushable_protocol_length(value: &str, closing_tag: &str) -> usize {
         .saturating_sub(longest_tag_prefix_suffix(value, &[closing_tag]))
 }
 
+fn validate_ai_dictionary_example(
+    state: &AppState,
+    word: &str,
+    canonical_word: &str,
+) -> Result<(), String> {
+    let lookup = load_ai_dictionary_entry(state, word)?
+        .ok_or_else(|| "AI 词典条目已经失效，请重新查询词典".to_string())?;
+    if dictionary::normalize_headword(&lookup.canonical_word)
+        != dictionary::normalize_headword(canonical_word)
+    {
+        return Err("AI 词典条目规范词头与例句请求不匹配".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_dictionary_state(state: State<'_, AppState>) -> Result<DictionaryState, String> {
     let installation = {
@@ -4101,14 +4018,34 @@ fn get_dictionary_state(state: State<'_, AppState>) -> Result<DictionaryState, S
             .map_err(|_| "应用数据库锁已损坏".to_string())?;
         db::get_dictionary_installation(&connection)?
     };
+    read_dictionary_state(&state, installation.as_ref())
+}
+
+fn read_dictionary_state(
+    state: &AppState,
+    installation: Option<&db::DictionaryInstallation>,
+) -> Result<DictionaryState, String> {
     let mut dictionary = if state.dictionary_initialising.load(Ordering::Acquire) {
-        dictionary::deferred_state(&state.dictionary_dir(), installation.as_ref())
+        dictionary::deferred_state(&state.dictionary_dir(), installation)
     } else {
-        state
+        let store = state
             .dictionary_store
             .lock()
-            .map_err(|_| "词典存储锁已损坏".to_string())?
-            .state(installation.as_ref())
+            .map_err(|_| "词典存储锁已损坏".to_string())?;
+        let mut dictionary = store.state(installation);
+        let mut initialisation_error = state
+            .dictionary_initialisation_error
+            .lock()
+            .map_err(|_| "词典初始化状态锁已损坏".to_string())?;
+        if store.is_runtime_ready() {
+            *initialisation_error = None;
+        } else if dictionary.status != contracts::DictionaryStatus::Failed {
+            if let Some(error) = initialisation_error.as_ref() {
+                dictionary.status = contracts::DictionaryStatus::Failed;
+                dictionary.error = Some(error.clone());
+            }
+        }
+        dictionary
     };
     if state
         .dictionary_update
@@ -4139,11 +4076,37 @@ async fn update_dictionary(
         *current = Some(operation_id.clone());
     }
 
-    let result =
-        dictionary::update_dictionary(app, state.inner(), &state.dictionary_dir(), operation_id)
-            .await;
+    let result = dictionary::update_dictionary(
+        app.clone(),
+        state.inner(),
+        &state.dictionary_dir(),
+        operation_id.clone(),
+    )
+    .await;
     if let Ok(mut current) = state.dictionary_update.lock() {
         *current = None;
+    }
+    // Terminal listeners may immediately read state to recover a missed start.
+    // Clear the update flag before publishing either terminal notification.
+    match &result {
+        Ok(result) => {
+            let _ = app.emit(
+                "dictionary_update_completed",
+                contracts::DictionaryUpdateCompleted {
+                    operation_id,
+                    state: result.state.clone(),
+                },
+            );
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "dictionary_update_failed",
+                contracts::DictionaryUpdateFailed {
+                    operation_id,
+                    message: error.clone(),
+                },
+            );
+        }
     }
     result
 }
@@ -4206,13 +4169,11 @@ fn emit_word_failed(
 #[cfg(test)]
 mod tests {
     use super::{
-        AI_DICTIONARY_DEFINITION_LANGUAGE, AI_DICTIONARY_PROTOCOL_VERSION,
-        AI_DICTIONARY_SOURCE_LANGUAGE, AiDictionaryCacheKeyInput, AppState, CacheKeyInput,
-        ParsedAiDictionary, PdfPromptContext, StartupRuntime, WORD_EXAMPLE_PROTOCOL_VERSION,
-        WordAiCacheKeyInput, WordExampleDelta, WordExampleProtocolParser, build_system_prompt,
-        cancel_request, make_ai_dictionary_cache_key, make_cache_key, make_learning_cache_key,
-        make_pdf_cache_key, make_word_ai_cache_key, parse_ai_dictionary_protocol,
-        resolve_models_base_url, unregister_request,
+        AppState, CacheKeyInput, ParsedAiDictionary, PdfPromptContext, StartupRuntime,
+        WORD_EXAMPLE_PROTOCOL_VERSION, WordAiCacheKeyInput, WordExampleDelta,
+        WordExampleProtocolParser, build_system_prompt, cancel_request, make_cache_key,
+        make_learning_cache_key, make_pdf_cache_key, make_word_ai_cache_key,
+        parse_ai_dictionary_protocol, resolve_models_base_url, unregister_request,
     };
     use crate::contracts::{ApiProtocol, GlossaryTerm};
     use crate::translation_core::TranslationMode;
@@ -4394,31 +4355,175 @@ mod tests {
         })
     }
 
-    #[test]
-    fn ai_dictionary_cache_key_isolated_by_provider_context_without_api_key() {
-        let input = AiDictionaryCacheKeyInput {
-            normalized_word: "serendipity",
-            source_language: AI_DICTIONARY_SOURCE_LANGUAGE,
-            definition_language: AI_DICTIONARY_DEFINITION_LANGUAGE,
-            provider_id: "provider-a",
-            base_url: "https://example.com/v1",
-            model_id: "model-a",
-            api_protocol: ApiProtocol::ChatCompletions,
-            thinking_effort: "none",
-            protocol_version: AI_DICTIONARY_PROTOCOL_VERSION,
+    fn ai_dictionary_test_state() -> AppState {
+        let connection = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&connection).unwrap();
+        AppState::new(
+            connection,
+            std::env::temp_dir().join(format!("lilt-ai-query-{}", uuid::Uuid::new_v4())),
+            Arc::new(StartupRuntime::new()),
+        )
+    }
+
+    fn remove_ai_dictionary_test_state(state: AppState) {
+        let directory = state.data_dir.as_ref().clone();
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn disable_ai_dictionary_test_provider(state: &AppState) {
+        let connection = state.database.lock().unwrap();
+        connection.execute(
+            "UPDATE app_settings SET value = 'missing-provider' WHERE key = 'active_provider_id'", [],
+        ).unwrap();
+        assert!(crate::db::get_provider(&connection).is_err());
+    }
+
+    #[tokio::test]
+    async fn ai_dictionary_stored_lookup_needs_no_provider_or_api_key() {
+        let state = ai_dictionary_test_state();
+        super::with_ai_dictionary(&state, |store| {
+            store.save("Serendipity", ai_dictionary_entry_fixture())
+        })
+        .unwrap();
+        disable_ai_dictionary_test_provider(&state);
+        let found = super::query_ai_dictionary(&state, "stored", "  SERENDIPITY  ")
+            .await
+            .unwrap();
+        let super::AiDictionaryLookup::Found { lookup, cache_hit } = found else {
+            panic!("stored word must resolve");
         };
-        let first = make_ai_dictionary_cache_key(&input);
-        let changed_model = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
-            model_id: "model-b",
-            ..input
+        assert!(cache_hit);
+        assert_eq!(lookup.normalized_word, "serendipity");
+        assert_eq!(lookup.word, "  SERENDIPITY  ");
+        assert_eq!(lookup.canonical_word, "Serendipity");
+        remove_ai_dictionary_test_state(state);
+    }
+
+    #[tokio::test]
+    async fn ai_dictionary_same_word_waiter_rechecks_store_before_provider() {
+        let state = ai_dictionary_test_state();
+        disable_ai_dictionary_test_provider(&state);
+        let request_lock = super::ai_dictionary_request_lock(&state, " Serendipity ").unwrap();
+        let guard = request_lock.lock().await;
+        let waiting_state = state.clone();
+        let waiter = tokio::spawn(async move {
+            super::query_ai_dictionary(&waiting_state, "waiting", "SERENDIPITY").await
         });
-        let changed_thinking = make_ai_dictionary_cache_key(&AiDictionaryCacheKeyInput {
-            thinking_effort: "high",
-            ..input
-        });
-        assert_ne!(first, changed_model);
-        assert_ne!(first, changed_thinking);
-        assert!(!first.contains("api-key"));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while Arc::strong_count(&request_lock) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the second query must wait on the same normalized word lock");
+        assert!(!waiter.is_finished());
+        super::with_ai_dictionary(&state, |store| {
+            store.save("serendipity", ai_dictionary_entry_fixture())
+        })
+        .unwrap();
+        drop(guard);
+        assert!(matches!(
+            waiter.await.unwrap().unwrap(),
+            super::AiDictionaryLookup::Found {
+                cache_hit: true,
+                ..
+            }
+        ));
+        remove_ai_dictionary_test_state(state);
+    }
+
+    #[test]
+    fn ai_dictionary_examples_validate_word_and_canonical_but_use_current_provider() {
+        let state = ai_dictionary_test_state();
+        super::with_ai_dictionary(&state, |store| {
+            store.save("Serendipity", ai_dictionary_entry_fixture())
+        })
+        .unwrap();
+        let example_id = {
+            let connection = state.database.lock().unwrap();
+            let provider = crate::db::get_provider(&connection).unwrap();
+            crate::db::save_cache(
+                &connection,
+                &crate::db::CacheRecord {
+                    cache_key: "example",
+                    source_text: "It was serendipity.",
+                    translated_text: "这纯属机缘巧合。",
+                    source_language: "en",
+                    target_language: "zh-Hans",
+                    provider: &provider,
+                    prompt_id: &provider.prompt_id,
+                    glossary_version: 1,
+                },
+            )
+            .unwrap();
+            crate::db::index_translation_cache(&connection, "example").unwrap();
+            connection.execute(
+                "UPDATE providers SET model_id = 'current-model', base_url = 'https://current.example/v1',
+                 api_protocol = 'responses', thinking_effort = 'high'", [],
+            ).unwrap();
+            crate::db::find_latest_example(&connection, "serendipity")
+                .unwrap()
+                .unwrap()
+                .example_id
+        };
+        let prepared = super::prepare_word_example(
+            &state,
+            example_id,
+            " SERENDIPITY ",
+            " serendipity ",
+            "zh-Hans",
+            crate::contracts::DictionarySource::Ai,
+        )
+        .unwrap();
+        assert_eq!(prepared.provider.model_id, "current-model");
+        assert_eq!(prepared.provider.api_protocol, ApiProtocol::Responses);
+        assert_eq!(prepared.provider.base_url, "https://current.example/v1");
+        assert!(super::validate_ai_dictionary_example(&state, "serendipity", "different").is_err());
+        assert!(
+            super::validate_ai_dictionary_example(&state, "serendipities", "Serendipity").is_err()
+        );
+        remove_ai_dictionary_test_state(state);
+    }
+
+    #[test]
+    fn dictionary_initialisation_failure_recovers_poison_and_overrides_installation_metadata() {
+        let state = ai_dictionary_test_state();
+        std::fs::create_dir_all(state.dictionary_dir()).unwrap();
+        std::fs::write(state.dictionary_dir().join("distribution.sqlite"), []).unwrap();
+        let installation = crate::db::DictionaryInstallation {
+            release_tag: "v1".into(),
+            artifact_sha256: "sha".into(),
+            installed_at: "2026".into(),
+            entry_count: 1,
+            distribution_schema_version: "distribution_entry_v5".into(),
+            sqlite_schema_version: "1".into(),
+            compressed_bytes: 1,
+            database_bytes: 1,
+        };
+        state.dictionary_initialising.store(true, Ordering::Release);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _store = state.dictionary_store.lock().unwrap();
+            panic!("fixture worker panic");
+        }));
+        assert!(panicked.is_err());
+        super::complete_dictionary_initialisation(&state, Some("词典初始化任务失败".into()));
+        assert!(!state.dictionary_initialising.load(Ordering::Acquire));
+        assert!(!state.dictionary_store.is_poisoned());
+        let dictionary = super::read_dictionary_state(&state, Some(&installation)).unwrap();
+        assert_eq!(
+            dictionary.status,
+            crate::contracts::DictionaryStatus::Failed
+        );
+        assert_eq!(dictionary.error.as_deref(), Some("词典初始化任务失败"));
+        std::fs::remove_file(state.dictionary_dir().join("distribution.sqlite")).unwrap();
+        state.dictionary_initialising.store(true, Ordering::Release);
+        super::complete_dictionary_initialisation(&state, None);
+        assert_eq!(
+            super::read_dictionary_state(&state, None).unwrap().status,
+            crate::contracts::DictionaryStatus::NotInstalled
+        );
+        remove_ai_dictionary_test_state(state);
     }
 
     #[test]

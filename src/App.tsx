@@ -10,6 +10,7 @@ import liltLogo from "../source/lilt_logo.svg";
 import openaiLogo from "./assets/openai.svg";
 import deepseekLogo from "./assets/deepseek.svg";
 import { describeError } from "./lib/errors";
+import { createDictionaryStateSync } from "./lib/dictionary-state-sync";
 import { invokeCommand, listenTo } from "./lib/tauri";
 import DictionaryView, { type DictionaryProgress, type WordExampleRequestInput } from "./DictionaryView";
 import type { DictionaryOpenRequest } from "./DictionaryView";
@@ -79,9 +80,7 @@ import {
 } from "./types/contracts";
 import {
   decodeDictionaryCommandResult,
-  decodeDictionaryUpdateEvent,
   type DictionaryHistoryEntry,
-  DICTIONARY_EVENT_NAMES,
   type DictionaryUpdateEvent,
 } from "./types/dictionary";
 
@@ -351,6 +350,9 @@ function FeedbackMessage({
 function App() {
   const reducedMotion = usePrefersReducedMotion();
   const [snapshot, setSnapshot] = useState<AppSnapshot>(DEFAULT_SNAPSHOT);
+  const [dictionaryStateSync] = useState(() => createDictionaryStateSync(DEFAULT_SNAPSHOT.dictionary, (dictionary) => {
+    setSnapshot((current) => ({ ...current, dictionary }));
+  }));
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [tab, setTab] = useState<AppTab>("translate");
   const [sourceText, setSourceText] = useState("");
@@ -873,7 +875,7 @@ function App() {
   const refreshSnapshot = useCallback(async () => {
     const pdfPreflightSaveAtRequestStart = pdfPreflightSaveActiveRef.current;
     try {
-      const next = await invokeCommand<AppSnapshot>("get_app_snapshot");
+      const next = dictionaryStateSync.mergeSnapshot(await invokeCommand<AppSnapshot>("get_app_snapshot"));
       setSnapshot((current) => {
         const preserveLocalPdfPreflight = pdfPreflightSaveActiveRef.current !== null
           || pdfPreflightSaveAtRequestStart !== pdfPreflightSaveActiveRef.current;
@@ -891,7 +893,7 @@ function App() {
     } catch (reason) {
       setError(describeError(reason, "无法读取应用配置"));
     }
-  }, []);
+  }, [dictionaryStateSync]);
 
   const handleSourceTextChange = useCallback((value: string) => {
     sourceTextRef.current = value;
@@ -989,29 +991,6 @@ function App() {
   useEffect(() => {
     void refreshSnapshot();
   }, [refreshSnapshot]);
-
-  useEffect(() => {
-    if (!snapshotReady || snapshot.dictionary.status !== "preparing") return;
-    let disposed = false;
-    let timer: number | undefined;
-    const checkDictionary = async () => {
-      try {
-        const dictionary = await invokeCommand<AppSnapshot["dictionary"]>("get_dictionary_state");
-        if (disposed) return;
-        setSnapshot((current) => current.dictionary.status === "preparing"
-          ? { ...current, dictionary }
-          : current);
-      } catch {
-        // Retry while startup is still preparing the dictionary.
-      }
-      if (!disposed) timer = window.setTimeout(() => void checkDictionary(), 500);
-    };
-    void checkDictionary();
-    return () => {
-      disposed = true;
-      window.clearTimeout(timer);
-    };
-  }, [snapshotReady, snapshot.dictionary.status]);
 
   useEffect(() => {
     void invokeCommand("set_selection_language", {
@@ -1464,7 +1443,7 @@ function App() {
       if (activeDictionaryOperationId.current && activeDictionaryOperationId.current !== event.operationId) return;
       activeDictionaryOperationId.current = event.operationId;
       setDictionaryProgress(null);
-      setSnapshot((current) => ({ ...current, dictionary: event.state }));
+      dictionaryStateSync.update(event.state);
       return;
     }
     if (event.operationId !== activeDictionaryOperationId.current) return;
@@ -1477,18 +1456,16 @@ function App() {
           current: event.downloadedBytes,
           total: event.totalBytes,
         });
-        setSnapshot((current) => ({
+        dictionaryStateSync.update((current) => ({
           ...current,
-          dictionary: {
-            ...current.dictionary,
-            status: "updating",
-            downloadedBytes: event.downloadedBytes,
-            totalBytes: event.totalBytes,
-            error: null,
-          },
+          status: "updating",
+          downloadedBytes: event.downloadedBytes,
+          totalBytes: event.totalBytes,
+          error: null,
         }));
         break;
       case "verifyProgress":
+        dictionaryStateSync.update((current) => ({ ...current, status: "updating", error: null }));
         setDictionaryProgress({
           operationId: event.operationId,
           phase: "verify",
@@ -1497,6 +1474,7 @@ function App() {
         });
         break;
       case "extractProgress":
+        dictionaryStateSync.update((current) => ({ ...current, status: "updating", error: null }));
         setDictionaryProgress({
           operationId: event.operationId,
           phase: "extract",
@@ -1507,7 +1485,7 @@ function App() {
       case "completed":
         activeDictionaryOperationId.current = null;
         setDictionaryProgress(null);
-        setSnapshot((current) => ({ ...current, dictionary: event.state }));
+        dictionaryStateSync.update(event.state);
         markResourceDownloadTerminal("dictionary", "completed");
         scheduleDownloadActivityRemoval("dictionary", event.operationId, 2600);
         void refreshSnapshot();
@@ -1515,72 +1493,41 @@ function App() {
       case "failed":
         activeDictionaryOperationId.current = null;
         setDictionaryProgress(null);
-        setSnapshot((current) => ({
-          ...current,
-          dictionary: { ...current.dictionary, status: "failed", error: event.message },
-        }));
+        dictionaryStateSync.update((current) => ({ ...current, status: "failed", error: event.message }));
         markResourceDownloadTerminal("dictionary", "failed");
         scheduleDownloadActivityRemoval("dictionary", event.operationId, 9000);
         break;
     }
-  }, [clearResourceDownloadTerminal, markResourceDownloadTerminal, refreshSnapshot, scheduleDownloadActivityRemoval]);
+  }, [clearResourceDownloadTerminal, dictionaryStateSync, markResourceDownloadTerminal, refreshSnapshot, scheduleDownloadActivityRemoval]);
 
   useEffect(() => {
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    setDictionaryEventsError(null);
+    return dictionaryStateSync.subscribe(handleDictionaryEvent, setDictionaryEventsError);
+  }, [dictionaryStateSync, handleDictionaryEvent]);
 
-    const initialiseDictionaryListeners = async () => {
-      const results = await Promise.allSettled(DICTIONARY_EVENT_NAMES.map(async (name) => {
-        return listenTo<unknown>(name, (payload) => {
-          if (disposed) return;
-          const event = decodeDictionaryUpdateEvent(name, payload);
-          if (event) handleDictionaryEvent(event);
-        });
-      }));
-      for (const result of results) {
-        if (result.status !== "fulfilled") continue;
-        if (disposed) result.value();
-        else unlisteners.push(result.value);
-      }
-      if (disposed) return;
-      const failure = results.find((result) => result.status === "rejected");
-      if (failure?.status === "rejected") {
-        unlisteners.splice(0).forEach((unlisten) => unlisten());
-        setDictionaryEventsError(describeError(failure.reason, "词典更新事件监听初始化失败。"));
-      }
-    };
-
-    void initialiseDictionaryListeners();
-    return () => {
-      disposed = true;
-      unlisteners.splice(0).forEach((unlisten) => unlisten());
-    };
-  }, [handleDictionaryEvent]);
+  useEffect(() => {
+    if (dictionaryEventsError) showAppToast(dictionaryEventsError, "error");
+  }, [dictionaryEventsError, showAppToast]);
 
   const handleDictionaryUpdate = useCallback(async () => {
-    setDictionaryEventsError(null);
-    setSnapshot((current) => ({
-      ...current,
-      dictionary: { ...current.dictionary, status: "updating", error: null },
-    }));
+    dictionaryStateSync.update((current) => ({ ...current, status: "updating", error: null }));
+    const request = dictionaryStateSync.beginUpdateRequest();
     try {
       const rawResult = await invokeCommand<unknown>("update_dictionary");
       const result = decodeDictionaryCommandResult(rawResult);
-      if (!result) throw new Error("词典更新命令返回了无法识别的结果。");
-      activeDictionaryOperationId.current = result.operationId;
-      setDictionaryProgress(null);
-      setSnapshot((current) => ({ ...current, dictionary: result.state }));
+      if (!result) throw new Error("词典更新命令返回了无法识别的结果");
+      if (dictionaryStateSync.applyUpdateRequest(request, result.state)) {
+        activeDictionaryOperationId.current = null;
+        setDictionaryProgress(null);
+      }
       await refreshSnapshot();
     } catch (reason) {
       const message = describeError(reason, "词典更新失败");
-      setSnapshot((current) => ({
-        ...current,
-        dictionary: { ...current.dictionary, status: "failed", error: message },
-      }));
-      setDictionaryProgress(null);
+      if (dictionaryStateSync.applyUpdateRequest(request, (current) => ({ ...current, status: "failed", error: message }))) {
+        activeDictionaryOperationId.current = null;
+        setDictionaryProgress(null);
+      }
     }
-  }, [refreshSnapshot]);
+  }, [dictionaryStateSync, refreshSnapshot]);
 
   const cancelWordExampleRequest = useCallback(async () => {
     const requestId = activeWordExampleRequestId.current;
@@ -1770,8 +1717,9 @@ function App() {
   };
 
   const handleSettingsSaved = useCallback((next: AppSnapshot) => {
+    const merged = dictionaryStateSync.mergeSnapshot(next);
     setSnapshot((current) => ({
-      ...next,
+      ...merged,
       settings: {
         ...next.settings,
         // The PDF switch has its own command and may still be optimistically
@@ -1779,7 +1727,7 @@ function App() {
         pdfPreflightEnabled: current.settings.pdfPreflightEnabled,
       },
     }));
-  }, []);
+  }, [dictionaryStateSync]);
 
   const openPersonalDictionary = useCallback(() => {
     setTab("personal");
@@ -1825,7 +1773,6 @@ function App() {
               ref={settingsViewRef}
               snapshot={snapshot}
               dictionaryProgress={dictionaryProgress}
-              dictionaryEventsError={dictionaryEventsError}
               pdfEngine={pdfEngine}
               navigationTarget={settingsNavigationTarget}
               onDictionaryUpdate={handleDictionaryUpdate}
@@ -3284,7 +3231,6 @@ function SettingsView({
   ref,
   snapshot,
   dictionaryProgress,
-  dictionaryEventsError,
   pdfEngine,
   navigationTarget,
   onDictionaryUpdate,
@@ -3296,7 +3242,6 @@ function SettingsView({
   ref: Ref<SettingsViewHandle>;
   snapshot: AppSnapshot;
   dictionaryProgress: DictionaryProgress | null;
-  dictionaryEventsError: string | null;
   pdfEngine: PdfEngineRuntime;
   navigationTarget: SettingsNavigationTarget | null;
   onDictionaryUpdate: () => Promise<void>;
@@ -3696,10 +3641,6 @@ function SettingsView({
   useEffect(() => {
     if (selectionStatus?.message) onToast(selectionStatus.message, "error");
   }, [onToast, selectionStatus?.message]);
-
-  useEffect(() => {
-    if (dictionaryEventsError) onToast(dictionaryEventsError, "error");
-  }, [dictionaryEventsError, onToast]);
 
   useEffect(() => {
     if (snapshot.dictionary.error && snapshot.dictionary.status === "failed") {

@@ -189,6 +189,8 @@ export type DictionaryUpdateEvent =
   | DictionaryUpdateCompleted
   | DictionaryUpdateFailed;
 
+export const DICTIONARY_STATE_CHANGED_EVENT = "dictionary_state_changed";
+
 export const DICTIONARY_EVENT_NAMES = [
   "dictionary_update_started",
   "dictionary_download_progress",

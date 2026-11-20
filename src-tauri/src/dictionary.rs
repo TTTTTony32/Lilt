@@ -3,8 +3,7 @@ use crate::contracts::{
     DICTIONARY_DISTRIBUTION_SCHEMA_VERSION, DICTIONARY_SQLITE_SCHEMA_VERSION,
     DictionaryCommandResult, DictionaryDownloadProgress, DictionaryExtractProgress,
     DictionaryLookupResult, DictionaryMatchType, DictionarySource, DictionaryState,
-    DictionaryStatus, DictionaryUpdateCompleted, DictionaryUpdateFailed, DictionaryUpdateStarted,
-    DictionaryVerifyProgress,
+    DictionaryStatus, DictionaryUpdateStarted, DictionaryVerifyProgress,
 };
 use crate::db::{self, DictionaryInstallationRecord};
 use crate::diagnostics;
@@ -29,6 +28,9 @@ use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use tokio::time::sleep;
 use url::Url;
+
+#[path = "dictionary_form_index.rs"]
+mod form_index;
 
 pub const DISTRIBUTION_DB_FILE: &str = "distribution.sqlite";
 pub const DISTRIBUTION_ARCHIVE_PART_FILE: &str = "distribution.sqlite.gz.part";
@@ -98,12 +100,18 @@ pub enum DictionaryLookupResolution {
 
 pub struct DictionaryStore {
     current_path: PathBuf,
+    form_index_path: PathBuf,
+    installation_identity: Option<db::DictionaryInstallation>,
     connection: Option<Connection>,
     metadata: Option<DistributionMetadata>,
     form_index: HashMap<String, Vec<(String, String)>>,
+    form_index_identity: Option<form_index::SourceIdentity>,
+    form_index_pending_save: bool,
     validation_error: Option<DictionaryError>,
     #[cfg(test)]
     validation_count: usize,
+    #[cfg(test)]
+    last_index_load: Option<form_index::LoadMeasurement>,
 }
 
 impl DictionaryStore {
@@ -111,12 +119,69 @@ impl DictionaryStore {
         let current_path = database_path(&directory);
         Self {
             current_path,
+            form_index_path: directory.join(form_index::INDEX_FILE),
+            installation_identity: None,
             connection: None,
             metadata: None,
             form_index: HashMap::new(),
+            form_index_identity: None,
+            form_index_pending_save: false,
             validation_error: None,
             #[cfg(test)]
             validation_count: 0,
+            #[cfg(test)]
+            last_index_load: None,
+        }
+    }
+
+    /// Supply the committed installation record before opening the dictionary.
+    pub fn set_installation_identity(&mut self, installation: Option<db::DictionaryInstallation>) {
+        self.installation_identity = installation;
+        self.form_index_identity = None;
+        self.form_index_pending_save = false;
+    }
+
+    fn prepare_open(&mut self) {
+        self.close();
+        form_index::cleanup_temporary(&self.form_index_path);
+    }
+
+    fn load_index(
+        &mut self,
+        connection: &Connection,
+        origin: &str,
+        publish: bool,
+    ) -> Result<(), DictionaryError> {
+        let loaded = form_index::load_or_build(
+            connection,
+            &self.current_path,
+            &self.form_index_path,
+            self.installation_identity.as_ref(),
+            origin,
+            publish,
+        )?;
+        self.form_index = loaded.index;
+        self.form_index_identity = loaded.identity;
+        self.form_index_pending_save = loaded.pending_save;
+        #[cfg(test)]
+        {
+            self.last_index_load = Some(loaded.measurement);
+        }
+        Ok(())
+    }
+
+    fn publish_pending_form_index(&mut self, origin: &str) {
+        if self.form_index_pending_save {
+            if let Some(identity) = &self.form_index_identity {
+                form_index::save_if_current(
+                    &self.current_path,
+                    &self.form_index_path,
+                    identity,
+                    &self.form_index,
+                    origin,
+                );
+            }
+            self.form_index_pending_save = false;
         }
     }
 
@@ -126,7 +191,7 @@ impl DictionaryStore {
     }
 
     pub fn open_runtime(&mut self, origin: &str) -> Result<(), DictionaryError> {
-        self.close();
+        self.prepare_open();
         if !self.current_path.is_file() {
             return Err(DictionaryError::NotInstalled);
         }
@@ -141,22 +206,14 @@ impl DictionaryStore {
             }
         };
         let database_open_ms = open_started.elapsed().as_millis();
-        let index_started = Instant::now();
-        let form_index = match load_form_index(&connection) {
-            Ok(form_index) => form_index,
-            Err(error) => {
-                self.validation_error = Some(error.clone());
-                return Err(error);
-            }
-        };
-        let index_ms = index_started.elapsed().as_millis();
+        if let Err(error) = self.load_index(&connection, origin, true) {
+            self.validation_error = Some(error.clone());
+            return Err(error);
+        }
         diagnostics::info(format!(
-            "dictionary.form_index.ready origin={origin} key_count={} candidate_count={} database_open_ms={database_open_ms} index_ms={index_ms} total_ms={}",
-            form_index.len(),
-            form_index.values().map(Vec::len).sum::<usize>(),
+            "dictionary.runtime.ready origin={origin} database_open_ms={database_open_ms} total_ms={}",
             started.elapsed().as_millis()
         ));
-        self.form_index = form_index;
         self.connection = Some(connection);
         self.metadata = None;
         self.validation_error = None;
@@ -171,7 +228,7 @@ impl DictionaryStore {
         &mut self,
         origin: &str,
     ) -> Result<DistributionMetadata, DictionaryError> {
-        self.close();
+        self.prepare_open();
         if !self.current_path.is_file() {
             return Err(DictionaryError::NotInstalled);
         }
@@ -181,14 +238,8 @@ impl DictionaryStore {
             self.validation_count += 1;
         }
         match open_and_validate_path(&self.current_path, origin) {
-            Ok((connection, metadata)) => match load_form_index(&connection) {
-                Ok(form_index) => {
-                    diagnostics::info(format!(
-                        "dictionary.form_index.ready origin={origin} key_count={} candidate_count={}",
-                        form_index.len(),
-                        form_index.values().map(Vec::len).sum::<usize>()
-                    ));
-                    self.form_index = form_index;
+            Ok((connection, metadata)) => match self.load_index(&connection, origin, true) {
+                Ok(()) => {
                     self.connection = Some(connection);
                     self.metadata = Some(metadata.clone());
                     self.validation_error = None;
@@ -216,11 +267,20 @@ impl DictionaryStore {
         self.open_and_validate_with_origin(origin).map(|_| ())
     }
 
+    #[cfg(test)]
     pub fn open_validated_install(
         &mut self,
         metadata: DistributionMetadata,
     ) -> Result<(), DictionaryError> {
-        self.close();
+        self.open_validated_install_with_publication(metadata, true)
+    }
+
+    fn open_validated_install_with_publication(
+        &mut self,
+        metadata: DistributionMetadata,
+        publish: bool,
+    ) -> Result<(), DictionaryError> {
+        self.prepare_open();
         let connection = match open_read_only(&self.current_path) {
             Ok(connection) => connection,
             Err(error) => {
@@ -228,13 +288,10 @@ impl DictionaryStore {
                 return Err(error);
             }
         };
-        self.form_index = match load_form_index(&connection) {
-            Ok(form_index) => form_index,
-            Err(error) => {
-                self.validation_error = Some(error.clone());
-                return Err(error);
-            }
-        };
+        if let Err(error) = self.load_index(&connection, "install", publish) {
+            self.validation_error = Some(error.clone());
+            return Err(error);
+        }
         self.connection = Some(connection);
         self.metadata = Some(metadata);
         self.validation_error = None;
@@ -245,7 +302,13 @@ impl DictionaryStore {
         self.connection.take();
         self.metadata = None;
         self.form_index.clear();
+        self.form_index_identity = None;
+        self.form_index_pending_save = false;
         self.validation_error = None;
+        #[cfg(test)]
+        {
+            self.last_index_load = None;
+        }
     }
 
     pub fn resolve(
@@ -432,16 +495,16 @@ impl DictionaryStore {
             }
         }
 
+        if let Some(error) = &self.validation_error {
+            state.status = DictionaryStatus::Failed;
+            state.error = Some(error.to_string());
+            return state;
+        }
+
         if !self.current_path.is_file() {
             if installation.is_some() {
                 state.error = Some("词典安装记录存在，但 distribution.sqlite 不存在".to_string());
             }
-            return state;
-        }
-
-        if let Some(error) = &self.validation_error {
-            state.status = DictionaryStatus::Failed;
-            state.error = Some(error.to_string());
             return state;
         }
 
@@ -1071,16 +1134,17 @@ fn rollback_promoted_database(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PromotionResult {
     had_old_database: bool,
+    previous_identity: Option<db::DictionaryInstallation>,
 }
 
 fn promote_database(
     part_path: &Path,
     current_path: &Path,
     backup_path: &Path,
-) -> Result<PromotionResult, String> {
+) -> Result<bool, String> {
     if backup_path.exists() {
         fs::remove_file(backup_path).map_err(|error| format!("清理旧词典备份失败：{error}"))?;
     }
@@ -1095,17 +1159,18 @@ fn promote_database(
         }
         return Err(format!("提升新词典失败：{error}"));
     }
-    Ok(PromotionResult { had_old_database })
+    Ok(had_old_database)
 }
 
 fn recover_promoted_database(
     store: &mut DictionaryStore,
     current_path: &Path,
     backup_path: &Path,
-    had_old_database: bool,
+    promotion: &PromotionResult,
 ) -> Result<(), String> {
     store.close();
-    rollback_promoted_database(current_path, backup_path, had_old_database)?;
+    store.set_installation_identity(promotion.previous_identity.clone());
+    rollback_promoted_database(current_path, backup_path, promotion.had_old_database)?;
     store
         .reopen_current_with_origin("recovery")
         .map_err(|error| format!("恢复旧词典连接失败：{error}"))
@@ -1117,10 +1182,15 @@ fn activate_promoted_database(
     current_path: &Path,
     backup_path: &Path,
     metadata: DistributionMetadata,
+    installation: db::DictionaryInstallation,
 ) -> Result<PromotionResult, String> {
+    let previous_identity = store.installation_identity.clone();
     store.close();
     let promotion = match promote_database(part_path, current_path, backup_path) {
-        Ok(promotion) => promotion,
+        Ok(had_old_database) => PromotionResult {
+            had_old_database,
+            previous_identity,
+        },
         Err(error) => {
             let recovery = store
                 .reopen_current_with_origin("recovery")
@@ -1132,9 +1202,11 @@ fn activate_promoted_database(
         }
     };
 
-    if let Err(error) = store.open_validated_install(metadata) {
-        let recovery =
-            recover_promoted_database(store, current_path, backup_path, promotion.had_old_database);
+    store.set_installation_identity(Some(installation));
+    // Installation metadata has not committed yet. Keep the old cache available
+    // for rollback and publish this index only after the transaction succeeds.
+    if let Err(error) = store.open_validated_install_with_publication(metadata, false) {
+        let recovery = recover_promoted_database(store, current_path, backup_path, &promotion);
         return match recovery {
             Ok(()) => Err(format!("打开新词典连接失败：{error}")),
             Err(recovery_error) => Err(format!("打开新词典连接失败：{error}；{recovery_error}")),
@@ -1238,6 +1310,16 @@ async fn update_impl(
     let database_bytes = fs::metadata(&part_path)
         .map_err(|error| format!("读取解压词典大小失败：{error}"))?
         .len();
+    let installation = db::DictionaryInstallation {
+        release_tag: release.tag,
+        artifact_sha256: expected_sha256,
+        installed_at: Utc::now().to_rfc3339(),
+        entry_count: metadata.entry_count,
+        distribution_schema_version: metadata.distribution_schema_version.clone(),
+        sqlite_schema_version: metadata.sqlite_schema_version.clone(),
+        compressed_bytes: compressed_bytes as i64,
+        database_bytes: database_bytes as i64,
+    };
     let promotion = {
         let mut store = state
             .dictionary_store
@@ -1249,32 +1331,27 @@ async fn update_impl(
             &current_path,
             &backup_path,
             metadata.clone(),
+            installation.clone(),
         )?
     };
 
-    let installed_at = Utc::now().to_rfc3339();
-    let installation = DictionaryInstallationRecord {
-        release_tag: &release.tag,
-        artifact_sha256: &expected_sha256,
-        installed_at: &installed_at,
+    let installation_record = DictionaryInstallationRecord {
+        release_tag: &installation.release_tag,
+        artifact_sha256: &installation.artifact_sha256,
+        installed_at: &installation.installed_at,
         entry_count: metadata.entry_count,
         distribution_schema_version: &metadata.distribution_schema_version,
         sqlite_schema_version: &metadata.sqlite_schema_version,
         compressed_bytes: compressed_bytes as i64,
         database_bytes: database_bytes as i64,
     };
-    if let Err(error) = persist_dictionary_installation(state, &installation) {
+    if let Err(error) = persist_dictionary_installation(state, &installation_record) {
         let recovery = state
             .dictionary_store
             .lock()
             .map_err(|_| "词典存储锁已损坏".to_string())
             .and_then(|mut store| {
-                recover_promoted_database(
-                    &mut store,
-                    &current_path,
-                    &backup_path,
-                    promotion.had_old_database,
-                )
+                recover_promoted_database(&mut store, &current_path, &backup_path, &promotion)
             });
         return match recovery {
             Ok(()) => Err(error),
@@ -1284,20 +1361,11 @@ async fn update_impl(
 
     let _ = fs::remove_file(&backup_path);
     let _ = fs::remove_file(&archive_path);
-    let installation = db::DictionaryInstallation {
-        release_tag: release.tag,
-        artifact_sha256: expected_sha256,
-        installed_at,
-        entry_count: metadata.entry_count,
-        distribution_schema_version: metadata.distribution_schema_version,
-        sqlite_schema_version: metadata.sqlite_schema_version,
-        compressed_bytes: compressed_bytes as i64,
-        database_bytes: database_bytes as i64,
-    };
-    let store = state
+    let mut store = state
         .dictionary_store
         .lock()
         .map_err(|_| "词典存储锁已损坏".to_string())?;
+    store.publish_pending_form_index("installation_committed");
     Ok(store.state(Some(&installation)))
 }
 
@@ -1331,31 +1399,10 @@ pub async fn update_dictionary(
         let _ = fs::remove_file(dictionary_dir.join(DISTRIBUTION_ARCHIVE_PART_FILE));
         let _ = fs::remove_file(dictionary_dir.join(DISTRIBUTION_DB_PART_FILE));
     }
-    match result {
-        Ok(state) => {
-            let _ = app.emit(
-                "dictionary_update_completed",
-                DictionaryUpdateCompleted {
-                    operation_id: operation_id.clone(),
-                    state: state.clone(),
-                },
-            );
-            Ok(DictionaryCommandResult {
-                operation_id,
-                state,
-            })
-        }
-        Err(error) => {
-            let _ = app.emit(
-                "dictionary_update_failed",
-                DictionaryUpdateFailed {
-                    operation_id: operation_id.clone(),
-                    message: error.clone(),
-                },
-            );
-            Err(error)
-        }
-    }
+    result.map(|state| DictionaryCommandResult {
+        operation_id,
+        state,
+    })
 }
 
 #[cfg(test)]
@@ -1476,6 +1523,279 @@ mod tests {
 
     fn remove_directory(directory: &Path) {
         let _ = fs::remove_dir_all(directory);
+    }
+
+    fn fixture_installation(directory: &Path, artifact: &str) -> db::DictionaryInstallation {
+        db::DictionaryInstallation {
+            release_tag: "fixture-release".to_string(),
+            artifact_sha256: artifact.to_string(),
+            installed_at: "2026-11-20T00:00:00Z".to_string(),
+            entry_count: 1,
+            distribution_schema_version: DICTIONARY_DISTRIBUTION_SCHEMA_VERSION.to_string(),
+            sqlite_schema_version: DICTIONARY_SQLITE_SCHEMA_VERSION.to_string(),
+            compressed_bytes: 0,
+            database_bytes: fs::metadata(database_path(directory)).unwrap().len() as i64,
+        }
+    }
+
+    fn stage_form_change(directory: &Path, form: &str) -> DistributionMetadata {
+        let part_path = directory.join(DISTRIBUTION_DB_PART_FILE);
+        fs::copy(database_path(directory), &part_path).unwrap();
+        {
+            let connection = Connection::open(&part_path).unwrap();
+            connection
+                .execute("UPDATE pos_group_forms SET text = ?1", [form])
+                .unwrap();
+        }
+        validate_distribution_database(&part_path).unwrap()
+    }
+
+    #[test]
+    fn persisted_form_index_reopens_without_form_sql_and_preserves_candidates() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        {
+            let connection = Connection::open(database_path(&directory)).unwrap();
+            connection
+                .execute_batch(
+                    "INSERT INTO entries SELECT 'fixture-alpha', schema_version, 'alpha', 'alpha',
+                    headword_language_code, headword_language_name, definition_language_code,
+                    definition_language_name, entry_type, headword_summary, memory_hook,
+                    etymology_note, study_notes_json, replace(document_json, 'resolve', 'alpha')
+                 FROM entries WHERE entry_id = 'fixture-resolve';
+                 INSERT INTO pos_group_forms VALUES
+                    ('fixture-alpha', 0, 0, 'resolved', '[]', NULL),
+                    ('fixture-resolve', 0, 1, ' RESOLVED ', '[]', NULL);",
+                )
+                .unwrap();
+        }
+        let mut first = DictionaryStore::new(directory.clone());
+        first.open_runtime("test-first").unwrap();
+        assert_eq!(first.last_index_load.as_ref().unwrap().source, "rebuilt");
+        let expected = first.form_index.clone();
+        assert_eq!(
+            expected["resolved"],
+            vec![
+                ("alpha".to_string(), "alpha".to_string()),
+                ("resolve".to_string(), "resolve".to_string()),
+            ]
+        );
+        drop(first);
+
+        let mut reopened = DictionaryStore::new(directory.clone());
+        reopened.open_runtime("test-reopen").unwrap();
+        assert_eq!(
+            reopened.last_index_load.as_ref().unwrap().source,
+            "cache_hit"
+        );
+        assert_eq!(reopened.form_index, expected);
+        assert_eq!(
+            reopened.lookup("RESOLVE").unwrap().result.match_type,
+            DictionaryMatchType::Exact
+        );
+        assert!(matches!(
+            reopened.resolve("resolved", None).unwrap(),
+            DictionaryLookupResolution::Ambiguous(_)
+        ));
+        assert!(matches!(
+            reopened.resolve("resolved", Some("RESOLVE")).unwrap(),
+            DictionaryLookupResolution::Found(_)
+        ));
+
+        // A cache hit must also work with a connection on which the form SQL
+        // cannot execute, proving that the persisted path bypasses that query.
+        let unusable_for_build = Connection::open_in_memory().unwrap();
+        unusable_for_build
+            .execute_batch("CREATE TABLE pos_group_forms (text TEXT, entry_id TEXT);")
+            .unwrap();
+        assert!(load_form_index(&unusable_for_build).is_err());
+        let cached = form_index::load_or_build(
+            &unusable_for_build,
+            &database_path(&directory),
+            &reopened.form_index_path,
+            None,
+            "test-no-sql",
+            true,
+        )
+        .unwrap();
+        assert_eq!(cached.index, expected);
+        assert_eq!(cached.measurement.source, "cache_hit");
+        drop(reopened);
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn persisted_form_index_invalidates_changed_installation_and_retains_one_file() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let original = fixture_installation(&directory, "artifact-a");
+        let mut store = DictionaryStore::new(directory.clone());
+        store.set_installation_identity(Some(original.clone()));
+        store.open_runtime("test").unwrap();
+        store.open_runtime("test-reopen").unwrap();
+        assert_eq!(store.last_index_load.as_ref().unwrap().source, "cache_hit");
+
+        let mut other_artifact = original.clone();
+        other_artifact.artifact_sha256 = "artifact-b".to_string();
+        let mut other_release = other_artifact.clone();
+        other_release.release_tag = "another-release".to_string();
+        let mut other_distribution_schema = other_release.clone();
+        other_distribution_schema.distribution_schema_version =
+            "another-distribution-schema".to_string();
+        let mut other_sqlite_schema = other_distribution_schema.clone();
+        other_sqlite_schema.sqlite_schema_version = "another-sqlite-schema".to_string();
+        for identity in [
+            Some(other_artifact),
+            Some(other_release),
+            Some(other_distribution_schema),
+            Some(other_sqlite_schema),
+            None,
+        ] {
+            store.set_installation_identity(identity);
+            store.open_runtime("test-changed-identity").unwrap();
+            let measurement = store.last_index_load.as_ref().unwrap();
+            assert_eq!(measurement.source, "rebuilt");
+            assert_eq!(
+                measurement.miss_reason.as_deref(),
+                Some("source_identity_mismatch")
+            );
+            assert_eq!(
+                store.lookup("resolved").unwrap().result.canonical_word,
+                "resolve"
+            );
+            let mut files: Vec<_> = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            files.sort();
+            assert_eq!(
+                files,
+                vec![
+                    std::ffi::OsString::from(DISTRIBUTION_DB_FILE),
+                    std::ffi::OsString::from(form_index::INDEX_FILE)
+                ]
+            );
+        }
+        drop(store);
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn persisted_form_index_invalidates_file_length_and_subsecond_mtime() {
+        use std::fs::{FileTimes, OpenOptions};
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let path = database_path(&directory);
+        let set_modified = |modified| {
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(modified))
+                .unwrap();
+        };
+        let modified = UNIX_EPOCH + Duration::new(1_700_000_000, 100_000_000);
+        set_modified(modified);
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_runtime("test-first").unwrap();
+        store.close();
+        let length = fs::metadata(&path).unwrap().len();
+        set_modified(modified + Duration::from_millis(100));
+        assert_eq!(fs::metadata(&path).unwrap().len(), length);
+        store.open_runtime("test-subsecond-change").unwrap();
+        assert_eq!(store.last_index_load.as_ref().unwrap().source, "rebuilt");
+        store.close();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0])
+            .unwrap();
+        // Restore the same mtime so length alone has to invalidate the cache.
+        set_modified(modified + Duration::from_millis(100));
+        store.open_runtime("test-length-change").unwrap();
+        assert_eq!(store.last_index_load.as_ref().unwrap().source, "rebuilt");
+        assert_eq!(
+            store.lookup("resolved").unwrap().result.canonical_word,
+            "resolve"
+        );
+        drop(store);
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn persisted_form_index_rebuilds_missing_corrupt_and_incompatible_cache() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_runtime("test-first").unwrap();
+        store.close();
+        let path = store.form_index_path.clone();
+        let valid: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut invalid = vec![b"broken json".to_vec()];
+        for field in [
+            "format_version",
+            "algorithm_version",
+            "key_count",
+            "candidate_count",
+        ] {
+            let mut changed = valid.clone();
+            changed[field] = serde_json::json!(999);
+            invalid.push(serde_json::to_vec(&changed).unwrap());
+        }
+        let mut duplicate = valid.clone();
+        duplicate["index"]["resolved"] =
+            serde_json::json!([["resolve", "resolve"], ["resolve", "resolve"]]);
+        duplicate["candidate_count"] = serde_json::json!(2);
+        invalid.push(serde_json::to_vec(&duplicate).unwrap());
+        for bytes in invalid {
+            fs::write(&path, bytes).unwrap();
+            fs::write(path.with_extension("json.part"), b"interrupted write").unwrap();
+            store.open_runtime("test-corrupt-cache").unwrap();
+            assert_eq!(store.last_index_load.as_ref().unwrap().source, "rebuilt");
+            assert_eq!(
+                store.lookup("resolved").unwrap().result.canonical_word,
+                "resolve"
+            );
+            assert!(!path.with_extension("json.part").exists());
+            store.close();
+        }
+        fs::remove_file(&path).unwrap();
+        store.open_runtime("test-missing-cache").unwrap();
+        assert_eq!(
+            store
+                .last_index_load
+                .as_ref()
+                .unwrap()
+                .miss_reason
+                .as_deref(),
+            Some("missing")
+        );
+        assert!(path.is_file());
+        drop(store);
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn persisted_form_index_save_failure_keeps_runtime_and_validated_queries_working() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let mut store = DictionaryStore::new(directory.clone());
+        fs::create_dir(&store.form_index_path).unwrap();
+        store.open_runtime("test-save-failure").unwrap();
+        assert_eq!(
+            store.lookup("resolved").unwrap().result.canonical_word,
+            "resolve"
+        );
+        let metadata = store.open_and_validate().unwrap();
+        store.open_validated_install(metadata).unwrap();
+        assert_eq!(
+            store.lookup("resolved").unwrap().result.match_type,
+            DictionaryMatchType::Form
+        );
+        assert!(!store.form_index_path.with_extension("json.part").exists());
+        drop(store);
+        remove_directory(&directory);
     }
 
     #[test]
@@ -1703,47 +2023,131 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
     }
 
     #[test]
-    fn promoted_database_can_be_reopened_and_recovered() {
+    fn persisted_form_index_activation_and_rollback_restore_identity() {
         let directory = temporary_directory();
         create_fixture(&directory);
         let part_path = directory.join(DISTRIBUTION_DB_PART_FILE);
-        fs::rename(directory.join(DISTRIBUTION_DB_FILE), &part_path).unwrap();
-        create_fixture(&directory);
-
         let current_path = database_path(&directory);
         let backup_path = directory.join(DISTRIBUTION_DB_BACKUP_FILE);
-        let metadata = validate_distribution_database(&part_path).unwrap();
+        let original = fixture_installation(&directory, "old-artifact");
+        let replacement = fixture_installation(&directory, "new-artifact");
         let mut store = DictionaryStore::new(directory.clone());
+        store.set_installation_identity(Some(original));
         store.open_and_validate().unwrap();
+        let original_cache = fs::read(&store.form_index_path).unwrap();
+
+        for publish_before_rollback in [false, true] {
+            let metadata = stage_form_change(&directory, "solved");
+            let promotion = activate_promoted_database(
+                &mut store,
+                &part_path,
+                &current_path,
+                &backup_path,
+                metadata,
+                replacement.clone(),
+            )
+            .unwrap();
+            assert!(promotion.had_old_database);
+            assert!(current_path.is_file());
+            assert!(backup_path.is_file());
+            assert_eq!(
+                store
+                    .installation_identity
+                    .as_ref()
+                    .unwrap()
+                    .artifact_sha256,
+                "new-artifact"
+            );
+            assert_eq!(
+                store.lookup("solved").unwrap().result.canonical_word,
+                "resolve"
+            );
+            assert!(matches!(
+                store.resolve("resolved", None).unwrap(),
+                DictionaryLookupResolution::NotFound
+            ));
+            assert_eq!(fs::read(&store.form_index_path).unwrap(), original_cache);
+            assert!(store.form_index_pending_save);
+            if publish_before_rollback {
+                store.publish_pending_form_index("test-commit");
+                assert_ne!(fs::read(&store.form_index_path).unwrap(), original_cache);
+                assert!(!store.form_index_pending_save);
+            }
+
+            recover_promoted_database(&mut store, &current_path, &backup_path, &promotion).unwrap();
+            assert_eq!(
+                store
+                    .installation_identity
+                    .as_ref()
+                    .unwrap()
+                    .artifact_sha256,
+                "old-artifact"
+            );
+            assert!(!backup_path.exists());
+            assert_eq!(
+                store.lookup("RESOLVED").unwrap().result.canonical_word,
+                "resolve"
+            );
+            assert!(matches!(
+                store.resolve("solved", None).unwrap(),
+                DictionaryLookupResolution::NotFound
+            ));
+            assert_eq!(
+                store.last_index_load.as_ref().unwrap().source,
+                if publish_before_rollback {
+                    "rebuilt"
+                } else {
+                    "cache_hit"
+                }
+            );
+            assert!(!store.form_index_path.with_extension("json.part").exists());
+        }
+        drop(store);
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn persisted_form_index_save_failure_keeps_activation_and_recovery_working() {
+        let directory = temporary_directory();
+        create_fixture(&directory);
+        let part_path = directory.join(DISTRIBUTION_DB_PART_FILE);
+        let current_path = database_path(&directory);
+        let backup_path = directory.join(DISTRIBUTION_DB_BACKUP_FILE);
+        let replacement = fixture_installation(&directory, "replacement");
+        let mut store = DictionaryStore::new(directory.clone());
+        store.set_installation_identity(Some(fixture_installation(&directory, "original")));
+        fs::create_dir(&store.form_index_path).unwrap();
+        store.open_runtime("test-old-no-cache").unwrap();
+        let metadata = stage_form_change(&directory, "solved");
         let promotion = activate_promoted_database(
             &mut store,
             &part_path,
             &current_path,
             &backup_path,
             metadata,
+            replacement,
         )
         .unwrap();
-        assert!(promotion.had_old_database);
-        assert!(current_path.is_file());
-        assert!(backup_path.is_file());
+        store.publish_pending_form_index("test-commit-save-failure");
         assert_eq!(
-            store.lookup("resolve").unwrap().result.normalized_word,
+            store.lookup("solved").unwrap().result.canonical_word,
             "resolve"
         );
-
-        recover_promoted_database(
-            &mut store,
-            &current_path,
-            &backup_path,
-            promotion.had_old_database,
-        )
-        .unwrap();
-        assert!(current_path.is_file());
-        assert!(!backup_path.exists());
+        recover_promoted_database(&mut store, &current_path, &backup_path, &promotion).unwrap();
         assert_eq!(
-            store.lookup("RESOLVE").unwrap().result.normalized_word,
+            store.lookup("resolved").unwrap().result.canonical_word,
             "resolve"
         );
+        assert_eq!(
+            store
+                .installation_identity
+                .as_ref()
+                .unwrap()
+                .artifact_sha256,
+            "original"
+        );
+        assert!(!store.form_index_path.with_extension("json.part").exists());
+        drop(store);
         remove_directory(&directory);
     }
 
@@ -1784,15 +2188,19 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
     fn smoke_real_distribution_lookup() {
         let directory = std::env::var("LILT_DICTIONARY_DIR")
             .expect("LILT_DICTIONARY_DIR must point to a dictionary cache directory");
-        let result = query(Path::new(&directory), "RESOLVE").unwrap();
+        let cache_directory = temporary_directory();
+        let mut store = DictionaryStore::new(PathBuf::from(&directory));
+        store.form_index_path = cache_directory.join(form_index::INDEX_FILE);
+        let metadata = store.open_and_validate().unwrap();
+        let result = store.lookup("RESOLVE").unwrap().result;
         assert_eq!(
             result.entry["schema_version"],
             DICTIONARY_DISTRIBUTION_SCHEMA_VERSION
         );
         assert_eq!(result.entry["headword"], "resolve");
-        let metadata =
-            validate_distribution_database(&database_path(Path::new(&directory))).unwrap();
         assert!(metadata.entry_count > 20_000);
+        drop(store);
+        remove_directory(&cache_directory);
     }
 
     #[test]
@@ -1800,7 +2208,9 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
     fn smoke_real_distribution_form_lookup_uses_memory_index() {
         let directory = std::env::var("LILT_DICTIONARY_DIR")
             .expect("LILT_DICTIONARY_DIR must point to a dictionary cache directory");
+        let cache_directory = temporary_directory();
         let mut store = DictionaryStore::new(PathBuf::from(&directory));
+        store.form_index_path = cache_directory.join(form_index::INDEX_FILE);
         store.open_runtime("smoke").unwrap();
         let started = Instant::now();
         let resolution = store.resolve("$h!ting", None).unwrap();
@@ -1813,5 +2223,61 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
         };
         assert_eq!(measurement.result.canonical_word, "$h!t");
         assert_eq!(measurement.result.match_type, DictionaryMatchType::Form);
+        drop(store);
+        remove_directory(&cache_directory);
+    }
+
+    #[test]
+    #[ignore = "requires a real distribution; writes the index only in a temporary directory"]
+    fn smoke_real_distribution_form_index_persistence() {
+        let directory = std::env::var("LILT_DICTIONARY_DIR")
+            .expect("LILT_DICTIONARY_DIR must point to a dictionary directory");
+        let cache_directory = temporary_directory();
+        let index_path = cache_directory.join(form_index::INDEX_FILE);
+        let mut first = DictionaryStore::new(PathBuf::from(&directory));
+        first.form_index_path = index_path.clone();
+        first.open_runtime("benchmark-first-build").unwrap();
+        let expected_index = first.form_index.clone();
+        let first_result = first.lookup("$h!ting").unwrap().result;
+        let first_measurement = first.last_index_load.take().unwrap();
+        assert_eq!(first_measurement.source, "rebuilt");
+        assert!(
+            index_path.is_file(),
+            "benchmark needs a successfully saved index"
+        );
+        drop(first);
+
+        let mut reopened = DictionaryStore::new(PathBuf::from(&directory));
+        reopened.form_index_path = index_path.clone();
+        reopened.open_runtime("benchmark-reopen").unwrap();
+        let second_result = reopened.lookup("$h!ting").unwrap().result;
+        let loaded = reopened.last_index_load.as_ref().unwrap();
+        assert_eq!(loaded.source, "cache_hit");
+        assert_eq!(loaded.build_elapsed, Duration::ZERO);
+        assert_eq!(reopened.form_index, expected_index);
+        assert_eq!(second_result.canonical_word, first_result.canonical_word);
+        assert_eq!(second_result.match_type, first_result.match_type);
+        assert_eq!(second_result.entry, first_result.entry);
+        assert_eq!(
+            reopened.lookup("RESOLVE").unwrap().result.match_type,
+            DictionaryMatchType::Exact
+        );
+        assert!(!index_path.with_extension("json.part").exists());
+        eprintln!(
+            "dictionary.form_index.benchmark first_source={} first_load_ms={:.3} first_build_ms={:.3} first_save_ms={:.3} reopen_source={} reopen_load_ms={:.3} reopen_build_ms={:.3} reopen_save_ms={:.3} key_count={} candidate_count={} index_bytes={} results_equal=true",
+            first_measurement.source,
+            first_measurement.load_elapsed.as_secs_f64() * 1000.0,
+            first_measurement.build_elapsed.as_secs_f64() * 1000.0,
+            first_measurement.save_elapsed.as_secs_f64() * 1000.0,
+            loaded.source,
+            loaded.load_elapsed.as_secs_f64() * 1000.0,
+            loaded.build_elapsed.as_secs_f64() * 1000.0,
+            loaded.save_elapsed.as_secs_f64() * 1000.0,
+            loaded.key_count,
+            loaded.candidate_count,
+            fs::metadata(index_path).unwrap().len(),
+        );
+        drop(reopened);
+        remove_directory(&cache_directory);
     }
 }

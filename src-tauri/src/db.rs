@@ -81,34 +81,6 @@ pub struct WordAiCacheWrite<'a> {
     pub part_of_speech: &'a str,
 }
 
-#[derive(Debug, Clone)]
-pub struct AiDictionaryCacheRecord {
-    pub normalized_word: String,
-    pub lookup_word: String,
-    pub canonical_word: String,
-    pub source_language: String,
-    pub definition_language: String,
-    pub entry_json: String,
-    pub provider_id: String,
-    pub base_url: String,
-    pub model_id: String,
-    pub thinking_effort: String,
-    pub protocol_version: String,
-    pub api_protocol: String,
-}
-
-pub struct AiDictionaryCacheWrite<'a> {
-    pub cache_key: &'a str,
-    pub normalized_word: &'a str,
-    pub lookup_word: &'a str,
-    pub canonical_word: &'a str,
-    pub source_language: &'a str,
-    pub definition_language: &'a str,
-    pub entry_json: &'a str,
-    pub provider: &'a ProviderRecord,
-    pub protocol_version: &'a str,
-}
-
 pub struct DictionaryInstallationRecord<'a> {
     pub release_tag: &'a str,
     pub artifact_sha256: &'a str,
@@ -294,28 +266,6 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_word_ai_cache_last_used_at
                 ON word_ai_cache(last_used_at ASC);
 
-            CREATE TABLE IF NOT EXISTS ai_dictionary_cache (
-                cache_key TEXT PRIMARY KEY NOT NULL,
-                normalized_word TEXT NOT NULL,
-                lookup_word TEXT NOT NULL,
-                canonical_word TEXT NOT NULL,
-                source_language TEXT NOT NULL,
-                definition_language TEXT NOT NULL,
-                entry_json TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                base_url TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                thinking_effort TEXT NOT NULL,
-                protocol_version TEXT NOT NULL,
-                api_protocol TEXT NOT NULL DEFAULT 'chat_completions',
-                created_at TEXT NOT NULL,
-                last_used_at TEXT NOT NULL,
-                byte_size INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_ai_dictionary_cache_last_used_at
-                ON ai_dictionary_cache(last_used_at ASC);
-
             CREATE INDEX IF NOT EXISTS idx_history_created_at ON translation_history(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_cache_last_used_at ON translation_cache(last_used_at ASC);
 
@@ -371,7 +321,6 @@ pub fn migrate(connection: &Connection) -> Result<(), String> {
 
     ensure_provider_columns(connection)?;
     ensure_word_ai_cache_columns(connection)?;
-    ensure_ai_dictionary_cache_api_protocol_column(connection)?;
     ensure_prompt_language_columns(connection)?;
     migrate_provider_profiles(connection)?;
 
@@ -659,19 +608,6 @@ fn ensure_word_ai_cache_columns(connection: &Connection) -> Result<(), String> {
                 )
                 .map_err(|error| format!("升级单词 AI 缓存结构失败：{error}"))?;
         }
-    }
-    Ok(())
-}
-
-fn ensure_ai_dictionary_cache_api_protocol_column(connection: &Connection) -> Result<(), String> {
-    let columns = table_columns(connection, "ai_dictionary_cache")?;
-    if !columns.iter().any(|column| column == "api_protocol") {
-        connection
-            .execute(
-                "ALTER TABLE ai_dictionary_cache ADD COLUMN api_protocol TEXT NOT NULL DEFAULT 'chat_completions'",
-                [],
-            )
-            .map_err(|error| format!("升级 AI 词典缓存结构失败：{error}"))?;
     }
     Ok(())
 }
@@ -1545,9 +1481,6 @@ pub fn clear_cache(connection: &Connection) -> Result<(), String> {
         .unchecked_transaction()
         .map_err(|error| format!("开启缓存清理事务失败：{error}"))?;
     transaction
-        .execute("DELETE FROM ai_dictionary_cache", [])
-        .map_err(|error| format!("清理 AI 词典缓存失败：{error}"))?;
-    transaction
         .execute("DELETE FROM word_ai_cache", [])
         .map_err(|error| format!("清理单词 AI 缓存失败：{error}"))?;
     transaction
@@ -1609,11 +1542,9 @@ pub fn get_cache_stats(connection: &Connection, max_bytes: i64) -> Result<CacheS
             "SELECT
                 COALESCE((SELECT SUM(byte_size) FROM translation_cache), 0)
                     + COALESCE((SELECT SUM(byte_size) FROM translation_cache_examples), 0)
-                    + COALESCE((SELECT SUM(byte_size) FROM word_ai_cache), 0)
-                    + COALESCE((SELECT SUM(byte_size) FROM ai_dictionary_cache), 0),
+                    + COALESCE((SELECT SUM(byte_size) FROM word_ai_cache), 0),
                 (SELECT COUNT(*) FROM translation_cache)
-                    + (SELECT COUNT(*) FROM word_ai_cache)
-                    + (SELECT COUNT(*) FROM ai_dictionary_cache)",
+                    + (SELECT COUNT(*) FROM word_ai_cache)",
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
@@ -1731,8 +1662,7 @@ pub fn prune_cache(connection: &Connection, max_bytes: i64) -> Result<(), String
                 "SELECT
                     COALESCE((SELECT SUM(byte_size) FROM translation_cache), 0)
                         + COALESCE((SELECT SUM(byte_size) FROM translation_cache_examples), 0)
-                        + COALESCE((SELECT SUM(byte_size) FROM word_ai_cache), 0)
-                        + COALESCE((SELECT SUM(byte_size) FROM ai_dictionary_cache), 0)",
+                        + COALESCE((SELECT SUM(byte_size) FROM word_ai_cache), 0)",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1746,8 +1676,6 @@ pub fn prune_cache(connection: &Connection, max_bytes: i64) -> Result<(), String
                     SELECT cache_key, last_used_at, 0 AS cache_kind FROM translation_cache
                     UNION ALL
                     SELECT cache_key, last_used_at, 1 AS cache_kind FROM word_ai_cache
-                    UNION ALL
-                    SELECT cache_key, last_used_at, 2 AS cache_kind FROM ai_dictionary_cache
                 )
                 ORDER BY last_used_at ASC, cache_kind ASC, cache_key ASC
                 LIMIT 1",
@@ -1766,20 +1694,13 @@ pub fn prune_cache(connection: &Connection, max_bytes: i64) -> Result<(), String
                     params![cache_key],
                 )
                 .map_err(|error| format!("清理翻译缓存失败：{error}"))?
-        } else if cache_kind == 1 {
+        } else {
             connection
                 .execute(
                     "DELETE FROM word_ai_cache WHERE cache_key = ?1",
                     params![cache_key],
                 )
                 .map_err(|error| format!("清理单词 AI 缓存失败：{error}"))?
-        } else {
-            connection
-                .execute(
-                    "DELETE FROM ai_dictionary_cache WHERE cache_key = ?1",
-                    params![cache_key],
-                )
-                .map_err(|error| format!("清理 AI 词典缓存失败：{error}"))?
         };
         if deleted == 0 {
             return Ok(());
@@ -2158,111 +2079,6 @@ pub fn save_word_ai_cache(
             ],
         )
         .map_err(|error| format!("写入单词 AI 缓存失败：{error}"))?;
-    Ok(())
-}
-
-pub fn find_ai_dictionary_cache(
-    connection: &Connection,
-    cache_key: &str,
-) -> Result<Option<AiDictionaryCacheRecord>, String> {
-    let cached = connection
-        .query_row(
-            "SELECT normalized_word, lookup_word, canonical_word,
-                    source_language, definition_language, entry_json,
-                    provider_id, base_url, model_id, thinking_effort, protocol_version, api_protocol
-             FROM ai_dictionary_cache WHERE cache_key = ?1",
-            params![cache_key],
-            |row| {
-                Ok(AiDictionaryCacheRecord {
-                    normalized_word: row.get(0)?,
-                    lookup_word: row.get(1)?,
-                    canonical_word: row.get(2)?,
-                    source_language: row.get(3)?,
-                    definition_language: row.get(4)?,
-                    entry_json: row.get(5)?,
-                    provider_id: row.get(6)?,
-                    base_url: row.get(7)?,
-                    model_id: row.get(8)?,
-                    thinking_effort: row.get(9)?,
-                    protocol_version: row.get(10)?,
-                    api_protocol: row.get(11)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|error| format!("读取 AI 词典缓存失败：{error}"))?;
-    if cached.is_some() {
-        connection
-            .execute(
-                "UPDATE ai_dictionary_cache SET last_used_at = ?1 WHERE cache_key = ?2",
-                params![Utc::now().to_rfc3339(), cache_key],
-            )
-            .map_err(|error| format!("更新 AI 词典缓存访问时间失败：{error}"))?;
-    }
-    Ok(cached)
-}
-
-pub fn delete_ai_dictionary_cache(connection: &Connection, cache_key: &str) -> Result<(), String> {
-    connection
-        .execute(
-            "DELETE FROM ai_dictionary_cache WHERE cache_key = ?1",
-            params![cache_key],
-        )
-        .map_err(|error| format!("删除 AI 词典缓存失败：{error}"))?;
-    Ok(())
-}
-
-pub fn save_ai_dictionary_cache(
-    connection: &Connection,
-    record: &AiDictionaryCacheWrite<'_>,
-) -> Result<(), String> {
-    let now = Utc::now().to_rfc3339();
-    let byte_size = (record.entry_json.len()
-        + record.normalized_word.len()
-        + record.lookup_word.len()
-        + record.canonical_word.len()) as i64;
-    connection
-        .execute(
-            "INSERT INTO ai_dictionary_cache
-                (cache_key, normalized_word, lookup_word, canonical_word,
-                 source_language, definition_language, entry_json, provider_id,
-                 base_url, model_id, thinking_effort, protocol_version, api_protocol,
-                 created_at, last_used_at, byte_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)
-             ON CONFLICT(cache_key) DO UPDATE SET
-                normalized_word = excluded.normalized_word,
-                lookup_word = excluded.lookup_word,
-                canonical_word = excluded.canonical_word,
-                source_language = excluded.source_language,
-                definition_language = excluded.definition_language,
-                entry_json = excluded.entry_json,
-                provider_id = excluded.provider_id,
-                base_url = excluded.base_url,
-                model_id = excluded.model_id,
-                thinking_effort = excluded.thinking_effort,
-                protocol_version = excluded.protocol_version,
-                api_protocol = excluded.api_protocol,
-                last_used_at = excluded.last_used_at,
-                byte_size = excluded.byte_size",
-            params![
-                record.cache_key,
-                record.normalized_word,
-                record.lookup_word,
-                record.canonical_word,
-                record.source_language,
-                record.definition_language,
-                record.entry_json,
-                &record.provider.id,
-                &record.provider.base_url,
-                &record.provider.model_id,
-                record.provider.thinking_effort.as_str(),
-                record.protocol_version,
-                record.provider.api_protocol.as_str(),
-                &now,
-                byte_size,
-            ],
-        )
-        .map_err(|error| format!("写入 AI 词典缓存失败：{error}"))?;
     Ok(())
 }
 
@@ -2761,80 +2577,45 @@ mod tests {
     }
 
     #[test]
-    fn ai_dictionary_cache_is_independent_and_updates_last_used_at() {
+    fn fresh_database_does_not_create_ai_dictionary_cache() {
         let connection = test_connection();
-        let provider = test_provider();
-        let record = AiDictionaryCacheWrite {
-            cache_key: "ai-cache-key",
-            normalized_word: "serendipity",
-            lookup_word: "Serendipity",
-            canonical_word: "serendipity",
-            source_language: "en",
-            definition_language: "zh-Hans",
-            entry_json: r#"{"headword":"serendipity"}"#,
-            provider: &provider,
-            protocol_version: "ai-dictionary-v1",
-        };
-
-        save_ai_dictionary_cache(&connection, &record)
-            .expect("AI dictionary cache write should succeed without paragraph cache");
-        connection
-            .execute(
-                "UPDATE ai_dictionary_cache SET last_used_at = '2000-01-01T00:00:00Z' WHERE cache_key = 'ai-cache-key'",
-                [],
-            )
-            .expect("fixture timestamp should update");
-        let cached = find_ai_dictionary_cache(&connection, "ai-cache-key")
-            .expect("AI dictionary cache lookup should succeed")
-            .expect("AI dictionary cache entry should exist");
-        assert_eq!(cached.normalized_word, "serendipity");
-        assert_eq!(cached.lookup_word, "Serendipity");
-        let refreshed_timestamp: String = connection
+        let exists: bool = connection
             .query_row(
-                "SELECT last_used_at FROM ai_dictionary_cache WHERE cache_key = 'ai-cache-key'",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'ai_dictionary_cache')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_ne!(refreshed_timestamp, "2000-01-01T00:00:00Z");
-        assert_eq!(get_cache_stats(&connection, 1024).unwrap().entry_count, 1);
-
-        prune_cache(&connection, 1).expect("AI dictionary cache pruning should succeed");
-        assert!(
-            find_ai_dictionary_cache(&connection, "ai-cache-key")
-                .unwrap()
-                .is_none()
-        );
+        assert!(!exists);
     }
 
     #[test]
-    fn clear_cache_removes_ai_dictionary_cache_without_touching_dictionary_history() {
+    fn shared_cache_management_preserves_legacy_ai_dictionary_and_history() {
         let connection = test_connection();
-        let provider = test_provider();
-        let record = AiDictionaryCacheWrite {
-            cache_key: "ai-cache-key",
-            normalized_word: "lucid",
-            lookup_word: "lucid",
-            canonical_word: "lucid",
-            source_language: "en",
-            definition_language: "zh-Hans",
-            entry_json: "{}",
-            provider: &provider,
-            protocol_version: "ai-dictionary-v1",
-        };
-        save_ai_dictionary_cache(&connection, &record)
-            .expect("AI dictionary cache write should succeed");
-        record_dictionary_query(&connection, "lucid", "lucid")
-            .expect("history write should succeed");
-
-        clear_cache(&connection).expect("cache clear should succeed");
-
-        assert!(
-            find_ai_dictionary_cache(&connection, "ai-cache-key")
-                .unwrap()
-                .is_none()
-        );
+        connection.execute_batch(
+            "CREATE TABLE ai_dictionary_cache (cache_key TEXT PRIMARY KEY, byte_size INTEGER, entry_json TEXT);
+             INSERT INTO ai_dictionary_cache VALUES ('legacy-ai', 10000000, 'preserve until migrated');",
+        ).unwrap();
+        migrate(&connection).expect("older AI tables need no schema changes");
+        record_dictionary_query(&connection, "lucid", "Lucid").unwrap();
+        let stats = get_cache_stats(&connection, 1).unwrap();
+        assert_eq!(stats.usage_bytes, 0);
+        assert_eq!(stats.entry_count, 0);
+        prune_cache(&connection, 0).unwrap();
+        clear_cache(&connection).unwrap();
+        let entry: String = connection
+            .query_row(
+                "SELECT entry_json FROM ai_dictionary_cache WHERE cache_key = 'legacy-ai'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(entry, "preserve until migrated");
         assert_eq!(list_dictionary_history(&connection, 10).unwrap().len(), 1);
+        assert_eq!(
+            table_columns(&connection, "ai_dictionary_cache").unwrap(),
+            vec!["cache_key", "byte_size", "entry_json"]
+        );
     }
 
     #[test]
