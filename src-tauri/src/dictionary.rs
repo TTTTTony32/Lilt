@@ -503,12 +503,7 @@ pub fn deferred_state(
         return state;
     }
 
-    if installation.is_some() {
-        state.status = DictionaryStatus::Ready;
-    } else {
-        state.status = DictionaryStatus::Failed;
-        state.error = Some("词典尚未完成运行时初始化".to_string());
-    }
+    state.status = DictionaryStatus::Preparing;
     state
 }
 
@@ -1662,6 +1657,25 @@ b8031d1b2e39019a520bcea3a7b84d5dff7df026f13310e5d8dc0eb044df07f3  *distribution.
         let state = store.state(None);
         assert_eq!(state.status, DictionaryStatus::Ready);
         assert_eq!(state.entry_count, Some(1));
+        remove_directory(&directory);
+    }
+
+    #[test]
+    fn deferred_state_reports_preparing_until_runtime_is_open() {
+        let directory = temporary_directory();
+        assert_eq!(
+            deferred_state(&directory, None).status,
+            DictionaryStatus::NotInstalled
+        );
+        create_fixture(&directory);
+        assert_eq!(
+            deferred_state(&directory, None).status,
+            DictionaryStatus::Preparing
+        );
+
+        let mut store = DictionaryStore::new(directory.clone());
+        store.open_runtime("startup").unwrap();
+        assert_eq!(store.state(None).status, DictionaryStatus::Ready);
         remove_directory(&directory);
     }
 

@@ -154,6 +154,10 @@ h1 { margin: 0; color: #303a32; font-family: Georgia, "Songti SC", serif; font-s
 .page-title-meta-link:focus-visible { outline: 2px solid rgba(113, 145, 120, .42); outline-offset: 2px; }
 .dictionary-page-heading .page-title-line { align-items: center; }
 .dictionary-page-heading .page-title-meta-link { transform: translateY(1px); }
+.dictionary-version-meta { align-items: center; gap: 6px; }
+.dictionary-status-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #a9aaa2; }
+.dictionary-status-dot.is-preparing { background: #d99945; }
+.dictionary-status-dot.is-ready { background: #6f9a72; }
 .pdf-page-title-line { align-items: center; gap: 10px; }
 .pdf-engine-status-bubble { min-height: 24px; padding: 4px 9px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #e2b8b0; border-radius: 999px; color: #a25e53; background: #fbefec; font-size: 10px; line-height: 1; white-space: nowrap; }
 .pdf-engine-status-bubble-button { appearance: none; cursor: pointer; transition: color var(--motion-fast-duration) var(--motion-ease), border-color var(--motion-fast-duration) var(--motion-ease), background-color var(--motion-fast-duration) var(--motion-ease), box-shadow var(--motion-fast-duration) var(--motion-ease); }
@@ -478,6 +482,8 @@ input:focus, .form-grid select:focus { border-color: #9fb1a0; box-shadow: 0 0 0 
 .dictionary-search-card { position: relative; z-index: 1; margin-bottom: 18px; padding: 12px; border: 1px solid #deddd5; border-radius: 10px; background: #fbfaf7; box-shadow: var(--shadow-surface); }
 .dictionary-heading-actions { display: flex; align-items: center; gap: 9px; }
 .dictionary-search-form { display: flex; align-items: center; gap: 10px; }
+.dictionary-search-card.is-disabled { border-color: #e0e0dc; background: #f0f0ed; box-shadow: none; }
+.dictionary-search-card.is-disabled .dictionary-input-wrap { color: #b3b5b0; }
 .dictionary-input-wrap { position: relative; flex: 1; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: #8b958b; }
 .dictionary-input-wrap input { height: 42px; padding: 0; border: 0; background: transparent; font-size: 14px; }
 .dictionary-input-wrap input:focus { border: 0; box-shadow: none; }

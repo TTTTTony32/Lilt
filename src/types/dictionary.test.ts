@@ -136,6 +136,10 @@ describe("dictionary contracts", () => {
     })).toBeNull();
   });
 
+  it("accepts the preparing dictionary state", () => {
+    expect(decodeDictionaryState({ ...state, status: "preparing" })).toEqual({ ...state, status: "preparing" });
+  });
+
   it("rejects malformed state and update payloads", () => {
     expect(decodeDictionaryState({ ...state, downloadedBytes: "large" })).toBeNull();
     expect(decodeDictionaryUpdateEvent("dictionary_download_progress", {

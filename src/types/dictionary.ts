@@ -1,4 +1,4 @@
-export type DictionaryStatus = "notInstalled" | "ready" | "updating" | "failed";
+export type DictionaryStatus = "notInstalled" | "preparing" | "ready" | "updating" | "failed";
 
 export type MeaningPriority = "core" | "common" | "rare";
 
@@ -378,7 +378,7 @@ export function decodeDictionaryState(value: unknown): DictionaryState | null {
   const cacheSizeBytes = nonNegativeNumber(value.cacheSizeBytes);
   const error = nullableStringValue(value.error);
   if (
-    (status !== "notInstalled" && status !== "ready" && status !== "updating" && status !== "failed") ||
+    (status !== "notInstalled" && status !== "preparing" && status !== "ready" && status !== "updating" && status !== "failed") ||
     installedRelease === undefined ||
     artifactSha256 === undefined ||
     (entryCount === null && value.entryCount !== null) ||

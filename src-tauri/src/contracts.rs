@@ -427,6 +427,7 @@ pub struct AppSnapshot {
 #[serde(rename_all = "camelCase")]
 pub enum DictionaryStatus {
     NotInstalled,
+    Preparing,
     Ready,
     Updating,
     Failed,

@@ -991,6 +991,29 @@ function App() {
   }, [refreshSnapshot]);
 
   useEffect(() => {
+    if (!snapshotReady || snapshot.dictionary.status !== "preparing") return;
+    let disposed = false;
+    let timer: number | undefined;
+    const checkDictionary = async () => {
+      try {
+        const dictionary = await invokeCommand<AppSnapshot["dictionary"]>("get_dictionary_state");
+        if (disposed) return;
+        setSnapshot((current) => current.dictionary.status === "preparing"
+          ? { ...current, dictionary }
+          : current);
+      } catch {
+        // Retry while startup is still preparing the dictionary.
+      }
+      if (!disposed) timer = window.setTimeout(() => void checkDictionary(), 500);
+    };
+    void checkDictionary();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [snapshotReady, snapshot.dictionary.status]);
+
+  useEffect(() => {
     void invokeCommand("set_selection_language", {
       sourceLanguage,
       targetLanguage,

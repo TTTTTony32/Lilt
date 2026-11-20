@@ -118,6 +118,9 @@ export default function DictionaryView({
   const querySequence = useRef(0);
   const downloadPromptShownRef = useRef(false);
   const updating = state.status === "updating" || progress !== null;
+  const preparing = !snapshotReady || state.status === "preparing";
+  const searchable = snapshotReady && state.status === "ready" && !updating;
+  const statusLabel = preparing ? "词典正在准备" : updating ? "词典正在更新" : state.status === "ready" ? "词典准备完成" : state.status === "failed" ? "词典不可用" : "词典未安装";
 
   useEffect(() => {
     if (!snapshotReady || updating || state.status !== "notInstalled" || downloadPromptShownRef.current) return;
@@ -140,7 +143,7 @@ export default function DictionaryView({
       setQueryError("请输入要查询的词形。");
       return;
     }
-    if (state.status !== "ready") {
+    if (!searchable) {
       setQuerying(false);
       setQueryError(state.error ?? "词典尚未安装，请先下载词典。");
       return;
@@ -198,14 +201,14 @@ export default function DictionaryView({
     } finally {
       if (sequence === querySequence.current) setQuerying(false);
     }
-  }, [onHistoryChanged, onWordExampleRequested, state.error, state.status, targetLanguage]);
+  }, [onHistoryChanged, onWordExampleRequested, searchable, state.error, targetLanguage]);
 
   useEffect(() => {
-    if (!openRequest || openRequest.requestId === lastOpenRequestId.current) return;
+    if (!openRequest || preparing || openRequest.requestId === lastOpenRequestId.current) return;
     lastOpenRequestId.current = openRequest.requestId;
     setWord(openRequest.lookupWord);
     void query(openRequest.lookupWord, openRequest.canonicalWord).finally(onOpenRequestHandled);
-  }, [onOpenRequestHandled, openRequest, query]);
+  }, [onOpenRequestHandled, openRequest, preparing, query]);
 
   const isFavorite = lookupMeta !== null && personalDictionary.some(
     (item) => item.normalizedCanonicalWord === lookupMeta.canonicalWord.trim().toLowerCase(),
@@ -248,7 +251,8 @@ export default function DictionaryView({
           <div className="page-title-line">
             <h1>词典</h1>
             <button id="dictionary-version-entry" className="page-title-meta page-title-meta-link dictionary-version-meta" type="button" onClick={onOpenDictionaryAbout} aria-label="查看关于中的词典版本">
-              <span>版本 {state.installedRelease ?? "未安装"}</span>
+              <span className={`dictionary-status-dot ${preparing || updating ? "is-preparing" : searchable ? "is-ready" : ""}`} title={statusLabel} aria-label={statusLabel} role="img" />
+              <span>版本 {state.installedRelease ?? (snapshotReady ? "未安装" : "读取中")}</span>
             </button>
           </div>
         </div>
@@ -260,7 +264,7 @@ export default function DictionaryView({
         </div>
       </div>
 
-      <div className="dictionary-search-card">
+      <div className={`dictionary-search-card${searchable ? "" : " is-disabled"}`}>
         <form className="dictionary-search-form" onSubmit={(event) => { event.preventDefault(); void query(word); }}>
           <div className="dictionary-input-wrap">
             <Search size={17} aria-hidden="true" />
@@ -270,17 +274,20 @@ export default function DictionaryView({
               placeholder="输入单词、词组或短语"
               aria-label="词典查询"
               autoComplete="off"
-              disabled={updating}
+              disabled={!searchable}
             />
           </div>
-          <button className="primary-button" type="submit" disabled={querying || updating || state.status !== "ready"}>
+          <button className="primary-button" type="submit" disabled={querying || !searchable}>
             {querying ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
             查询
           </button>
         </form>
       </div>
 
-      {state.status !== "ready" && (
+      {preparing && (
+        <div className="dictionary-empty-state" role="status" aria-live="polite">词典正在准备</div>
+      )}
+      {snapshotReady && state.status !== "ready" && !preparing && (
         <DictionaryInstallCard
           state={state}
           progress={progress}
@@ -288,14 +295,14 @@ export default function DictionaryView({
         />
       )}
 
-      {queryError && <p className="error-message dictionary-message">{queryError}</p>}
-      {querying && !queryError && (
+      {!preparing && queryError && <p className="error-message dictionary-message">{queryError}</p>}
+      {!preparing && querying && !queryError && (
         <div className="dictionary-empty-state dictionary-querying-state" role="status" aria-live="polite">
           <LoaderCircle className="spin" size={15} />
           <span>本地未找到，正在请求 AI</span>
         </div>
       )}
-      {candidates.length > 0 && (
+      {!preparing && candidates.length > 0 && (
         <div className="dictionary-candidate-card">
           <strong>这个词形对应多个词头，请选择</strong>
           <div>
